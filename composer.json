@@ -1,0 +1,31 @@
+{
+  "name": "matrixcreate/craft-copydeck-importer",
+  "description": "Import Copydeck JSON exports into Craft CMS 5 entries as drafts.",
+  "type": "craft-plugin",
+  "version": "1.0.0",
+  "license": "MIT",
+  "keywords": ["craft", "cms", "plugin", "import", "copydeck", "content"],
+  "authors": [
+    {
+      "name": "Matrix Create",
+      "homepage": "https://matrixcreate.com/"
+    }
+  ],
+  "require": {
+    "php": ">=8.2",
+    "craftcms/cms": "^5.0.0"
+  },
+  "autoload": {
+    "psr-4": {
+      "matrixcreate\\copydeckimporter\\": "src/"
+    }
+  },
+  "extra": {
+    "name": "Copydeck Importer",
+    "handle": "copydeck-importer",
+    "description": "Import Copydeck JSON exports into Craft CMS 5 entries as drafts.",
+    "developer": "Matrix Create",
+    "developerUrl": "https://matrixcreate.com/",
+    "class": "matrixcreate\\copydeckimporter\\CopydeckImporter"
+  }
+}
