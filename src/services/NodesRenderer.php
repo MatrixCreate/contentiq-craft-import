@@ -10,8 +10,11 @@ use yii\base\Component;
  * Supported node types:
  *   - heading (level 1–4) → <h1>–<h4>
  *   - paragraph           → <p>
- *   - ordered_list        → <ol><li>
- *   - unordered_list      → <ul><li>
+ *   - list                → <ul> or <ol> (based on 'ordered' flag)
+ *   - ordered_list        → <ol><li> (legacy alias)
+ *   - unordered_list      → <ul><li> (legacy alias)
+ *   - faq_items           → <details><summary>…</summary><p>…</p></details>
+ *   - ctaButton           → <p><a href="url">label</a></p>
  *
  * No external dependencies. This service is stateless — all methods are pure.
  *
@@ -69,6 +72,7 @@ class NodesRenderer extends Component
             'ordered_list'   => $this->_renderList($node, 'ol'),
             'unordered_list' => $this->_renderList($node, 'ul'),
             'faq_items'      => $this->_renderFaqItems($node),
+            'ctaButton'      => $this->_renderCtaButton($node),
             default          => '',
         };
     }
@@ -158,5 +162,26 @@ class NodesRenderer extends Component
         }
 
         return $html;
+    }
+
+    /**
+     * Renders a ctaButton node as an anchor link.
+     *
+     * URL is always empty from Copydeck (set by editors in the CMS after import).
+     * Wraps in <p> so it occupies its own line in CKEditor output.
+     *
+     * @param array $node
+     * @return string
+     */
+    private function _renderCtaButton(array $node): string
+    {
+        $label = htmlspecialchars($node['label'] ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $url   = htmlspecialchars($node['url'] ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+
+        if ($label === '') {
+            return '';
+        }
+
+        return "<p><a href=\"{$url}\">{$label}</a></p>";
     }
 }

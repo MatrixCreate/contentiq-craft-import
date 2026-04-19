@@ -185,6 +185,7 @@ Critical requirements:
 | `ordered_list` | `<ol>` (legacy alias) |
 | `unordered_list` | `<ul>` (legacy alias) |
 | `faq_items` | `<details><summary>question</summary><p>answer</p></details>` |
+| `ctaButton` | `<p><a href="url">label</a></p>` (URL always empty from Copydeck — editors set it in CMS) |
 
 ---
 
