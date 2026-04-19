@@ -46,6 +46,8 @@
 
 - **Price List richer intro** — `nodes` (intro content) now contains headings, paragraphs, lists, and CTA buttons — all rendered via `NodesRenderer` into `richText`. No mapping change needed; `NodesRenderer` handles the new node types automatically.
 
+- **Price List post-table buttons** — `postNodes` (CTA buttons after the table) mapped to `actionButtons` Matrix via new `buttonNodes` handler in `MatrixBuilder`. Handler filters `ctaButton` nodes from a `ContentNode[]` array and builds the same Hyper `actionButton` Matrix structure used by other blocks.
+
 - **Asset filename sanitization** — `Assets::prepareAssetName()` applied before idempotency lookup. Prevents mismatch when Craft sanitizes filenames on save (spaces → hyphens).
 
 - **Image downloads via Guzzle** — Replaced `file_get_contents()` with `Craft::createGuzzleClient()` for SSL compatibility with dev domains.

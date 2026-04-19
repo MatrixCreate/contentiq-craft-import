@@ -427,6 +427,7 @@ class MatrixBuilder extends Component
             'tableHtml'       => $this->_handleTableHtml($craftHandle, $value),
             'hyperButton'     => $this->_handleHyperButton($craftHandle, $value),
             'faqNodes'        => $this->_handleFaqNodes($craftHandle, $value),
+            'buttonNodes'     => $this->_handleButtonNodes($craftHandle, $value),
             default           => $this->_handlePassThrough($craftHandle, $value),
         };
     }
@@ -728,5 +729,54 @@ class MatrixBuilder extends Component
         }
 
         return $result;
+    }
+
+    /**
+     * Converts a Copydeck postNodes array (ContentNode[]) to an actionButtons Matrix field value.
+     *
+     * Only ctaButton nodes are processed — all other node types are silently ignored.
+     * Nodes with no label and no URL are skipped.
+     *
+     * @param string $handle Craft Matrix field handle (e.g. 'actionButtons').
+     * @param mixed  $value  ContentNode[] from the Copydeck postNodes array.
+     * @return array<string, array>
+     */
+    private function _handleButtonNodes(string $handle, mixed $value): array
+    {
+        if (!is_array($value) || empty($value)) {
+            return [$handle => []];
+        }
+
+        $actionButtonsData = [];
+        $btnCounter = 0;
+
+        foreach ($value as $node) {
+            if (($node['type'] ?? '') !== 'ctaButton') {
+                continue;
+            }
+
+            $label = (string)($node['label'] ?? '');
+            $url   = (string)($node['url'] ?? '');
+
+            if ($label === '' && $url === '') {
+                continue;
+            }
+
+            $actionButtonsData['new' . (++$btnCounter)] = [
+                'type'   => 'actionButton',
+                'fields' => [
+                    'actionButton' => [
+                        [
+                            'type'      => 'verbb\\hyper\\links\\Url',
+                            'handle'    => 'default-verbb-hyper-links-url',
+                            'linkValue' => $url,
+                            'linkText'  => $label,
+                        ],
+                    ],
+                ],
+            ];
+        }
+
+        return [$handle => $actionButtonsData];
     }
 }

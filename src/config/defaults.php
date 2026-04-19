@@ -29,6 +29,8 @@
  *   'textMediaLayout' → Copydeck layout string → mapped to Craft dropdown value
  *   'tableHtml'       → rows array [{isHeader, cells}] → HTML <table> string
  *   'hyperButton'     → {label, url} object → Hyper link field array
+ *   'buttonNodes'     → ContentNode[] → filters ctaButton nodes → actionButtons Matrix entries
+ *   'faqNodes'        → ContentNode[] → splits at faq_items → richText/extraRichText/_faqItems
  *
  * Blocks NOT in this mapping (handled or skipped elsewhere):
  *   hero          — imported separately into entry.hero Matrix field (not contentBlocks)
@@ -111,8 +113,9 @@ return [
     'price_list' => [
         'outerType'   => 'priceList',
         'outerFields' => [
-            'nodes' => ['richText',  'nodes'],     // heading nodes → CKEditor HTML
-            'rows'  => ['priceList', 'tableHtml'], // rows array → HTML <table>
+            'nodes'     => ['richText',      'nodes'],       // intro nodes → CKEditor HTML
+            'rows'      => ['priceList',     'tableHtml'],   // rows array → HTML <table>
+            'postNodes' => ['actionButtons', 'buttonNodes'], // ctaButton nodes after table → actionButtons Matrix
         ],
         'innerMatrix' => null,
     ],
