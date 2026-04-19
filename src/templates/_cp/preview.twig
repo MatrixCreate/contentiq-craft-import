@@ -1,0 +1,125 @@
+{% extends '_layouts/cp' %}
+
+{% set title = 'Preview Import' %}
+
+{% set crumbs = [
+    { label: 'Copydeck', url: url('copydeck-importer') },
+    { label: 'Upload', url: url('copydeck-importer/upload') },
+] %}
+
+{% block content %}
+
+    {# Summary bar #}
+    <div class="copydeck-summary" style="margin-bottom:24px; padding:16px; background:var(--gray-050); border-radius:8px; display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
+        <div>
+            <strong>{{ isBatch ? 'Batch' : 'Single page' }}</strong>
+            &middot;
+            {{ pageCount }} {{ pageCount == 1 ? 'page' : 'pages' }}
+        </div>
+        {% if exportDate %}
+            <div class="light">Exported {{ exportDate }}</div>
+        {% endif %}
+        <div style="margin-left:auto; display:flex; gap:12px;">
+            {% if createCount %}
+                <span class="status green"></span> {{ createCount }} will be created
+            {% endif %}
+            {% if updateCount %}
+                <span class="status blue"></span> {{ updateCount }} will be updated
+            {% endif %}
+            {% if totalWarnings %}
+                <span class="status orange"></span> {{ totalWarnings }} {{ totalWarnings == 1 ? 'warning' : 'warnings' }}
+            {% endif %}
+        </div>
+    </div>
+
+    {# Pages table #}
+    <table class="data fullwidth">
+        <thead>
+            <tr>
+                <th>{{ 'Title'|t('copydeck-importer') }}</th>
+                <th>{{ 'Slug'|t('copydeck-importer') }}</th>
+                <th>{{ 'Blocks'|t('copydeck-importer') }}</th>
+                <th>{{ 'Images'|t('copydeck-importer') }}</th>
+                <th>{{ 'Action'|t('copydeck-importer') }}</th>
+                <th>{{ 'Warnings'|t('copydeck-importer') }}</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for page in pages %}
+                <tr>
+                    <td>
+                        <strong>{{ page.slug }}</strong>
+                    </td>
+                    <td><code>{{ page.slug }}</code></td>
+                    <td>
+                        {% set blockTypes = [] %}
+                        {% for block in page.blocks %}
+                            {% if not block.skipped %}
+                                {% set blockTypes = blockTypes|merge([block.type]) %}
+                            {% endif %}
+                        {% endfor %}
+                        {{ blockTypes|join(', ') }}
+                    </td>
+                    <td>{{ page.images|length }}</td>
+                    <td>
+                        {% if page.willCreate %}
+                            <span class="status green"></span> Create
+                        {% else %}
+                            <span class="status blue"></span> Update
+                            {% if page.existingId %}
+                                <a href="{{ cpUrl('entries/pages/' ~ page.existingId) }}" class="go small" target="_blank" title="View in CP"></a>
+                            {% endif %}
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if page.warnings|length %}
+                            {% for warning in page.warnings %}
+                                <div class="warning">{{ warning }}</div>
+                            {% endfor %}
+                        {% else %}
+                            <span class="light">&mdash;</span>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    {# Skipped blocks detail #}
+    {% set skippedBlocks = [] %}
+    {% for page in pages %}
+        {% for block in page.blocks %}
+            {% if block.skipped %}
+                {% set skippedBlocks = skippedBlocks|merge([{ page: page.slug, type: block.type }]) %}
+            {% endif %}
+        {% endfor %}
+    {% endfor %}
+
+    {% if skippedBlocks|length %}
+        <div style="margin-top:24px;">
+            <h3>{{ 'Skipped Blocks'|t('copydeck-importer') }}</h3>
+            <ul>
+                {% for skipped in skippedBlocks %}
+                    <li class="light">{{ skipped.page }}: <code>{{ skipped.type }}</code> (unknown block type)</li>
+                {% endfor %}
+            </ul>
+        </div>
+    {% endif %}
+
+    {# Actions #}
+    <div style="margin-top:24px; display:flex; gap:12px;">
+        <a href="{{ url('copydeck-importer/upload') }}" class="btn">
+            {{ 'Back'|t('copydeck-importer') }}
+        </a>
+
+        <form method="post">
+            {{ csrfInput() }}
+            {{ actionInput('copydeck-importer/cp/run-import') }}
+            <input type="hidden" name="tempFilename" value="{{ tempFilename }}">
+            <button type="submit" class="btn submit">
+                {{ 'Import'|t('copydeck-importer') }}
+            </button>
+        </form>
+    </div>
+
+{% endblock %}

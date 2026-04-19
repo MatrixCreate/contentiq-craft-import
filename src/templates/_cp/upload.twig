@@ -1,0 +1,193 @@
+{% extends '_layouts/cp' %}
+
+{% set title = 'Upload Export' %}
+
+{% set crumbs = [
+    { label: 'Copydeck', url: url('copydeck-importer') },
+] %}
+
+{% block content %}
+
+    <form method="post" enctype="multipart/form-data">
+        {{ csrfInput() }}
+        {{ actionInput('copydeck-importer/cp/preview') }}
+
+        <div id="copydeck-upload-zone" class="copydeck-upload-zone">
+            <div class="copydeck-upload-inner">
+                <div class="copydeck-upload-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                        <polyline points="17 8 12 3 7 8"/>
+                        <line x1="12" y1="3" x2="12" y2="15"/>
+                    </svg>
+                </div>
+                <p class="copydeck-upload-text">
+                    {{ 'Drag and drop your Copydeck JSON export here'|t('copydeck-importer') }}
+                </p>
+                <p class="copydeck-upload-or light">{{ 'or'|t('copydeck-importer') }}</p>
+                <label class="btn submit" for="jsonFileInput">
+                    {{ 'Choose File'|t('copydeck-importer') }}
+                </label>
+                <input type="file"
+                       id="jsonFileInput"
+                       name="jsonFile"
+                       accept=".json,application/json"
+                       style="display:none">
+                <div class="copydeck-upload-filename" style="display:none">
+                    <span class="copydeck-filename"></span>
+                </div>
+            </div>
+        </div>
+
+        <div id="copydeck-upload-error" class="copydeck-upload-error" style="display:none">
+            <p class="error"></p>
+        </div>
+
+        <div id="copydeck-upload-actions" style="display:none; margin-top:24px;">
+            <button type="submit" class="btn submit">
+                {{ 'Preview Import'|t('copydeck-importer') }}
+            </button>
+        </div>
+    </form>
+
+    <style>
+        .copydeck-upload-zone {
+            border: 2px dashed var(--gray-300);
+            border-radius: 8px;
+            padding: 48px 24px;
+            text-align: center;
+            transition: border-color 0.2s, background-color 0.2s;
+            cursor: pointer;
+            background-color: var(--gray-050);
+        }
+        .copydeck-upload-inner {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px;
+        }
+        .copydeck-upload-zone.dragover {
+            border-color: var(--blue-500);
+            background-color: var(--blue-050);
+        }
+        .copydeck-upload-zone.has-file {
+            border-color: var(--green-500);
+            background-color: var(--green-050);
+        }
+        .copydeck-upload-icon {
+            color: var(--gray-400);
+            margin-bottom: 8px;
+        }
+        .copydeck-upload-text {
+            margin: 0;
+            color: var(--gray-600);
+        }
+        .copydeck-upload-or {
+            margin: 0;
+        }
+        .copydeck-upload-inner .btn {
+            margin-top: 8px;
+        }
+        .copydeck-upload-filename {
+            margin-top: 12px;
+            font-weight: 600;
+            color: var(--green-700);
+        }
+        .copydeck-upload-error p {
+            margin-top: 12px;
+        }
+    </style>
+
+    <script>
+        (function() {
+            const zone = document.getElementById('copydeck-upload-zone');
+            const input = document.getElementById('jsonFileInput');
+            const actions = document.getElementById('copydeck-upload-actions');
+            const errorBox = document.getElementById('copydeck-upload-error');
+            const filenameEl = zone.querySelector('.copydeck-filename');
+            const filenameBox = zone.querySelector('.copydeck-upload-filename');
+            const uploadText = zone.querySelector('.copydeck-upload-text');
+            const uploadOr = zone.querySelector('.copydeck-upload-or');
+            const uploadIcon = zone.querySelector('.copydeck-upload-icon');
+            const uploadBtn = zone.querySelector('.btn');
+
+            zone.addEventListener('click', function(e) {
+                if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'LABEL') {
+                    input.click();
+                }
+            });
+
+            zone.addEventListener('dragover', function(e) {
+                e.preventDefault();
+                zone.classList.add('dragover');
+            });
+
+            zone.addEventListener('dragleave', function() {
+                zone.classList.remove('dragover');
+            });
+
+            zone.addEventListener('drop', function(e) {
+                e.preventDefault();
+                zone.classList.remove('dragover');
+                if (e.dataTransfer.files.length) {
+                    input.files = e.dataTransfer.files;
+                    handleFile(e.dataTransfer.files[0]);
+                }
+            });
+
+            input.addEventListener('change', function() {
+                if (input.files.length) {
+                    handleFile(input.files[0]);
+                }
+            });
+
+            function handleFile(file) {
+                errorBox.style.display = 'none';
+
+                if (!file.name.endsWith('.json')) {
+                    showError('Please upload a JSON file.');
+                    return;
+                }
+
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    try {
+                        const data = JSON.parse(e.target.result);
+                        // Validate it looks like a Copydeck export.
+                        const hasBlocks = Array.isArray(data.blocks);
+                        const hasPages = Array.isArray(data.pages);
+                        if (!hasBlocks && !hasPages) {
+                            showError('This JSON file does not appear to be a Copydeck export. Expected "blocks" or "pages" at the top level.');
+                            return;
+                        }
+                        // Valid — show filename and submit button.
+                        filenameEl.textContent = file.name;
+                        filenameBox.style.display = '';
+                        uploadText.style.display = 'none';
+                        uploadOr.style.display = 'none';
+                        uploadIcon.style.display = 'none';
+                        uploadBtn.textContent = 'Change File';
+                        zone.classList.add('has-file');
+                        actions.style.display = '';
+                    } catch (err) {
+                        showError('Invalid JSON: ' + err.message);
+                    }
+                };
+                reader.readAsText(file);
+            }
+
+            function showError(msg) {
+                errorBox.querySelector('p').textContent = msg;
+                errorBox.style.display = '';
+                actions.style.display = 'none';
+                zone.classList.remove('has-file');
+                filenameBox.style.display = 'none';
+                uploadText.style.display = '';
+                uploadOr.style.display = '';
+                uploadIcon.style.display = '';
+                uploadBtn.textContent = '{{ 'Choose File'|t('copydeck-importer') }}';
+            }
+        })();
+    </script>
+
+{% endblock %}

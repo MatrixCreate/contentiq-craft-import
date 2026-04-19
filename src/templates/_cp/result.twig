@@ -1,0 +1,143 @@
+{% extends '_layouts/cp' %}
+
+{% set title = 'Import Result' %}
+
+{% set crumbs = [
+    { label: 'Copydeck', url: url('copydeck-importer') },
+] %}
+
+{% block actionButton %}
+    <a class="btn submit add icon" href="{{ url('copydeck-importer/upload') }}">
+        {{ 'New Import'|t('copydeck-importer') }}
+    </a>
+{% endblock %}
+
+{% block content %}
+
+    {# Overall status banner #}
+    {% if run.status == 'success' %}
+        <div class="pane" style="background:var(--green-050); border:1px solid var(--green-300); margin-bottom:24px; padding:16px; border-radius:8px;">
+            <span class="status green"></span>
+            <strong>{{ 'Import completed successfully'|t('copydeck-importer') }}</strong>
+        </div>
+    {% elseif run.status == 'warnings' %}
+        <div class="pane" style="background:var(--yellow-050); border:1px solid var(--yellow-300); margin-bottom:24px; padding:16px; border-radius:8px;">
+            <span class="status orange"></span>
+            <strong>{{ 'Import completed with warnings'|t('copydeck-importer') }}</strong>
+        </div>
+    {% else %}
+        <div class="pane" style="background:var(--red-050); border:1px solid var(--red-300); margin-bottom:24px; padding:16px; border-radius:8px;">
+            <span class="status red"></span>
+            <strong>{{ 'Import completed with errors'|t('copydeck-importer') }}</strong>
+        </div>
+    {% endif %}
+
+    {# Summary stats #}
+    <div style="display:flex; gap:24px; margin-bottom:24px;">
+        <div class="pane" style="padding:16px; flex:1; text-align:center;">
+            <div style="font-size:24px; font-weight:bold;">{{ run.pageCount }}</div>
+            <div class="light">{{ run.pageCount == 1 ? 'Page' : 'Pages' }}</div>
+        </div>
+        <div class="pane" style="padding:16px; flex:1; text-align:center;">
+            <div style="font-size:24px; font-weight:bold;">{{ run.imageCount }}</div>
+            <div class="light">Images</div>
+        </div>
+        <div class="pane" style="padding:16px; flex:1; text-align:center;">
+            <div style="font-size:24px; font-weight:bold;">{{ run.type == 'batch' ? 'Batch' : 'Single' }}</div>
+            <div class="light">Import type</div>
+        </div>
+        <div class="pane" style="padding:16px; flex:1; text-align:center;">
+            <div style="font-size:24px; font-weight:bold;">{{ run.dateCreated|date('H:i') }}</div>
+            <div class="light">{{ run.dateCreated|date('j M Y') }}</div>
+        </div>
+    </div>
+
+    {# Per-page results #}
+    {% if run.result is iterable %}
+        <h2>{{ 'Pages'|t('copydeck-importer') }}</h2>
+        <table class="data fullwidth">
+            <thead>
+                <tr>
+                    <th>{{ 'Slug'|t('copydeck-importer') }}</th>
+                    <th>{{ 'Status'|t('copydeck-importer') }}</th>
+                    <th>{{ 'Blocks'|t('copydeck-importer') }}</th>
+                    <th>{{ 'Images'|t('copydeck-importer') }}</th>
+                    <th>{{ 'SEO'|t('copydeck-importer') }}</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for page in run.result %}
+                    <tr>
+                        <td><strong>{{ page.slug ?? '?' }}</strong></td>
+                        <td>
+                            {% if page.success ?? false %}
+                                <span class="status green"></span> OK
+                            {% else %}
+                                <span class="status red"></span> Failed
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% set blockCount = 0 %}
+                            {% for block in page.blocks ?? [] %}
+                                {% if not block.skipped %}
+                                    {% set blockCount = blockCount + 1 %}
+                                {% endif %}
+                            {% endfor %}
+                            {{ blockCount }}
+                        </td>
+                        <td>{{ (page.images ?? [])|length }}</td>
+                        <td>{{ page.seoFieldCount ?? 0 }} fields</td>
+                        <td class="thin">
+                            {% if page.entryId ?? null %}
+                                <a href="{{ cpUrl('entries/pages/' ~ page.entryId) }}" class="btn small" target="_blank">
+                                    {{ 'View Entry'|t('copydeck-importer') }}
+                                </a>
+                            {% endif %}
+                        </td>
+                    </tr>
+
+                    {# Warnings and errors for this page #}
+                    {% if (page.warnings ?? [])|length or page.error ?? null %}
+                        <tr>
+                            <td colspan="6" style="padding-left:32px;">
+                                {% if page.error ?? null %}
+                                    <div class="error">{{ page.error }}</div>
+                                {% endif %}
+                                {% for warning in page.warnings ?? [] %}
+                                    <div class="warning">{{ warning }}</div>
+                                {% endfor %}
+                            </td>
+                        </tr>
+                    {% endif %}
+                {% endfor %}
+            </tbody>
+        </table>
+
+        {# Block detail per page #}
+        {% for page in run.result %}
+            {% if (page.blocks ?? [])|length %}
+                <div style="margin-top:24px;">
+                    <h3>{{ page.slug ?? '?' }} &mdash; Blocks</h3>
+                    <ul>
+                        {% for block in page.blocks %}
+                            <li>
+                                {% if block.skipped %}
+                                    <span class="status orange"></span>
+                                    <code>{{ block.type }}</code> &mdash; skipped
+                                {% else %}
+                                    <span class="status green"></span>
+                                    <code>{{ block.type }}</code>
+                                    {% if block.fields|length %}
+                                        &mdash; {{ block.fields|join(', ') }}
+                                    {% endif %}
+                                {% endif %}
+                            </li>
+                        {% endfor %}
+                    </ul>
+                </div>
+            {% endif %}
+        {% endfor %}
+    {% endif %}
+
+{% endblock %}
