@@ -449,6 +449,9 @@ class CpController extends Controller
             return $this->asJson(['success' => false, 'error' => 'elementId and slug are required.']);
         }
 
+        // Look up entry title for user-facing messages.
+        $entryTitle = Entry::find()->id($elementId)->status(null)->select(['title'])->scalar() ?: $slug;
+
         $settings = CopydeckImporter::$plugin->getSettings();
 
         if ($settings->copydeckUrl === '' || $settings->apiKey === '' || $settings->projectSlug === '') {
@@ -488,7 +491,7 @@ class CpController extends Controller
                 : 0;
 
             $message = $status === 404
-                ? "Page '{$slug}' is not ready for export in Copydeck."
+                ? "'{$entryTitle}' is not ready for export in Copydeck."
                 : 'API request failed: ' . $e->getMessage();
 
             return $this->asJson(['success' => false, 'error' => $message]);
@@ -529,6 +532,67 @@ class CpController extends Controller
         $syncedAt = Craft::$app->getFormatter()->asDatetime($now, 'short');
 
         return $this->asJson(['success' => true, 'syncedAt' => $syncedAt, 'notes' => $notes]);
+    }
+
+    /**
+     * Toggles the lock state for an entry's Copydeck sync record.
+     *
+     * Locked entries are skipped during batch/full syncs.
+     *
+     * @return Response
+     * @throws BadRequestHttpException
+     */
+    public function actionToggleLock(): Response
+    {
+        $this->requirePostRequest();
+        $this->requireAcceptsJson();
+
+        $request   = Craft::$app->getRequest();
+        $elementId = (int)$request->getRequiredBodyParam('elementId');
+        $locked    = (bool)$request->getRequiredBodyParam('locked');
+
+        $db = Craft::$app->getDb();
+
+        $exists = (new Query())
+            ->from('{{%copydeck_entry_syncs}}')
+            ->where(['element_id' => $elementId])
+            ->exists();
+
+        if ($exists) {
+            $db->createCommand()
+                ->update('{{%copydeck_entry_syncs}}', ['locked' => $locked], ['element_id' => $elementId])
+                ->execute();
+        } else {
+            $db->createCommand()
+                ->insert('{{%copydeck_entry_syncs}}', [
+                    'element_id' => $elementId,
+                    'locked'     => $locked,
+                    'synced_at'  => (new \DateTime())->format('Y-m-d H:i:s'),
+                ])
+                ->execute();
+        }
+
+        return $this->asJson(['success' => true, 'locked' => $locked]);
+    }
+
+    /**
+     * Clears the notes for an entry's Copydeck sync record.
+     *
+     * @return Response
+     * @throws BadRequestHttpException
+     */
+    public function actionClearNotes(): Response
+    {
+        $this->requirePostRequest();
+        $this->requireAcceptsJson();
+
+        $elementId = (int)Craft::$app->getRequest()->getRequiredBodyParam('elementId');
+
+        Craft::$app->getDb()->createCommand()
+            ->update('{{%copydeck_entry_syncs}}', ['notes' => ''], ['element_id' => $elementId])
+            ->execute();
+
+        return $this->asJson(['success' => true]);
     }
 
     // Private Methods

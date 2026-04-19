@@ -155,6 +155,8 @@ class CopydeckImporter extends Plugin
                 $event->rules['copydeck-importer/sync/status']             = 'copydeck-importer/cp/sync-status';
                 $event->rules['copydeck-importer/sync/result/<runId:\d+>'] = 'copydeck-importer/cp/sync-result';
                 $event->rules['copydeck-importer/widget-sync']             = 'copydeck-importer/cp/widget-sync';
+                $event->rules['copydeck-importer/clear-notes']           = 'copydeck-importer/cp/clear-notes';
+                $event->rules['copydeck-importer/toggle-lock']           = 'copydeck-importer/cp/toggle-lock';
             },
         );
     }
@@ -185,15 +187,16 @@ class CopydeckImporter extends Plugin
                 $elementId = $entry->id;
                 $slug      = $entry->slug;
 
-                // Last successful sync timestamp and notes for this entry.
+                // Last successful sync timestamp, notes, and lock state.
                 $syncRow = (new Query())
-                    ->select(['synced_at', 'notes'])
+                    ->select(['synced_at', 'notes', 'locked'])
                     ->from('{{%copydeck_entry_syncs}}')
                     ->where(['element_id' => $elementId])
                     ->one();
 
                 $syncedAt = $syncRow['synced_at'] ?? null;
                 $notes    = $syncRow['notes'] ?? '';
+                $locked   = (bool)($syncRow['locked'] ?? false);
 
                 if ($syncedAt) {
                     $syncedAtFormatted = Craft::$app->getFormatter()->asDatetime($syncedAt, 'short');
@@ -201,14 +204,33 @@ class CopydeckImporter extends Plugin
                     $syncedAtFormatted = Craft::t('copydeck-importer', 'Never');
                 }
 
-                $widgetId  = 'copydeck-sync-' . $elementId;
-                $actionUrl = UrlHelper::actionUrl('copydeck-importer/cp/widget-sync');
-                $csrfToken = Craft::$app->getRequest()->getCsrfToken();
+                $widgetId       = 'copydeck-sync-' . $elementId;
+                $actionUrl      = UrlHelper::actionUrl('copydeck-importer/cp/widget-sync');
+                $clearNotesUrl  = UrlHelper::actionUrl('copydeck-importer/cp/clear-notes');
+                $toggleLockUrl  = UrlHelper::actionUrl('copydeck-importer/cp/toggle-lock');
+                $csrfToken      = Craft::$app->getRequest()->getCsrfToken();
 
                 // fieldset + legend matches Craft's native sidebar section style.
                 $html  = '<fieldset>';
                 $html .= '<legend class="h6">' . Html::encode('COPYDECK') . '</legend>';
                 $html .= Html::beginTag('div', ['id' => $widgetId, 'class' => 'meta']);
+
+                // Locked row — CSS-only lightswitch toggle.
+                $lockedChecked = $locked ? ' checked' : '';
+                $html .= '<style>
+                  .copydeck-switch { position:relative; display:inline-block; width:34px; height:20px; }
+                  .copydeck-switch input { opacity:0; width:0; height:0; }
+                  .copydeck-switch .copydeck-slider { position:absolute; inset:0; background:var(--gray-300); border-radius:10px; transition:background 0.2s; cursor:pointer; }
+                  .copydeck-switch .copydeck-slider::before { content:""; position:absolute; width:14px; height:14px; left:3px; bottom:3px; background:#fff; border-radius:50%; transition:transform 0.2s; }
+                  .copydeck-switch input:checked + .copydeck-slider { background:var(--bg-enabled); box-shadow:inset 0 0px 0px 1px rgba(0,0,0,0.125); }
+                  .copydeck-switch input:checked + .copydeck-slider::before { transform:translateX(14px); }
+                  #' . $widgetId . '-btn:disabled { opacity:0.35; pointer-events:none; }
+                </style>';
+                $html .= '<div class="field">';
+                $html .= '<div class="heading"><label for="' . $widgetId . '-lock">' . Html::encode(Craft::t('copydeck-importer', 'Locked')) . '</label></div>';
+                $html .= '<div class="input ltr">';
+                $html .= '<label class="copydeck-switch"><input type="checkbox" id="' . $widgetId . '-lock"' . $lockedChecked . '><span class="copydeck-slider"></span></label>';
+                $html .= '</div></div>';
 
                 // Status row — label + Sync button.
                 $html .= '<div class="field">';
@@ -217,10 +239,11 @@ class CopydeckImporter extends Plugin
                 $html .= Html::button(
                     Html::encode(Craft::t('copydeck-importer', 'Sync')),
                     [
-                        'type'  => 'button',
-                        'class' => 'btn small',
-                        'id'    => $widgetId . '-btn',
-                        'data'  => [
+                        'type'     => 'button',
+                        'class'    => 'btn small',
+                        'id'       => $widgetId . '-btn',
+                        'disabled' => $locked,
+                        'data'     => [
                             'element-id' => $elementId,
                             'slug'       => $slug,
                         ],
@@ -241,11 +264,21 @@ class CopydeckImporter extends Plugin
                 // Notes row.
                 $html .= '<div class="field">';
                 $html .= '<div class="heading" style="align-items:start;"><label>' . Html::encode(Craft::t('copydeck-importer', 'Notes')) . '</label></div>';
-                $html .= '<div class="input ltr">';
+                $html .= '<div class="input ltr" style="flex-direction:column; align-items:flex-start; gap:0.75rem;">';
                 $html .= Html::tag('div', $notes !== '' ? nl2br(Html::encode($notes)) : Html::tag('span', Html::encode('None'), ['class' => 'light']), [
                     'id'    => $widgetId . '-notes',
                     'style' => 'font-size:12px; line-height:1.5;',
                 ]);
+                if ($notes !== '') {
+                    $html .= Html::button(
+                        Html::encode(Craft::t('copydeck-importer', 'Clear')),
+                        [
+                            'type'  => 'button',
+                            'class' => 'btn small',
+                            'id'    => $widgetId . '-clear',
+                        ],
+                    );
+                }
                 $html .= '</div></div>';
 
                 $html .= Html::endTag('div'); // .meta
@@ -259,6 +292,28 @@ class CopydeckImporter extends Plugin
     var ts    = document.getElementById('{$widgetId}-timestamp');
     var notes = document.getElementById('{$widgetId}-notes');
     if (!btn) return;
+
+    // Lock toggle.
+    var lockEl = document.getElementById('{$widgetId}-lock');
+    if (lockEl) {
+        lockEl.addEventListener('change', function() {
+            var isLocked = lockEl.checked;
+            btn.disabled = isLocked;
+
+            fetch('{$toggleLockUrl}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept':        'application/json',
+                    'X-CSRF-Token':  '{$csrfToken}',
+                },
+                body: JSON.stringify({
+                    elementId: {$elementId},
+                    locked: isLocked,
+                }),
+            });
+        });
+    }
 
     btn.addEventListener('click', function() {
         btn.textContent = 'Syncing\u2026';
@@ -305,14 +360,14 @@ class CopydeckImporter extends Plugin
                 }
                 setTimeout(function() {
                     btn.textContent = 'Sync';
-                    btn.disabled = false;
+                    btn.disabled = lockEl && lockEl.checked;
                 }, 3000);
             } else {
                 btn.textContent = 'Error';
                 Craft.cp.displayError(data.error || 'Sync failed');
                 setTimeout(function() {
                     btn.textContent = 'Sync';
-                    btn.disabled = false;
+                    btn.disabled = lockEl && lockEl.checked;
                 }, 3000);
             }
         })
@@ -320,10 +375,33 @@ class CopydeckImporter extends Plugin
             btn.textContent = 'Error';
             setTimeout(function() {
                 btn.textContent = 'Sync';
-                btn.disabled = false;
+                btn.disabled = lockEl && lockEl.checked;
             }, 3000);
         });
     });
+
+    // Clear notes button.
+    var clearBtn = document.getElementById('{$widgetId}-clear');
+    if (clearBtn) {
+        clearBtn.addEventListener('click', function() {
+            fetch('{$clearNotesUrl}', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept':        'application/json',
+                    'X-CSRF-Token':  '{$csrfToken}',
+                },
+                body: JSON.stringify({ elementId: {$elementId} }),
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.success && notes) {
+                    notes.innerHTML = '<span class="light">None</span>';
+                    clearBtn.remove();
+                }
+            });
+        });
+    }
 })();
 JS;
 

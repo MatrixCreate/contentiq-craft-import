@@ -551,6 +551,44 @@ Render via a Twig template. The view's `renderTemplate()` call returns HTML that
 
 ---
 
+## Sidebar widget features
+
+The COPYDECK sidebar widget (`EVENT_DEFINE_SIDEBAR_HTML`) provides:
+
+### Lock toggle
+
+CSS-only lightswitch (no Craft JS dependency — Craft's lightswitch requires DOM-ready initialization which doesn't work for dynamically injected sidebar HTML). Stored in `copydeck_entry_syncs.locked`.
+
+- Disables the Sync button when on
+- Batch syncs (SyncJob) skip locked entries with a "Skipped — entry is locked" warning
+- Persists immediately on toggle via `copydeck-importer/cp/toggle-lock` endpoint
+
+### Block notes
+
+Collected from `block.notes` (top-level key on each block in the API response) during import. Formatted as "Block Type\nnote text" separated by blank lines. Stored in `copydeck_entry_syncs.notes`.
+
+- Displayed below "Synced at" in the sidebar
+- "Clear" button removes notes via `copydeck-importer/cp/clear-notes` endpoint
+- Updates in place on sync without page reload
+
+### Reload link
+
+After a successful sync, a "Reload" link appears next to the timestamp so the editor can refresh to see updated content in the entry fields.
+
+### Error messages
+
+User-facing error messages use the entry title (not slug) for readability. The widget looks up the title from the element ID.
+
+---
+
+## Sync report tree
+
+The sync report template builds a proper hierarchical tree from `parentSlug` relationships using a recursive Twig macro (`_self.pageRows`). This ensures pages are grouped under their actual parents regardless of the order they appear in the API response.
+
+Each page result includes `parentSlug` (from `document.parent_slug` in the API) alongside `depth` and `title`. The template builds `slugToPage` and `childrenOf` lookup maps, then renders root pages first, recursing into children at each level.
+
+---
+
 ## DB is the source of truth
 
 If the CP appears to show empty fields, query the DB:

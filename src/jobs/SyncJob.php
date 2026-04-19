@@ -3,6 +3,7 @@
 namespace matrixcreate\copydeckimporter\jobs;
 
 use Craft;
+use craft\db\Query;
 use craft\helpers\Json;
 use craft\helpers\StringHelper;
 use craft\i18n\Translation;
@@ -74,6 +75,45 @@ class SyncJob extends BaseJob
         foreach ($pages as $i => $pageData) {
             $this->setProgress($queue, $i / $total, "Importing page " . ($i + 1) . " of {$total}");
 
+            // Skip locked entries.
+            $pageSlug = $pageData['document']['slug'] ?? '';
+            $existingEntry = \craft\elements\Entry::find()
+                ->section($sectionHandle)
+                ->slug($pageSlug)
+                ->status(null)
+                ->one();
+
+            if ($existingEntry !== null) {
+                $isLocked = (new Query())
+                    ->select(['locked'])
+                    ->from('{{%copydeck_entry_syncs}}')
+                    ->where(['element_id' => $existingEntry->id])
+                    ->scalar();
+
+                if ($isLocked) {
+                    $pageResults[] = [
+                        'success' => true,
+                        'slug' => $pageSlug,
+                        'entryId' => $existingEntry->id,
+                        'entryFound' => true,
+                        'title' => $pageData['document']['title'] ?? $pageSlug,
+                        'depth' => $pageData['document']['depth'] ?? 0,
+                        'parentSlug' => $pageData['document']['parent_slug'] ?? null,
+                        'blocks' => [],
+                        'images' => [],
+                        'blockNotes' => '',
+                        'seoFieldCount' => 0,
+                        'warnings' => ['Skipped — entry is locked.'],
+                        'error' => null,
+                    ];
+
+                    if ($pageSlug !== '') {
+                        $slugToEntryId[$pageSlug] = $existingEntry->id;
+                    }
+                    continue;
+                }
+            }
+
             $result = $importService->importPage($pageData, dryRun: false);
 
             // Handle hierarchy: always re-apply parent and position on every run.
@@ -122,8 +162,9 @@ class SyncJob extends BaseJob
             }
 
             // Attach hierarchy metadata for the report template.
-            $result['title'] = $pageData['document']['title'] ?? $slug;
-            $result['depth'] = $pageData['document']['depth'] ?? 0;
+            $result['title']      = $pageData['document']['title'] ?? $slug;
+            $result['depth']      = $pageData['document']['depth'] ?? 0;
+            $result['parentSlug'] = $pageData['document']['parent_slug'] ?? null;
 
             $pageResults[] = $result;
             $totalImages  += count($result['images'] ?? []);

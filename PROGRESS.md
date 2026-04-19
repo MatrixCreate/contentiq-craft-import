@@ -68,6 +68,18 @@
 
 - **Hyper linkClass** — Action buttons in hero and CTA entries now include `linkClass: 'btn btn-primary'`.
 
+- **Hero mobile image** — `mobile_image` field from Copydeck hero blocks imported to `mobileImage` asset field on the hero ContentBlock.
+
+- **Sidebar lock toggle** — CSS-only lightswitch in the COPYDECK sidebar. Locked entries are skipped during batch syncs (SyncJob) with a warning. Stored in `copydeck_entry_syncs.locked`. Migration `m250419_000001_add_locked_to_entry_syncs`.
+
+- **Sidebar clear notes** — "Clear" button removes block notes via `copydeck-importer/cp/clear-notes` endpoint.
+
+- **Entry title in error messages** — Widget sync errors use the entry title instead of slug for readability.
+
+- **Sync report tree fix** — Report now builds a proper hierarchical tree from `parentSlug` using a recursive Twig macro instead of relying on depth + list order. Pages are grouped under their actual parents regardless of API order.
+
+- **Sync button disabled state** — Dimmed at 35% opacity when locked. Re-enable checks lock state to prevent race condition if locked during an in-flight sync.
+
 ### Craft Starter template changes
 
 - **Hero template rewrite** — `hero.twig` rewritten as single file (~100 lines) reading from `entry.hero` ContentBlock. Deleted `hero.slide.twig` and `hero.slide.image.twig`. Removed carousel CSS. Parent image inheritance and global fallback preserved.
