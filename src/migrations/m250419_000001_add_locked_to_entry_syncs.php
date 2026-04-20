@@ -14,6 +14,10 @@ class m250419_000001_add_locked_to_entry_syncs extends Migration
 {
     public function safeUp(): bool
     {
+        if ($this->db->columnExists('{{%copydeck_entry_syncs}}', 'locked')) {
+            return true;
+        }
+
         $this->addColumn('{{%copydeck_entry_syncs}}', 'locked', $this->boolean()->notNull()->defaultValue(false)->after('element_id'));
 
         return true;

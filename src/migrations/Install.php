@@ -21,6 +21,7 @@ class Install extends Migration
     public function safeUp(): bool
     {
         $this->_createImportRunsTable();
+        $this->_createEntrySyncsTable();
 
         return true;
     }
@@ -30,6 +31,7 @@ class Install extends Migration
      */
     public function safeDown(): bool
     {
+        $this->dropTableIfExists('{{%copydeck_entry_syncs}}');
         $this->dropTableIfExists('{{%copydeck_import_runs}}');
 
         return true;
@@ -69,5 +71,30 @@ class Install extends Migration
         );
 
         $this->createIndex(null, '{{%copydeck_import_runs}}', ['dateCreated']);
+    }
+
+    /**
+     * Creates the copydeck_entry_syncs table for per-entry sync tracking.
+     *
+     * @return void
+     */
+    private function _createEntrySyncsTable(): void
+    {
+        $this->createTable('{{%copydeck_entry_syncs}}', [
+            'element_id' => $this->integer()->notNull(),
+            'locked'     => $this->boolean()->notNull()->defaultValue(false),
+            'synced_at'  => $this->dateTime()->notNull(),
+            'notes'      => $this->text(),
+            'PRIMARY KEY([[element_id]])',
+        ]);
+
+        $this->addForeignKey(
+            null,
+            '{{%copydeck_entry_syncs}}',
+            'element_id',
+            '{{%elements}}',
+            'id',
+            'CASCADE',
+        );
     }
 }

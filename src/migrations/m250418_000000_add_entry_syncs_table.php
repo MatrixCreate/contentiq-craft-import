@@ -20,6 +20,10 @@ class m250418_000000_add_entry_syncs_table extends Migration
      */
     public function safeUp(): bool
     {
+        if ($this->db->tableExists('{{%copydeck_entry_syncs}}')) {
+            return true;
+        }
+
         $this->createTable('{{%copydeck_entry_syncs}}', [
             'element_id' => $this->integer()->notNull(),
             'synced_at'  => $this->dateTime()->notNull(),

@@ -17,6 +17,10 @@ class m250419_000000_add_notes_to_entry_syncs extends Migration
 {
     public function safeUp(): bool
     {
+        if ($this->db->columnExists('{{%copydeck_entry_syncs}}', 'notes')) {
+            return true;
+        }
+
         $this->addColumn('{{%copydeck_entry_syncs}}', 'notes', $this->text()->after('synced_at'));
 
         return true;
