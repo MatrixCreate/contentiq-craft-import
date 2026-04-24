@@ -6,16 +6,27 @@ Read this at the start of every session. Do not re-discover these patterns.
 
 ## Local development workflow
 
-The plugin is published to Packagist as `matrixcreate/copydeck-craft-import`. Craft Starter installs it from there by default. To develop the plugin and a Craft project simultaneously, use these shell aliases (defined in `~/.zshrc`) from the Craft project root:
+The plugin is published to Packagist as `matrixcreate/copydeck-craft-import`. Craft Starter installs it from there by default. To develop the plugin and a Craft project simultaneously, run these from the Craft project root:
 
+**Switch to local symlinked copy:**
 ```bash
-cdp-local       # Switch to local symlinked copy of this repo
-cdp-packagist   # Revert to Packagist before committing
+composer config repositories.copydeck '{"type":"path","url":"../copydeck-craft-import","options":{"symlink":true}}' && composer require matrixcreate/copydeck-craft-import:@dev
 ```
 
-`cdp-local` adds a Composer path repository pointing to `../copydeck-craft-import` (relative to the Craft project) and re-requires at `@dev`. The plugin directory is symlinked into `vendor/` — edits here are instantly live.
+**Revert to Packagist:**
+```bash
+git checkout composer.json composer.lock && composer install
+```
 
-**Never commit the path repo.** `git checkout composer.json composer.lock` in `cdp-packagist` ensures it's always cleaned up before pushing. Staging deployments run `composer install` from the clean committed state and pull from Packagist.
+Optional shell aliases for `~/.zshrc`:
+```bash
+alias cdp-local='composer config repositories.copydeck "{\"type\":\"path\",\"url\":\"../copydeck-craft-import\",\"options\":{\"symlink\":true}}" && composer require matrixcreate/copydeck-craft-import:@dev'
+alias cdp-packagist='git checkout composer.json composer.lock && composer install'
+```
+
+The path repo with `symlink: true` means edits in this plugin directory are instantly live in the Craft project.
+
+**Never commit the path repo.** The `git checkout` in the revert step ensures `composer.json` and `composer.lock` are always clean before pushing. Staging deployments run `composer install` from the clean committed state and pull from Packagist.
 
 ---
 
