@@ -25,7 +25,7 @@
     }
   },
   "extra": {
-    "name": "Copydeck Importer",
+    "name": "Copydeck",
     "handle": "copydeck-importer",
     "description": "Import Copydeck content exports into Craft CMS 5 entries.",
     "developer": "Matrix Create",
