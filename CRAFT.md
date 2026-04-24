@@ -4,6 +4,21 @@ Read this at the start of every session. Do not re-discover these patterns.
 
 ---
 
+## Local development workflow
+
+The plugin is published to Packagist as `matrixcreate/copydeck-craft-import`. Craft Starter installs it from there by default. To develop the plugin and a Craft project simultaneously, use these shell aliases (defined in `~/.zshrc`) from the Craft project root:
+
+```bash
+cdp-local       # Switch to local symlinked copy of this repo
+cdp-packagist   # Revert to Packagist before committing
+```
+
+`cdp-local` adds a Composer path repository pointing to `../copydeck-craft-import` (relative to the Craft project) and re-requires at `@dev`. The plugin directory is symlinked into `vendor/` — edits here are instantly live.
+
+**Never commit the path repo.** `git checkout composer.json composer.lock` in `cdp-packagist` ensures it's always cleaned up before pushing. Staging deployments run `composer install` from the clean committed state and pull from Packagist.
+
+---
+
 ## Do not use drafts
 
 The importer saves **directly to the canonical entry** — no draft creation. Early versions used `getDrafts()->createDraft()`, which caused images to appear in the DB but be invisible in the CP (the CP shows the canonical, not the draft). This wasted days of debugging.
