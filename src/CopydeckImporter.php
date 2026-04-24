@@ -102,8 +102,9 @@ class CopydeckImporter extends Plugin
     {
         $item = parent::getCpNavItem();
 
-        $item['label'] = 'Copydeck';
-        $item['icon']  = 'copyright';
+        $item['label']   = 'Copydeck';
+        $item['svgIcon'] = file_get_contents(__DIR__ . '/icon.svg');
+        unset($item['icon']);
 
         return $item;
     }
