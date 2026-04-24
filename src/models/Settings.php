@@ -3,6 +3,7 @@
 namespace matrixcreate\copydeckimporter\models;
 
 use craft\base\Model;
+use craft\helpers\App;
 
 /**
  * Plugin settings model.
@@ -36,7 +37,23 @@ class Settings extends Model
     {
         return [
             [['copydeckUrl', 'apiKey'], 'string'],
-            ['copydeckUrl', 'url', 'defaultScheme' => 'https', 'when' => fn() => $this->copydeckUrl !== ''],
+            ['copydeckUrl', 'validateParsedUrl'],
         ];
+    }
+
+    /**
+     * Validates copydeckUrl after resolving any environment variable alias.
+     */
+    public function validateParsedUrl(): void
+    {
+        $resolved = App::parseEnv($this->copydeckUrl);
+
+        if ($resolved === '') {
+            return;
+        }
+
+        if (filter_var($resolved, FILTER_VALIDATE_URL) === false) {
+            $this->addError('copydeckUrl', 'Copydeck URL is not a valid URL.');
+        }
     }
 }
