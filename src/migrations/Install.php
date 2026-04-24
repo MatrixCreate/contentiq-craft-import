@@ -83,7 +83,7 @@ class Install extends Migration
         $this->createTable('{{%copydeck_entry_syncs}}', [
             'element_id' => $this->integer()->notNull(),
             'locked'     => $this->boolean()->notNull()->defaultValue(false),
-            'synced_at'  => $this->dateTime()->notNull(),
+            'synced_at'  => $this->dateTime()->null(),
             'notes'      => $this->text(),
             'PRIMARY KEY([[element_id]])',
         ]);
