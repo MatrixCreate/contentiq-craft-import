@@ -19,8 +19,8 @@ class CopydeckApiService extends Component
     /**
      * Fetches the full project export from the Copydeck API.
      *
-     * Calls GET {copydeckUrl}/api/v1/projects/{projectSlug}/export
-     * with Bearer token authentication.
+     * Calls GET {copydeckUrl}/api/v1/export with Bearer token authentication.
+     * The project is identified server-side from the API key.
      *
      * @return array{success: bool, data: array|null, error: string|null}
      */
