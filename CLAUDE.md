@@ -294,7 +294,7 @@ protected function settingsHtml(): ?string
 $settings = ContentIQImporter::$plugin->getSettings();
 ```
 
-Template uses `autosuggestField` with `suggestEnvVars: true` so editors can reference environment variables (e.g. `$COPYDECK_API_KEY`). Project config stores the env var reference, not the secret. At runtime, always resolve with `App::parseEnv()` before using the value:
+Template uses `autosuggestField` with `suggestEnvVars: true` so editors can reference environment variables (e.g. `$CONTENTIQ_API_KEY`). Project config stores the env var reference, not the secret. At runtime, always resolve with `App::parseEnv()` before using the value:
 
 ```php
 use craft\helpers\App;
@@ -603,7 +603,7 @@ Craft's native sidebar sections use `<fieldset>` + `<legend class="h6">` wrappin
 
 ```html
 <fieldset>
-    <legend class="h6">COPYDECK</legend>
+    <legend class="h6">CONTENTIQ</legend>
     <div class="meta">
         <div class="field">
             <div class="heading"><label>Status</label></div>
@@ -627,7 +627,7 @@ Render via a Twig template. The view's `renderTemplate()` call returns HTML that
 
 ## Sidebar widget features
 
-The COPYDECK sidebar widget (`EVENT_DEFINE_SIDEBAR_HTML`) provides:
+The CONTENTIQ sidebar widget (`EVENT_DEFINE_SIDEBAR_HTML`) provides:
 
 ### Lock toggle
 

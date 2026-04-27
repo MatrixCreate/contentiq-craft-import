@@ -3,12 +3,12 @@
 {% set title = 'Sync Report' %}
 
 {% set crumbs = [
-    { label: 'Copydeck', url: url('copydeck-importer') },
+    { label: 'ContentIQ', url: url('contentiq-importer') },
 ] %}
 
 {% block actionButton %}
-    <a class="btn submit" href="{{ url('copydeck-importer/sync') }}">
-        {{ 'Sync Again'|t('copydeck-importer') }}
+    <a class="btn submit" href="{{ url('contentiq-importer/sync') }}">
+        {{ 'Sync Again'|t('contentiq-importer') }}
     </a>
 {% endblock %}
 
@@ -55,11 +55,11 @@
                         {% set pageEntry = craft.entries.id(page.entryId).status(null).one() %}
                         {% if pageEntry %}
                             <a href="{{ pageEntry.cpEditUrl }}" class="btn small" title="Edit in CP">
-                                {{ 'Edit'|t('copydeck-importer') }}
+                                {{ 'Edit'|t('contentiq-importer') }}
                             </a>
                             {% if pageEntry.url %}
                                 <a href="{{ pageEntry.url }}" class="btn small" target="_blank" title="View on site">
-                                    {{ 'View'|t('copydeck-importer') }}
+                                    {{ 'View'|t('contentiq-importer') }}
                                 </a>
                             {% endif %}
                         {% endif %}
@@ -83,17 +83,17 @@
     {% if run.status == 'success' %}
         <div class="pane" style="background:var(--green-050); border:1px solid var(--green-300); margin-bottom:24px; padding:16px; border-radius:8px;">
             <span class="status green"></span>
-            <strong>{{ 'Sync completed successfully'|t('copydeck-importer') }}</strong>
+            <strong>{{ 'Sync completed successfully'|t('contentiq-importer') }}</strong>
         </div>
     {% elseif run.status == 'warnings' %}
         <div class="pane" style="background:var(--yellow-050); border:1px solid var(--yellow-300); margin-bottom:24px; padding:16px; border-radius:8px;">
             <span class="status orange"></span>
-            <strong>{{ 'Sync completed with warnings'|t('copydeck-importer') }}</strong>
+            <strong>{{ 'Sync completed with warnings'|t('contentiq-importer') }}</strong>
         </div>
     {% else %}
         <div class="pane" style="background:var(--red-050); border:1px solid var(--red-300); margin-bottom:24px; padding:16px; border-radius:8px;">
             <span class="status red"></span>
-            <strong>{{ 'Sync completed with errors'|t('copydeck-importer') }}</strong>
+            <strong>{{ 'Sync completed with errors'|t('contentiq-importer') }}</strong>
         </div>
     {% endif %}
 
@@ -144,9 +144,9 @@
         <table class="data fullwidth">
             <thead>
                 <tr>
-                    <th>{{ 'Page'|t('copydeck-importer') }}</th>
-                    <th>{{ 'Slug'|t('copydeck-importer') }}</th>
-                    <th>{{ 'Status'|t('copydeck-importer') }}</th>
+                    <th>{{ 'Page'|t('contentiq-importer') }}</th>
+                    <th>{{ 'Slug'|t('contentiq-importer') }}</th>
+                    <th>{{ 'Status'|t('contentiq-importer') }}</th>
                     <th></th>
                 </tr>
             </thead>

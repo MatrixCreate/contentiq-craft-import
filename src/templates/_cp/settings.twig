@@ -1,19 +1,19 @@
 {% import '_includes/forms' as forms %}
 
 {{ forms.autosuggestField({
-    label: 'Copydeck URL'|t('copydeck-importer'),
-    instructions: 'The base URL of your Copydeck instance.'|t('copydeck-importer'),
-    id: 'copydeckUrl',
-    name: 'copydeckUrl',
-    value: settings.copydeckUrl,
+    label: 'ContentIQ URL'|t('contentiq-importer'),
+    instructions: 'The base URL of your ContentIQ instance.'|t('contentiq-importer'),
+    id: 'contentiqUrl',
+    name: 'contentiqUrl',
+    value: settings.contentiqUrl,
     suggestEnvVars: true,
     suggestAliases: true,
-    errors: settings.getErrors('copydeckUrl'),
+    errors: settings.getErrors('contentiqUrl'),
 }) }}
 
 {{ forms.autosuggestField({
-    label: 'API Key'|t('copydeck-importer'),
-    instructions: 'The project API key from Copydeck settings.'|t('copydeck-importer'),
+    label: 'API Key'|t('contentiq-importer'),
+    instructions: 'The project API key from ContentIQ settings.'|t('contentiq-importer'),
     id: 'apiKey',
     name: 'apiKey',
     value: settings.apiKey,

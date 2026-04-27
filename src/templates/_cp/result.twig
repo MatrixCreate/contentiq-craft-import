@@ -3,12 +3,12 @@
 {% set title = 'Import Result' %}
 
 {% set crumbs = [
-    { label: 'Copydeck', url: url('copydeck-importer') },
+    { label: 'ContentIQ', url: url('contentiq-importer') },
 ] %}
 
 {% block actionButton %}
-    <a class="btn submit add icon" href="{{ url('copydeck-importer/upload') }}">
-        {{ 'New Import'|t('copydeck-importer') }}
+    <a class="btn submit add icon" href="{{ url('contentiq-importer/upload') }}">
+        {{ 'New Import'|t('contentiq-importer') }}
     </a>
 {% endblock %}
 
@@ -18,17 +18,17 @@
     {% if run.status == 'success' %}
         <div class="pane" style="background:var(--green-050); border:1px solid var(--green-300); margin-bottom:24px; padding:16px; border-radius:8px;">
             <span class="status green"></span>
-            <strong>{{ 'Import completed successfully'|t('copydeck-importer') }}</strong>
+            <strong>{{ 'Import completed successfully'|t('contentiq-importer') }}</strong>
         </div>
     {% elseif run.status == 'warnings' %}
         <div class="pane" style="background:var(--yellow-050); border:1px solid var(--yellow-300); margin-bottom:24px; padding:16px; border-radius:8px;">
             <span class="status orange"></span>
-            <strong>{{ 'Import completed with warnings'|t('copydeck-importer') }}</strong>
+            <strong>{{ 'Import completed with warnings'|t('contentiq-importer') }}</strong>
         </div>
     {% else %}
         <div class="pane" style="background:var(--red-050); border:1px solid var(--red-300); margin-bottom:24px; padding:16px; border-radius:8px;">
             <span class="status red"></span>
-            <strong>{{ 'Import completed with errors'|t('copydeck-importer') }}</strong>
+            <strong>{{ 'Import completed with errors'|t('contentiq-importer') }}</strong>
         </div>
     {% endif %}
 
@@ -54,15 +54,15 @@
 
     {# Per-page results #}
     {% if run.result is iterable %}
-        <h2>{{ 'Pages'|t('copydeck-importer') }}</h2>
+        <h2>{{ 'Pages'|t('contentiq-importer') }}</h2>
         <table class="data fullwidth">
             <thead>
                 <tr>
-                    <th>{{ 'Slug'|t('copydeck-importer') }}</th>
-                    <th>{{ 'Status'|t('copydeck-importer') }}</th>
-                    <th>{{ 'Blocks'|t('copydeck-importer') }}</th>
-                    <th>{{ 'Images'|t('copydeck-importer') }}</th>
-                    <th>{{ 'SEO'|t('copydeck-importer') }}</th>
+                    <th>{{ 'Slug'|t('contentiq-importer') }}</th>
+                    <th>{{ 'Status'|t('contentiq-importer') }}</th>
+                    <th>{{ 'Blocks'|t('contentiq-importer') }}</th>
+                    <th>{{ 'Images'|t('contentiq-importer') }}</th>
+                    <th>{{ 'SEO'|t('contentiq-importer') }}</th>
                     <th></th>
                 </tr>
             </thead>
@@ -91,7 +91,7 @@
                         <td class="thin">
                             {% if page.entryId ?? null %}
                                 <a href="{{ cpUrl('entries/pages/' ~ page.entryId) }}" class="btn small" target="_blank">
-                                    {{ 'View Entry'|t('copydeck-importer') }}
+                                    {{ 'View Entry'|t('contentiq-importer') }}
                                 </a>
                             {% endif %}
                         </td>

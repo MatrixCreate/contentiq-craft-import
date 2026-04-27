@@ -1,26 +1,26 @@
 {% extends '_layouts/cp' %}
 
-{% set title = 'Copydeck' %}
+{% set title = 'ContentIQ' %}
 
 {% block content %}
 
     <div style="max-width:680px; margin:40px auto;">
 
-        {# Primary action — Sync from Copydeck #}
+        {# Primary action — Sync from ContentIQ #}
         <div class="pane" style="padding:32px; margin-bottom:24px; border-radius:8px;">
             <h2 style="margin-top:0; margin-bottom:8px; font-size:20px;">
-                {{ 'Sync from Copydeck'|t('copydeck-importer') }}
+                {{ 'Sync from ContentIQ'|t('contentiq-importer') }}
             </h2>
             <p class="light" style="margin-bottom:20px;">
-                {{ 'Pull the latest content directly via API.'|t('copydeck-importer') }}
+                {{ 'Pull the latest content directly via API.'|t('contentiq-importer') }}
             </p>
             {% if apiConfigured %}
-                <a href="{{ url('copydeck-importer/sync') }}" class="btn submit">
-                    {{ 'Sync Now'|t('copydeck-importer') }}
+                <a href="{{ url('contentiq-importer/sync') }}" class="btn submit">
+                    {{ 'Sync Now'|t('contentiq-importer') }}
                 </a>
             {% else %}
-                <a href="{{ cpUrl('settings/plugins/copydeck-importer') }}" class="btn">
-                    {{ 'Configure API Access'|t('copydeck-importer') }}
+                <a href="{{ cpUrl('settings/plugins/contentiq-importer') }}" class="btn">
+                    {{ 'Configure API Access'|t('contentiq-importer') }}
                 </a>
             {% endif %}
         </div>
@@ -28,20 +28,20 @@
         {# Secondary action — Import JSON file #}
         <div class="pane" style="padding:24px; margin-bottom:24px; border-radius:8px;">
             <h3 style="margin-top:0; margin-bottom:6px; font-size:16px;">
-                {{ 'Import JSON File'|t('copydeck-importer') }}
+                {{ 'Import JSON File'|t('contentiq-importer') }}
             </h3>
             <p class="light" style="margin-bottom:16px; font-size:14px;">
-                {{ 'Upload an export file manually.'|t('copydeck-importer') }}
+                {{ 'Upload an export file manually.'|t('contentiq-importer') }}
             </p>
-            <a href="{{ url('copydeck-importer/upload') }}" class="btn">
-                {{ 'Upload File'|t('copydeck-importer') }}
+            <a href="{{ url('contentiq-importer/upload') }}" class="btn">
+                {{ 'Upload File'|t('contentiq-importer') }}
             </a>
         </div>
 
         {# History link #}
         <div style="text-align:center;">
-            <a href="{{ url('copydeck-importer/history') }}" class="go">
-                {{ 'View import history'|t('copydeck-importer') }}
+            <a href="{{ url('contentiq-importer/history') }}" class="go">
+                {{ 'View import history'|t('contentiq-importer') }}
             </a>
         </div>
 

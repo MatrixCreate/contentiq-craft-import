@@ -3,14 +3,14 @@
 {% set title = 'Preview Import' %}
 
 {% set crumbs = [
-    { label: 'Copydeck', url: url('copydeck-importer') },
-    { label: 'Upload', url: url('copydeck-importer/upload') },
+    { label: 'ContentIQ', url: url('contentiq-importer') },
+    { label: 'Upload', url: url('contentiq-importer/upload') },
 ] %}
 
 {% block content %}
 
     {# Summary bar #}
-    <div class="copydeck-summary" style="margin-bottom:24px; padding:16px; background:var(--gray-050); border-radius:8px; display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
+    <div class="contentiq-summary" style="margin-bottom:24px; padding:16px; background:var(--gray-050); border-radius:8px; display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
         <div>
             <strong>{{ isBatch ? 'Batch' : 'Single page' }}</strong>
             &middot;
@@ -32,7 +32,7 @@
         </div>
     </div>
 
-    {# Block type labels — human-readable names for Copydeck machine types #}
+    {# Block type labels — human-readable names for ContentIQ machine types #}
     {% set blockLabels = {
         'text': 'Text',
         'text_and_media': 'Text & Media',
@@ -50,12 +50,12 @@
     <table class="data fullwidth">
         <thead>
             <tr>
-                <th>{{ 'Title'|t('copydeck-importer') }}</th>
-                <th>{{ 'Slug'|t('copydeck-importer') }}</th>
-                <th>{{ 'Blocks'|t('copydeck-importer') }}</th>
-                <th>{{ 'Images'|t('copydeck-importer') }}</th>
-                <th>{{ 'Action'|t('copydeck-importer') }}</th>
-                <th>{{ 'Warnings'|t('copydeck-importer') }}</th>
+                <th>{{ 'Title'|t('contentiq-importer') }}</th>
+                <th>{{ 'Slug'|t('contentiq-importer') }}</th>
+                <th>{{ 'Blocks'|t('contentiq-importer') }}</th>
+                <th>{{ 'Images'|t('contentiq-importer') }}</th>
+                <th>{{ 'Action'|t('contentiq-importer') }}</th>
+                <th>{{ 'Warnings'|t('contentiq-importer') }}</th>
             </tr>
         </thead>
         <tbody>
@@ -111,7 +111,7 @@
 
     {% if skippedBlocks|length %}
         <div style="margin-top:24px;">
-            <h3>{{ 'Skipped Blocks'|t('copydeck-importer') }}</h3>
+            <h3>{{ 'Skipped Blocks'|t('contentiq-importer') }}</h3>
             <ul>
                 {% for skipped in skippedBlocks %}
                     <li class="light">{{ skipped.page }}: <code>{{ skipped.type }}</code> (unknown block type)</li>
@@ -122,16 +122,16 @@
 
     {# Actions #}
     <div style="margin-top:24px; display:flex; gap:12px;">
-        <a href="{{ url('copydeck-importer/upload') }}" class="btn">
-            {{ 'Back'|t('copydeck-importer') }}
+        <a href="{{ url('contentiq-importer/upload') }}" class="btn">
+            {{ 'Back'|t('contentiq-importer') }}
         </a>
 
         <form method="post">
             {{ csrfInput() }}
-            {{ actionInput('copydeck-importer/cp/run-import') }}
+            {{ actionInput('contentiq-importer/cp/run-import') }}
             <input type="hidden" name="tempFilename" value="{{ tempFilename }}">
             <button type="submit" class="btn submit">
-                {{ 'Import'|t('copydeck-importer') }}
+                {{ 'Import'|t('contentiq-importer') }}
             </button>
         </form>
     </div>

@@ -127,7 +127,7 @@ Field handler types: `nodes`, `image`, `heading`, `body`, `layout`, `textMediaLa
 
 **Hierarchy.** `parent_slug` in `document` sets the parent entry via `setParentId()`. A `$slugToEntryId` map is maintained during batch runs; falls back to DB query.
 
-**Sidebar widget.** `EVENT_DEFINE_SIDEBAR_HTML` appends a COPYDECK section to every entry edit screen. Shows sync status, last-synced timestamp, block notes, and a lock toggle.
+**Sidebar widget.** `EVENT_DEFINE_SIDEBAR_HTML` appends a CONTENTIQ section to every entry edit screen. Shows sync status, last-synced timestamp, block notes, and a lock toggle.
 
 **Queue sync.** CP sync pushes a `SyncJob` to Craft's queue. Frontend polls `sync/status?runId=N` until complete, then redirects to the sync report.
 

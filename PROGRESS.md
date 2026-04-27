@@ -14,7 +14,7 @@
 
 - **Sync queue job** — `SyncJob` extends `craft\queue\BaseJob`. Controller creates a `pending` run record, pushes job to queue. Frontend polls `sync/status?runId=N` for completion, then redirects to sync report. Calls `Craft.postActionRequest('queue/run')` to kick the queue immediately.
 
-- **Per-entry sidebar widget** — `EVENT_DEFINE_SIDEBAR_HTML` appends a COPYDECK section to every entry edit screen with Sync button and last-synced timestamp. Calls single-page API endpoint. Stored in `contentiq_entry_syncs` table.
+- **Per-entry sidebar widget** — `EVENT_DEFINE_SIDEBAR_HTML` appends a CONTENTIQ section to every entry edit screen with Sync button and last-synced timestamp. Calls single-page API endpoint. Stored in `contentiq_entry_syncs` table.
 
 - **Sync report** — Dedicated template showing hierarchical page tree with indentation from `depth`, created/updated indicators, edit/view links, inline warnings. Summary line with page/image/warning counts.
 
@@ -70,7 +70,7 @@
 
 - **Hero mobile image** — `mobile_image` field from ContentIQ hero blocks imported to `mobileImage` asset field on the hero ContentBlock.
 
-- **Sidebar lock toggle** — CSS-only lightswitch in the COPYDECK sidebar. Locked entries are skipped during batch syncs (SyncJob) with a warning. Stored in `contentiq_entry_syncs.locked`. Migration `m250419_000001_add_locked_to_entry_syncs`.
+- **Sidebar lock toggle** — CSS-only lightswitch in the CONTENTIQ sidebar. Locked entries are skipped during batch syncs (SyncJob) with a warning. Stored in `contentiq_entry_syncs.locked`. Migration `m250419_000001_add_locked_to_entry_syncs`.
 
 - **Sidebar clear notes** — "Clear" button removes block notes via `contentiq-importer/cp/clear-notes` endpoint.
 

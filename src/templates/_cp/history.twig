@@ -3,12 +3,12 @@
 {% set title = 'Import History' %}
 
 {% set crumbs = [
-    { label: 'Copydeck', url: url('copydeck-importer') },
+    { label: 'ContentIQ', url: url('contentiq-importer') },
 ] %}
 
 {% block actionButton %}
-    <a class="btn submit add icon" href="{{ url('copydeck-importer/upload') }}">
-        {{ 'New Import'|t('copydeck-importer') }}
+    <a class="btn submit add icon" href="{{ url('contentiq-importer/upload') }}">
+        {{ 'New Import'|t('contentiq-importer') }}
     </a>
 {% endblock %}
 
@@ -18,12 +18,12 @@
         <table class="data fullwidth">
             <thead>
                 <tr>
-                    <th>{{ 'Date'|t('copydeck-importer') }}</th>
-                    <th>{{ 'File'|t('copydeck-importer') }}</th>
-                    <th>{{ 'Type'|t('copydeck-importer') }}</th>
-                    <th>{{ 'Pages'|t('copydeck-importer') }}</th>
-                    <th>{{ 'Images'|t('copydeck-importer') }}</th>
-                    <th>{{ 'Status'|t('copydeck-importer') }}</th>
+                    <th>{{ 'Date'|t('contentiq-importer') }}</th>
+                    <th>{{ 'File'|t('contentiq-importer') }}</th>
+                    <th>{{ 'Type'|t('contentiq-importer') }}</th>
+                    <th>{{ 'Pages'|t('contentiq-importer') }}</th>
+                    <th>{{ 'Images'|t('contentiq-importer') }}</th>
+                    <th>{{ 'Status'|t('contentiq-importer') }}</th>
                     <th></th>
                 </tr>
             </thead>
@@ -45,18 +45,18 @@
                         <td>{{ run.imageCount }}</td>
                         <td>
                             {% if run.status == 'success' %}
-                                <span class="status green"></span> {{ 'Success'|t('copydeck-importer') }}
+                                <span class="status green"></span> {{ 'Success'|t('contentiq-importer') }}
                             {% elseif run.status == 'warnings' %}
-                                <span class="status orange"></span> {{ 'Warnings'|t('copydeck-importer') }}
+                                <span class="status orange"></span> {{ 'Warnings'|t('contentiq-importer') }}
                             {% elseif run.status == 'pending' %}
-                                <span class="status"></span> {{ 'In Progress'|t('copydeck-importer') }}
+                                <span class="status"></span> {{ 'In Progress'|t('contentiq-importer') }}
                             {% else %}
-                                <span class="status red"></span> {{ 'Errors'|t('copydeck-importer') }}
+                                <span class="status red"></span> {{ 'Errors'|t('contentiq-importer') }}
                             {% endif %}
                         </td>
                         <td class="thin">
-                            <a href="{{ url('copydeck-importer/result/' ~ run.id) }}" class="btn small">
-                                {{ 'View'|t('copydeck-importer') }}
+                            <a href="{{ url('contentiq-importer/result/' ~ run.id) }}" class="btn small">
+                                {{ 'View'|t('contentiq-importer') }}
                             </a>
                         </td>
                     </tr>
@@ -65,7 +65,7 @@
         </table>
     {% else %}
         <div class="zilch">
-            <p>{{ 'No imports yet.'|t('copydeck-importer') }}</p>
+            <p>{{ 'No imports yet.'|t('contentiq-importer') }}</p>
         </div>
     {% endif %}
 
