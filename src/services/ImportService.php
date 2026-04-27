@@ -1,17 +1,17 @@
 <?php
 
-namespace matrixcreate\copydeckimporter\services;
+namespace matrixcreate\contentiqimporter\services;
 
 use Craft;
 use craft\base\FieldInterface;
 use craft\elements\Entry;
 use craft\models\FieldLayout;
-use matrixcreate\copydeckimporter\CopydeckImporter;
+use matrixcreate\contentiqimporter\ContentIQImporter;
 use Throwable;
 use yii\base\Component;
 
 /**
- * Orchestrates the full import pipeline for a single Copydeck page.
+ * Orchestrates the full import pipeline for a single ContentIQ page.
  *
  * Pipeline (per page):
  *   1. Validate and parse the JSON structure.
@@ -43,7 +43,7 @@ class ImportService extends Component
     // =========================================================================
 
     /**
-     * Runs the full import pipeline for a single Copydeck page export.
+     * Runs the full import pipeline for a single ContentIQ page export.
      *
      * Returns a result array consumed by ImportController for output rendering.
      *
@@ -102,26 +102,26 @@ class ImportService extends Component
 
             $section = Craft::$app->entries->getSectionByHandle($sectionHandle);
             if ($section === null) {
-                return $this->_fatal($result, "Section '{$sectionHandle}' not found in Craft. Check config/copydeck.php.");
+                return $this->_fatal($result, "Section '{$sectionHandle}' not found in Craft. Check config/contentiq.php.");
             }
 
             $entryType = Craft::$app->entries->getEntryTypeByHandle($entryTypeHandle);
             if ($entryType === null) {
-                return $this->_fatal($result, "Entry type '{$entryTypeHandle}' not found in Craft. Check config/copydeck.php.");
+                return $this->_fatal($result, "Entry type '{$entryTypeHandle}' not found in Craft. Check config/contentiq.php.");
             }
 
             // -----------------------------------------------------------------------
             // 4. Prepare ImageImportService (resolves volume + folder once).
             // -----------------------------------------------------------------------
             $volumeHandle = $config['assetVolume'] ?? 'images';
-            $folderPath   = $config['assetFolder'] ?? 'copydeck';
+            $folderPath   = $config['assetFolder'] ?? 'contentiq';
 
-            CopydeckImporter::$plugin->images->prepare($volumeHandle, $folderPath);
+            ContentIQImporter::$plugin->images->prepare($volumeHandle, $folderPath);
 
             // -----------------------------------------------------------------------
             // 5. Prepare MatrixBuilder (builds merged mapping once).
             // -----------------------------------------------------------------------
-            CopydeckImporter::$plugin->matrixBuilder->prepare($config);
+            ContentIQImporter::$plugin->matrixBuilder->prepare($config);
 
             // -----------------------------------------------------------------------
             // 6. Build Matrix field data from blocks.
@@ -159,7 +159,7 @@ class ImportService extends Component
             }
             $result['blockNotes'] = implode("\n\n", $noteLines);
 
-            $built = CopydeckImporter::$plugin->matrixBuilder->build($contentBlocks, $dryRun);
+            $built = ContentIQImporter::$plugin->matrixBuilder->build($contentBlocks, $dryRun);
 
             $result['blocks']      = $built['blockReport'];
             $result['images']      = $built['imageReport'];
@@ -300,7 +300,7 @@ class ImportService extends Component
             $result['entryId'] = $entry->id;
             $result['success'] = true;
         } catch (Throwable $e) {
-            Craft::error("CopydeckImporter exception: " . $e->getMessage() . "\n" . $e->getTraceAsString(), __METHOD__);
+            Craft::error("ContentIQImporter exception: " . $e->getMessage() . "\n" . $e->getTraceAsString(), __METHOD__);
 
             return $this->_fatal($result, 'Exception: ' . $e->getMessage());
         }
@@ -341,7 +341,7 @@ class ImportService extends Component
      */
     private function _fatal(array $result, string $message): array
     {
-        Craft::error("CopydeckImporter: $message", __METHOD__);
+        Craft::error("ContentIQImporter: $message", __METHOD__);
         $result['success'] = false;
         $result['error']   = $message;
 
@@ -349,7 +349,7 @@ class ImportService extends Component
     }
 
     /**
-     * Loads and merges the copydeck config (project config + defaults).
+     * Loads and merges the contentiq config (project config + defaults).
      *
      * Cached after the first call — called once per PHP process.
      *
@@ -365,13 +365,13 @@ class ImportService extends Component
             'section'        => 'pages',
             'entryType'      => 'pages',
             'assetVolume'    => 'images',
-            'assetFolder'    => 'copydeck',
+            'assetFolder'    => 'contentiq',
             'matrixField'    => 'contentBlocks',
             'seoField'       => 'seo',
             'blockOverrides' => [],
         ];
 
-        $projectConfig = Craft::$app->getConfig()->getConfigFromFile('copydeck');
+        $projectConfig = Craft::$app->getConfig()->getConfigFromFile('contentiq');
         $merged        = array_replace_recursive($defaults, is_array($projectConfig) ? $projectConfig : []);
 
         $this->_config = $merged;
@@ -380,14 +380,14 @@ class ImportService extends Component
     }
 
     /**
-     * Resolves Copydeck SEO data into a SEOmatic SeoSettings field value array.
+     * Resolves ContentIQ SEO data into a SEOmatic SeoSettings field value array.
      *
      * SEOmatic stores all SEO data in a single field (handle: 'seo') as a
      * structured array. String values go in metaGlobalVars; source flags and
      * asset IDs go in metaBundleSettings.
      *
-     * @param array $seo    The seo object from the Copydeck JSON.
-     * @param array $config Merged copydeck config.
+     * @param array $seo    The seo object from the ContentIQ JSON.
+     * @param array $config Merged contentiq config.
      * @param bool  $dryRun
      * @return array<string, mixed>
      */
@@ -411,7 +411,7 @@ class ImportService extends Component
         // og_image — import as asset and register in both seoImage and ogImage slots.
         $ogImageData = $seo['og_image'] ?? null;
         if (is_array($ogImageData) && !empty($ogImageData['url'])) {
-            $imageResult = CopydeckImporter::$plugin->images->importFromField($ogImageData, $dryRun);
+            $imageResult = ContentIQImporter::$plugin->images->importFromField($ogImageData, $dryRun);
             if ($imageResult !== null && $imageResult['id'] !== null) {
                 $metaBundleSettings['seoImageSource'] = 'fromAsset';
                 $metaBundleSettings['seoImageIds']    = [$imageResult['id']];
@@ -458,7 +458,7 @@ class ImportService extends Component
                 $filtered[$handle] = $value;
             } else {
                 $result['warnings'][] = "Field handle '{$handle}' not found on entry type field layout — skipped.";
-                Craft::warning("CopydeckImporter: field '{$handle}' skipped (not in field layout).", __METHOD__);
+                Craft::warning("ContentIQImporter: field '{$handle}' skipped (not in field layout).", __METHOD__);
             }
         }
 
@@ -466,7 +466,7 @@ class ImportService extends Component
     }
 
     /**
-     * Builds a flat field values array from a Copydeck hero block.
+     * Builds a flat field values array from a ContentIQ hero block.
      *
      * The pages entry type has hero fields directly on the entry (not in a Matrix):
      *   heading → heroTitle    (CKEditor, wrapped in <h1>)
@@ -476,7 +476,7 @@ class ImportService extends Component
      *
      * Returns null if no mappable fields are found.
      *
-     * @param array $heroBlock Copydeck hero block (the full block object).
+     * @param array $heroBlock ContentIQ hero block (the full block object).
      * @param bool  $dryRun
      * @return array<string, mixed>|null
      */
@@ -554,7 +554,7 @@ class ImportService extends Component
 
         // desktopImage — primary image.
         if (isset($fields['image']) && is_array($fields['image']) && !empty($fields['image']['url'])) {
-            $imageResult = CopydeckImporter::$plugin->images->importFromField($fields['image'], $dryRun);
+            $imageResult = ContentIQImporter::$plugin->images->importFromField($fields['image'], $dryRun);
             $innerFields['desktopImage'] = ($imageResult !== null && $imageResult['id'] !== null)
                 ? [$imageResult['id']]
                 : [];
@@ -562,7 +562,7 @@ class ImportService extends Component
 
         // mobileImage — optional mobile-specific hero image.
         if (isset($fields['mobile_image']) && is_array($fields['mobile_image']) && !empty($fields['mobile_image']['url'])) {
-            $imageResult = CopydeckImporter::$plugin->images->importFromField($fields['mobile_image'], $dryRun);
+            $imageResult = ContentIQImporter::$plugin->images->importFromField($fields['mobile_image'], $dryRun);
             $innerFields['mobileImage'] = ($imageResult !== null && $imageResult['id'] !== null)
                 ? [$imageResult['id']]
                 : [];
@@ -671,7 +671,7 @@ class ImportService extends Component
      * Counts how many SEO metaGlobalVars values are non-empty.
      *
      * @param array $fieldValues Filtered field values after layout check.
-     * @param array $config      Merged copydeck config.
+     * @param array $config      Merged contentiq config.
      * @return int
      */
     private function _countSeoFields(array $fieldValues, array $config): int
@@ -700,7 +700,7 @@ class ImportService extends Component
     }
 
     /**
-     * Creates (or finds) a callToActionEntry from a Copydeck CTA block.
+     * Creates (or finds) a callToActionEntry from a ContentIQ CTA block.
      *
      * Extracts title from the first heading node, renders richText from nodes,
      * imports image if present, and builds actionButtons Matrix entries from
@@ -761,14 +761,14 @@ class ImportService extends Component
         $ctaFieldValues = [];
 
         // richText — render nodes to HTML.
-        $ctaFieldValues['richText'] = CopydeckImporter::$plugin->nodes->render(
+        $ctaFieldValues['richText'] = ContentIQImporter::$plugin->nodes->render(
             is_array($nodes) ? $nodes : [],
         );
 
         // image — import if present.
         $imageData = $fields['image'] ?? null;
         if (is_array($imageData) && !empty($imageData['url'])) {
-            $imageResult = CopydeckImporter::$plugin->images->importFromField($imageData, $dryRun);
+            $imageResult = ContentIQImporter::$plugin->images->importFromField($imageData, $dryRun);
             if ($imageResult !== null && $imageResult['id'] !== null) {
                 $ctaFieldValues['image'] = [$imageResult['id']];
                 $result['images'][] = ['filename' => $imageResult['filename'], 'reused' => $imageResult['reused']];
@@ -795,7 +795,7 @@ class ImportService extends Component
         if (!$saved) {
             $errors = implode(', ', $entry->getFirstErrors());
             $result['warnings'][] = "Failed to create CTA entry '{$title}': {$errors}";
-            Craft::warning("CopydeckImporter: CTA entry save failed: {$errors}", __METHOD__);
+            Craft::warning("ContentIQImporter: CTA entry save failed: {$errors}", __METHOD__);
 
             return null;
         }
@@ -804,7 +804,7 @@ class ImportService extends Component
     }
 
     /**
-     * Builds the actionButtons Matrix field data from a Copydeck buttons array.
+     * Builds the actionButtons Matrix field data from a ContentIQ buttons array.
      *
      * Each button becomes an actionButton entry with a Hyper actionButton field.
      * Buttons without a URL are skipped.

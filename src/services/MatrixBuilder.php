@@ -1,17 +1,17 @@
 <?php
 
-namespace matrixcreate\copydeckimporter\services;
+namespace matrixcreate\contentiqimporter\services;
 
 use Craft;
-use matrixcreate\copydeckimporter\CopydeckImporter;
+use matrixcreate\contentiqimporter\ContentIQImporter;
 use yii\base\Component;
 
 /**
- * Builds the Matrix field data array from Copydeck blocks.
+ * Builds the Matrix field data array from ContentIQ blocks.
  *
  * Each block maps to an outer Craft contentBlocks entry type that contains a nested
  * inner Matrix field. The mapping is defined in config/defaults.php and can be
- * overridden per-project via blockOverrides in config/copydeck.php.
+ * overridden per-project via blockOverrides in config/contentiq.php.
  *
  * Structure per block mapping:
  *   outerType   — handle of the Craft contentBlocks entry type
@@ -39,7 +39,7 @@ class MatrixBuilder extends Component
     /**
      * Initialises the builder with the merged block mapping.
      *
-     * @param array $config Merged copydeck config (defaults + project overrides).
+     * @param array $config Merged contentiq config (defaults + project overrides).
      * @return void
      */
     public function prepare(array $config): void
@@ -52,9 +52,9 @@ class MatrixBuilder extends Component
     }
 
     /**
-     * Builds the Matrix field data array and the block report from a Copydeck blocks array.
+     * Builds the Matrix field data array and the block report from a ContentIQ blocks array.
      *
-     * @param array[] $blocks   Copydeck `blocks` array from the JSON.
+     * @param array[] $blocks   ContentIQ `blocks` array from the JSON.
      * @param bool    $dryRun  If true, skips image downloads.
      * @return array{
      *   matrixData: array<string, array>,
@@ -89,7 +89,7 @@ class MatrixBuilder extends Component
             }
 
             if (!isset($this->_mapping[$type])) {
-                Craft::warning("Unknown Copydeck block type '{$type}' — skipping.", __METHOD__);
+                Craft::warning("Unknown ContentIQ block type '{$type}' — skipping.", __METHOD__);
                 $blockReport[] = ['type' => $type, 'fields' => [], 'skipped' => true];
                 continue;
             }
@@ -202,7 +202,7 @@ class MatrixBuilder extends Component
      * from the first block only (they're typically the same across the group).
      *
      * @param array   $mapping       Block mapping definition from defaults.php.
-     * @param array[] $groupedBlocks Array of Copydeck blocks to merge.
+     * @param array[] $groupedBlocks Array of ContentIQ blocks to merge.
      * @param array   &$imageReport
      * @param bool    $dryRun
      * @return array{0: array, 1: array, 2: string[]}
@@ -218,8 +218,8 @@ class MatrixBuilder extends Component
 
         // Resolve outer fields from the first block only.
         $firstSourceFields = $groupedBlocks[0]['fields'] ?? [];
-        foreach ($mapping['outerFields'] ?? [] as $copydeckKey => [$craftHandle, $handlerType]) {
-            $value    = $firstSourceFields[$copydeckKey] ?? null;
+        foreach ($mapping['outerFields'] ?? [] as $contentiqKey => [$craftHandle, $handlerType]) {
+            $value    = $firstSourceFields[$contentiqKey] ?? null;
             $resolved = $this->_resolveFieldByHandler($handlerType, $craftHandle, $value, $imageReport, $dryRun);
 
             foreach ($resolved as $handle => $fieldValue) {
@@ -271,7 +271,7 @@ class MatrixBuilder extends Component
      * Returns a tuple of [outerFields, innerMatrixData, reportedFields].
      *
      * @param array  $mapping      Block mapping definition from defaults.php.
-     * @param array  $sourceFields Copydeck fields for this block.
+     * @param array  $sourceFields ContentIQ fields for this block.
      * @param array  &$imageReport Image report array, mutated by image handlers.
      * @param bool   $dryRun
      * @return array{0: array, 1: array, 2: string[]}
@@ -286,8 +286,8 @@ class MatrixBuilder extends Component
         $reportedFields = [];
 
         // Resolve outer fields (e.g. layout dropdown on the outer entry type).
-        foreach ($mapping['outerFields'] ?? [] as $copydeckKey => [$craftHandle, $handlerType]) {
-            $value   = $sourceFields[$copydeckKey] ?? null;
+        foreach ($mapping['outerFields'] ?? [] as $contentiqKey => [$craftHandle, $handlerType]) {
+            $value   = $sourceFields[$contentiqKey] ?? null;
             $resolved = $this->_resolveFieldByHandler($handlerType, $craftHandle, $value, $imageReport, $dryRun);
 
             foreach ($resolved as $handle => $fieldValue) {
@@ -385,8 +385,8 @@ class MatrixBuilder extends Component
         $innerFields    = [];
         $reportedFields = [];
 
-        foreach ($innerConfig['fields'] as $copydeckKey => [$craftHandle, $handlerType]) {
-            $value   = $sourceFields[$copydeckKey] ?? null;
+        foreach ($innerConfig['fields'] as $contentiqKey => [$craftHandle, $handlerType]) {
+            $value   = $sourceFields[$contentiqKey] ?? null;
             $resolved = $this->_resolveFieldByHandler($handlerType, $craftHandle, $value, $imageReport, $dryRun);
 
             foreach ($resolved as $handle => $fieldValue) {
@@ -405,7 +405,7 @@ class MatrixBuilder extends Component
      *
      * @param string     $handlerType  Handler type string from the block mapping.
      * @param string     $craftHandle  Destination Craft field handle.
-     * @param mixed      $value        Raw value from the Copydeck source data.
+     * @param mixed      $value        Raw value from the ContentIQ source data.
      * @param array      &$imageReport Image report array, mutated by image handlers.
      * @param bool       $dryRun
      * @return array<string, mixed>
@@ -433,7 +433,7 @@ class MatrixBuilder extends Component
     }
 
     /**
-     * Renders a Copydeck nodes array to an HTML string.
+     * Renders a ContentIQ nodes array to an HTML string.
      *
      * @param string $handle
      * @param mixed  $value
@@ -441,7 +441,7 @@ class MatrixBuilder extends Component
      */
     private function _handleNodes(string $handle, mixed $value): array
     {
-        $html = CopydeckImporter::$plugin->nodes->render(is_array($value) ? $value : []);
+        $html = ContentIQImporter::$plugin->nodes->render(is_array($value) ? $value : []);
 
         return [$handle => $html];
     }
@@ -463,7 +463,7 @@ class MatrixBuilder extends Component
             return [$handle => []];
         }
 
-        $result = CopydeckImporter::$plugin->images->importFromField($value, $dryRun);
+        $result = ContentIQImporter::$plugin->images->importFromField($value, $dryRun);
 
         if ($result !== null) {
             $imageReport[] = ['filename' => $result['filename'], 'reused' => $result['reused']];
@@ -475,7 +475,7 @@ class MatrixBuilder extends Component
     }
 
     /**
-     * Converts a Copydeck heading value to an HTML heading string.
+     * Converts a ContentIQ heading value to an HTML heading string.
      *
      * Accepts either a {level, text} object or a plain string.
      * Output is wrapped in the appropriate <hN> tag for CKEditor fields.
@@ -533,9 +533,9 @@ class MatrixBuilder extends Component
     }
 
     /**
-     * Maps a Copydeck text-and-media layout string to a Craft dropdown value.
+     * Maps a ContentIQ text-and-media layout string to a Craft dropdown value.
      *
-     * Copydeck layout values and their Craft equivalents:
+     * ContentIQ layout values and their Craft equivalents:
      *   'image_right' → 'text-left'  (text on left, image on right — Craft default)
      *   'image_left'  → 'image-left' (image on left, text on right)
      *
@@ -558,7 +558,7 @@ class MatrixBuilder extends Component
     }
 
     /**
-     * Converts a Copydeck rows array to an HTML table string for CKEditor.
+     * Converts a ContentIQ rows array to an HTML table string for CKEditor.
      *
      * Rows format: [{isHeader: bool, cells: [string, ...]}, ...]
      *
@@ -611,7 +611,7 @@ class MatrixBuilder extends Component
     }
 
     /**
-     * Converts a Copydeck button object to a Hyper link field value.
+     * Converts a ContentIQ button object to a Hyper link field value.
      *
      * Expects {label, url}. Buttons without a URL are skipped (returns empty array).
      *
@@ -656,7 +656,7 @@ class MatrixBuilder extends Component
      * ctaButton nodes are skipped.
      *
      * @param string $handle Ignored — this handler returns multiple fixed handles.
-     * @param mixed  $value  The nodes array from the Copydeck FAQ block.
+     * @param mixed  $value  The nodes array from the ContentIQ FAQ block.
      * @return array<string, mixed>
      */
     private function _handleFaqNodes(string $handle, mixed $value): array
@@ -711,7 +711,7 @@ class MatrixBuilder extends Component
             }
         }
 
-        $renderer = CopydeckImporter::$plugin->nodes;
+        $renderer = ContentIQImporter::$plugin->nodes;
 
         // Build actionButtons Matrix data from collected CTA buttons.
         $actionButtonsData = [];
@@ -734,13 +734,13 @@ class MatrixBuilder extends Component
     }
 
     /**
-     * Converts a Copydeck postNodes array (ContentNode[]) to an actionButtons Matrix field value.
+     * Converts a ContentIQ postNodes array (ContentNode[]) to an actionButtons Matrix field value.
      *
      * Only ctaButton nodes are processed — all other node types are silently ignored.
      * Nodes with no label and no URL are skipped.
      *
      * @param string $handle Craft Matrix field handle (e.g. 'actionButtons').
-     * @param mixed  $value  ContentNode[] from the Copydeck postNodes array.
+     * @param mixed  $value  ContentNode[] from the ContentIQ postNodes array.
      * @return array<string, array>
      */
     private function _handleButtonNodes(string $handle, mixed $value): array

@@ -1,11 +1,11 @@
 <?php
 
-namespace matrixcreate\copydeckimporter\services;
+namespace matrixcreate\contentiqimporter\services;
 
 use yii\base\Component;
 
 /**
- * Converts a Copydeck nodes array to an HTML string for Craft rich text fields.
+ * Converts a ContentIQ nodes array to an HTML string for Craft rich text fields.
  *
  * Supported node types:
  *   - heading (level 1–4) → <h1>–<h4>
@@ -28,7 +28,7 @@ class NodesRenderer extends Component
     // =========================================================================
 
     /**
-     * Renders an array of Copydeck nodes to an HTML string.
+     * Renders an array of ContentIQ nodes to an HTML string.
      *
      * Returns an empty string for null or empty input — callers should handle
      * empty-string fields as they see fit.
@@ -221,7 +221,7 @@ class NodesRenderer extends Component
     /**
      * Renders a ctaButton node as an anchor link.
      *
-     * URL is always empty from Copydeck (set by editors in the CMS after import).
+     * URL is always empty from ContentIQ (set by editors in the CMS after import).
      * Wraps in <p> so it occupies its own line in CKEditor output.
      *
      * @param array $node

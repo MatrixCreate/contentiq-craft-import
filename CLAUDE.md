@@ -1,4 +1,4 @@
-# Copydeck Craft Import — Settled Patterns
+# ContentIQ Craft Import — Settled Patterns
 
 Read this at the start of every session. Do not re-discover these patterns.
 
@@ -6,11 +6,11 @@ Read this at the start of every session. Do not re-discover these patterns.
 
 ## Local development workflow
 
-The plugin is published to Packagist as `matrixcreate/copydeck-craft-import`. Craft Starter installs it from there by default. To develop the plugin and a Craft project simultaneously, run these from the Craft project root:
+The plugin is published to Packagist as `matrixcreate/contentiq-craft-import`. Craft Starter installs it from there by default. To develop the plugin and a Craft project simultaneously, run these from the Craft project root:
 
 **Switch to local symlinked copy:**
 ```bash
-composer config repositories.copydeck '{"type":"path","url":"../copydeck-craft-import","options":{"symlink":true}}' && composer require matrixcreate/copydeck-craft-import:@dev
+composer config repositories.contentiq '{"type":"path","url":"../contentiq-craft-import","options":{"symlink":true}}' && composer require matrixcreate/contentiq-craft-import:@dev
 ```
 
 **Revert to Packagist:**
@@ -21,7 +21,7 @@ git checkout composer.json composer.lock && composer install
 Optional shell functions for `~/.zshrc` (aliases break on the nested quoting):
 ```bash
 cdp-local() {
-  composer config repositories.copydeck '{"type":"path","url":"../copydeck-craft-import","options":{"symlink":true}}' && composer require matrixcreate/copydeck-craft-import:@dev
+  composer config repositories.contentiq '{"type":"path","url":"../contentiq-craft-import","options":{"symlink":true}}' && composer require matrixcreate/contentiq-craft-import:@dev
 }
 cdp-packagist() {
   git checkout composer.json composer.lock && composer install
@@ -167,19 +167,19 @@ Critical requirements:
 
 ### Standard blocks (MatrixBuilder handles these)
 
-| Copydeck type | Outer entry type | Inner Matrix | Inner type | Mode | Outer fields |
+| ContentIQ type | Outer entry type | Inner Matrix | Inner type | Mode | Outer fields |
 |---|---|---|---|---|---|
 | `text` | `text` | `textBlocks` | `textBlock` | single | — |
 | `text_and_media` | `textAndMedia` | `textAndMediaBlocks` | `textAndMediaBlock` | grouped | `blockLayout` |
 | `faq` | `faq` | `accordionItems` | `accordionItem` | repeated | `richText`, `extraRichText`, `actionButtons` (via `faqNodes`) |
-| `cards` | `copydeckCards` | `copydeckCards` | `copydeckCard` | repeated | `richText` (intro) |
+| `cards` | `contentiqCards` | `contentiqCards` | `contentiqCard` | repeated | `richText` (intro) |
 | `price_list` | `priceList` | *(none)* | — | outer fields only | `richText`, `priceList`, `actionButtons` (via `buttonNodes`) |
-| `usp` | `copydeckUsp` | *(none)* | — | outer fields only | `uspText` |
-| `global` | `copydeckGlobal` | *(none)* | — | outer fields only | `copydeckNotes` |
+| `usp` | `contentiqUsp` | *(none)* | — | outer fields only | `uspText` |
+| `global` | `contentiqGlobal` | *(none)* | — | outer fields only | `contentiqNotes` |
 
 ### Special blocks (ImportService handles these)
 
-| Copydeck type | What happens |
+| ContentIQ type | What happens |
 |---|---|
 | `hero` | ContentBlock field `hero` on page entry: `heading`, `richText` (subheading + body), `desktopImage`, `mobileImage`, `actionButtons`. Sets `enableHero = true`. |
 | `call_to_action` | Creates `callToActionEntry` in `callsToAction` section, relates via `chooseCallToAction` |
@@ -216,7 +216,7 @@ Critical requirements:
 | `ordered_list` | `<ol>` (legacy alias) |
 | `unordered_list` | `<ul>` (legacy alias) |
 | `faq_items` | `<details><summary>question</summary><p>answer</p></details>` |
-| `ctaButton` | `<p><a href="url">label</a></p>` (URL always empty from Copydeck — editors set it in CMS) |
+| `ctaButton` | `<p><a href="url">label</a></p>` (URL always empty from ContentIQ — editors set it in CMS) |
 
 ---
 
@@ -243,22 +243,22 @@ The `actionButtons` field is a Matrix containing `actionButton` entry types. Eac
 ## Import command
 
 ```
-php craft copydeck-importer/import --file=export.json [--dry-run] [--verbose]
+php craft contentiq-importer/import --file=export.json [--dry-run] [--verbose]
 ```
 
 Supports single-page (top-level `blocks`) and batch (top-level `pages`) JSON formats. `$defaultAction = 'import'` so the repeated `/import` suffix is not needed.
 
 ### Per-entry widget sync
 
-The sidebar widget calls `GET /api/v1/pages/{slug}/export` for single-page sync (the project is inferred from the API key). Slug is mapped via `config/copydeck.php` `slugMap` when Craft and Copydeck slugs differ.
+The sidebar widget calls `GET /api/v1/pages/{slug}/export` for single-page sync (the project is inferred from the API key). Slug is mapped via `config/contentiq.php` `slugMap` when Craft and ContentIQ slugs differ.
 
 ### Locked entries
 
-Entries with `copydeck_entry_syncs.locked = true` are skipped during:
+Entries with `contentiq_entry_syncs.locked = true` are skipped during:
 - Batch syncs (SyncJob) — logged as "Skipped — entry is locked" in the report
 - The sidebar Sync button is disabled when locked
 
-Lock state is toggled via the CSS lightswitch in the sidebar widget and persisted immediately via `copydeck-importer/cp/toggle-lock`.
+Lock state is toggled via the CSS lightswitch in the sidebar widget and persisted immediately via `contentiq-importer/cp/toggle-lock`.
 
 ---
 
@@ -270,7 +270,7 @@ Settings are stored via Craft's built-in plugin settings mechanism (project conf
 // Model: src/models/Settings.php
 class Settings extends \craft\base\Model
 {
-    public string $copydeckUrl = '';
+    public string $contentiqUrl = '';
     public string $apiKey = '';
 }
 
@@ -285,20 +285,20 @@ protected function createSettingsModel(): ?Model
 protected function settingsHtml(): ?string
 {
     return Craft::$app->view->renderTemplate(
-        'copydeck-importer/_cp/settings',
+        'contentiq-importer/_cp/settings',
         ['settings' => $this->getSettings()],
     );
 }
 
 // Access anywhere:
-$settings = CopydeckImporter::$plugin->getSettings();
+$settings = ContentIQImporter::$plugin->getSettings();
 ```
 
 Template uses `autosuggestField` with `suggestEnvVars: true` so editors can reference environment variables (e.g. `$COPYDECK_API_KEY`). Project config stores the env var reference, not the secret. At runtime, always resolve with `App::parseEnv()` before using the value:
 
 ```php
 use craft\helpers\App;
-$url = App::parseEnv($settings->copydeckUrl);
+$url = App::parseEnv($settings->contentiqUrl);
 $key = App::parseEnv($settings->apiKey);
 ```
 
@@ -339,14 +339,14 @@ If `parent_slug` is present in `document`, the importer sets the parent. If the 
 
 ---
 
-## Copydeck API sync
+## ContentIQ API sync
 
 The sync flow uses Craft's queue system to avoid HTTP timeouts:
 
 1. Controller creates a `pending` import run record
 2. Pushes `SyncJob` to Craft's queue with the run ID
 3. Frontend polls `sync/status?runId=N` until status changes from `pending`
-4. Queue job: fetches `GET /api/v1/export` via `CopydeckApiService`, imports each page, updates the run record
+4. Queue job: fetches `GET /api/v1/export` via `ContentIQApiService`, imports each page, updates the run record
 
 API endpoints are slug-free — the project is resolved server-side from the Bearer token (see "API key format and project inference" above). API call uses `Craft::createGuzzleClient()` — the recommended HTTP client in Craft 5.
 
@@ -362,13 +362,13 @@ $response = Craft::createGuzzleClient()->request('GET', $endpoint, [
 
 ---
 
-## Copydeck Cards staging block
+## ContentIQ Cards staging block
 
-Cards from Copydeck import to `copydeckCards` (not `contentCards`). This is a staging block — editors manually migrate cards to the appropriate final block type with proper entry links. Copydeck can't know which card type to use or what internal links to set.
+Cards from ContentIQ import to `contentiqCards` (not `contentCards`). This is a staging block — editors manually migrate cards to the appropriate final block type with proper entry links. ContentIQ can't know which card type to use or what internal links to set.
 
 Card body fields are `ContentNode[]` arrays (not plain strings), processed through `NodesRenderer`. This supports paragraphs, lists, and embedded FAQ items in card content.
 
-The `intro` field on the outer `copydeckCards` entry is also a `ContentNode[]` array, rendered to the `richText` CKEditor field above the card grid.
+The `intro` field on the outer `contentiqCards` entry is also a `ContentNode[]` array, rendered to the `richText` CKEditor field above the card grid.
 
 ---
 
@@ -420,7 +420,7 @@ Both pages and homepage use a `craft\fields\ContentBlock` field (`heroContent`, 
 
 ## Slug mapping
 
-When the Craft slug differs from the Copydeck slug (e.g. homepage → home), configure a mapping in `config/copydeck.php`:
+When the Craft slug differs from the ContentIQ slug (e.g. homepage → home), configure a mapping in `config/contentiq.php`:
 
 ```php
 'slugMap' => [
@@ -428,19 +428,19 @@ When the Craft slug differs from the Copydeck slug (e.g. homepage → home), con
 ],
 ```
 
-Used by the sidebar widget sync to translate Craft slugs to Copydeck API slugs.
+Used by the sidebar widget sync to translate Craft slugs to ContentIQ API slugs.
 
 ---
 
 ## Asset filename sanitization
 
-Filenames from Copydeck keys are sanitized via `craft\helpers\Assets::prepareAssetName()` before the idempotency lookup. Craft converts spaces to hyphens on save (e.g. `Styles - Luxury - Card Image.jpg` → `Styles-Luxury-Card-Image.jpg`), so the lookup must use the sanitized name to find existing assets.
+Filenames from ContentIQ keys are sanitized via `craft\helpers\Assets::prepareAssetName()` before the idempotency lookup. Craft converts spaces to hyphens on save (e.g. `Styles - Luxury - Card Image.jpg` → `Styles-Luxury-Card-Image.jpg`), so the lookup must use the sanitized name to find existing assets.
 
 ---
 
 ## Image downloads use Guzzle
 
-Image downloads use `Craft::createGuzzleClient()` instead of `file_get_contents()`. This handles self-signed SSL certificates on dev domains (e.g. `copydeck.test`) and respects `config/guzzle.php` settings.
+Image downloads use `Craft::createGuzzleClient()` instead of `file_get_contents()`. This handles self-signed SSL certificates on dev domains (e.g. `contentiq.test`) and respects `config/guzzle.php` settings.
 
 ---
 
@@ -457,7 +457,7 @@ $filtered = array_intersect_key($fieldValues, array_flip($validHandles));
 
 ## Exploring Craft project config YAML
 
-All field definitions, entry types, sections, and field layouts live in `config/project/`. Understanding how to navigate these files is essential for mapping Copydeck blocks to Craft fields.
+All field definitions, entry types, sections, and field layouts live in `config/project/`. Understanding how to navigate these files is essential for mapping ContentIQ blocks to Craft fields.
 
 ### File naming convention
 
@@ -631,18 +631,18 @@ The COPYDECK sidebar widget (`EVENT_DEFINE_SIDEBAR_HTML`) provides:
 
 ### Lock toggle
 
-CSS-only lightswitch (no Craft JS dependency — Craft's lightswitch requires DOM-ready initialization which doesn't work for dynamically injected sidebar HTML). Stored in `copydeck_entry_syncs.locked`.
+CSS-only lightswitch (no Craft JS dependency — Craft's lightswitch requires DOM-ready initialization which doesn't work for dynamically injected sidebar HTML). Stored in `contentiq_entry_syncs.locked`.
 
 - Disables the Sync button when on
 - Batch syncs (SyncJob) skip locked entries with a "Skipped — entry is locked" warning
-- Persists immediately on toggle via `copydeck-importer/cp/toggle-lock` endpoint
+- Persists immediately on toggle via `contentiq-importer/cp/toggle-lock` endpoint
 
 ### Block notes
 
-Collected from `block.notes` (top-level key on each block in the API response) during import. Formatted as "Block Type\nnote text" separated by blank lines. Stored in `copydeck_entry_syncs.notes`.
+Collected from `block.notes` (top-level key on each block in the API response) during import. Formatted as "Block Type\nnote text" separated by blank lines. Stored in `contentiq_entry_syncs.notes`.
 
 - Displayed below "Synced at" in the sidebar
-- "Clear" button removes notes via `copydeck-importer/cp/clear-notes` endpoint
+- "Clear" button removes notes via `contentiq-importer/cp/clear-notes` endpoint
 - Updates in place on sync without page reload
 
 ### Reload link
@@ -657,7 +657,7 @@ User-facing error messages use the entry title (not slug) for readability. The w
 
 ## Database tables
 
-### `copydeck_import_runs`
+### `contentiq_import_runs`
 
 Stores import/sync history. Created by `Install` migration.
 
@@ -672,7 +672,7 @@ Stores import/sync history. Created by `Install` migration.
 | `status` | varchar(20) | `'pending'`, `'success'`, `'warnings'`, or `'errors'` |
 | `result` | longtext | JSON-encoded page results array |
 
-### `copydeck_entry_syncs`
+### `contentiq_entry_syncs`
 
 Per-entry sync state for the sidebar widget. Created by `m250418_000000_add_entry_syncs_table`.
 

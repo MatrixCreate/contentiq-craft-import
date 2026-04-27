@@ -1,6 +1,6 @@
 <?php
 
-namespace matrixcreate\copydeckimporter\services;
+namespace matrixcreate\contentiqimporter\services;
 
 use Craft;
 use craft\elements\Asset;
@@ -54,7 +54,7 @@ class ImageImportService extends Component
      * volume handle is not found — this is a fatal configuration error.
      *
      * @param string $volumeHandle  e.g. 'images'
-     * @param string $folderPath    e.g. 'copydeck'
+     * @param string $folderPath    e.g. 'contentiq'
      * @return void
      * @throws Exception if the volume handle cannot be resolved.
      */
@@ -63,7 +63,7 @@ class ImageImportService extends Component
         $volume = Craft::$app->getVolumes()->getVolumeByHandle($volumeHandle);
 
         if ($volume === null) {
-            throw new Exception("Asset volume '{$volumeHandle}' not found. Check the 'assetVolume' key in config/copydeck.php.");
+            throw new Exception("Asset volume '{$volumeHandle}' not found. Check the 'assetVolume' key in config/contentiq.php.");
         }
 
         $folder = Craft::$app->getAssets()->ensureFolderByFullPathAndVolume(
@@ -77,7 +77,7 @@ class ImageImportService extends Component
     }
 
     /**
-     * Imports an image from a Copydeck image field value.
+     * Imports an image from a ContentIQ image field value.
      *
      * Accepts the raw image object from the JSON:
      *   { "key": "path/to/file.jpg", "url": "https://...", "alt": null }
@@ -85,7 +85,7 @@ class ImageImportService extends Component
      * Returns the Craft asset ID on success, null on failure or if the image
      * field is empty (no url).
      *
-     * @param array|null $imageField  Raw image object from Copydeck JSON.
+     * @param array|null $imageField  Raw image object from ContentIQ JSON.
      * @param bool       $dryRun     If true, resolves what would happen without downloading.
      * @return array{id: int|null, filename: string, reused: bool}|null
      *   Returns null if the image field is empty or unusable.
@@ -182,7 +182,7 @@ class ImageImportService extends Component
      */
     private function _download(string $url, string $filename): ?array
     {
-        $tempPath = Craft::$app->getPath()->getTempPath() . DIRECTORY_SEPARATOR . uniqid('copydeck_') . '_' . $filename;
+        $tempPath = Craft::$app->getPath()->getTempPath() . DIRECTORY_SEPARATOR . uniqid('contentiq_') . '_' . $filename;
 
         try {
             Craft::createGuzzleClient()->request('GET', $url, [
@@ -225,7 +225,7 @@ class ImageImportService extends Component
     }
 
     /**
-     * Extracts just the base filename from a Copydeck S3 key.
+     * Extracts just the base filename from a ContentIQ S3 key.
      *
      * The key format is 'project/path/to/filename.jpg'. Returns the last segment.
      *
@@ -238,7 +238,7 @@ class ImageImportService extends Component
             return '';
         }
 
-        // Strip any thumbnail path segment (e.g. '.thumbs/') used by Copydeck.
+        // Strip any thumbnail path segment (e.g. '.thumbs/') used by ContentIQ.
         $basename = basename($key);
 
         return $basename !== '.' ? $basename : '';

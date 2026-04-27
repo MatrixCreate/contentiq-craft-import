@@ -1,20 +1,20 @@
-# Copydeck Importer — Progress
+# ContentIQ Importer — Progress
 
 ## Version 1.2.0 (in progress)
 
 ### Completed
 
-- **Plugin settings** — Settings model with `copydeckUrl`, `apiKey`, `projectSlug`. Saved via Craft's plugin settings mechanism. Settings screen accessible from CP Settings > Plugins.
+- **Plugin settings** — Settings model with `contentiqUrl`, `apiKey`, `projectSlug`. Saved via Craft's plugin settings mechanism. Settings screen accessible from CP Settings > Plugins.
 
-- **Intro screen** — Replaced history list as the plugin home. Shows "Sync from Copydeck" (primary) and "Import JSON File" (secondary) options. If API not configured, sync button links to settings instead.
+- **Intro screen** — Replaced history list as the plugin home. Shows "Sync from ContentIQ" (primary) and "Import JSON File" (secondary) options. If API not configured, sync button links to settings instead.
 
-- **History view** — Previous import history list moved to `copydeck-importer/history`, linked from the intro screen. Supports new `sync` type indicator alongside `batch` and `single`.
+- **History view** — Previous import history list moved to `contentiq-importer/history`, linked from the intro screen. Supports new `sync` type indicator alongside `batch` and `single`.
 
-- **Copydeck API service** — `CopydeckApiService` fetches project export via `GET {url}/api/v1/projects/{slug}/export` with Bearer auth. Uses `Craft::createGuzzleClient()`.
+- **ContentIQ API service** — `ContentIQApiService` fetches project export via `GET {url}/api/v1/projects/{slug}/export` with Bearer auth. Uses `Craft::createGuzzleClient()`.
 
 - **Sync queue job** — `SyncJob` extends `craft\queue\BaseJob`. Controller creates a `pending` run record, pushes job to queue. Frontend polls `sync/status?runId=N` for completion, then redirects to sync report. Calls `Craft.postActionRequest('queue/run')` to kick the queue immediately.
 
-- **Per-entry sidebar widget** — `EVENT_DEFINE_SIDEBAR_HTML` appends a COPYDECK section to every entry edit screen with Sync button and last-synced timestamp. Calls single-page API endpoint. Stored in `copydeck_entry_syncs` table.
+- **Per-entry sidebar widget** — `EVENT_DEFINE_SIDEBAR_HTML` appends a COPYDECK section to every entry edit screen with Sync button and last-synced timestamp. Calls single-page API endpoint. Stored in `contentiq_entry_syncs` table.
 
 - **Sync report** — Dedicated template showing hierarchical page tree with indentation from `depth`, created/updated indicators, edit/view links, inline warnings. Summary line with page/image/warning counts.
 
@@ -26,9 +26,9 @@
 
 - **Hero subheading** — Optional `{level, text}` subheading rendered as `<hN>` prepended to body in `richText`.
 
-- **Hero action buttons** — `buttons[]` array from Copydeck imported into `actionButtons` Matrix field inside the hero ContentBlock.
+- **Hero action buttons** — `buttons[]` array from ContentIQ imported into `actionButtons` Matrix field inside the hero ContentBlock.
 
-- **Copydeck Cards staging block** — Cards import to `copydeckCards` (not `contentCards`). Editors migrate to the appropriate final card block type with proper entry links.
+- **ContentIQ Cards staging block** — Cards import to `contentiqCards` (not `contentCards`). Editors migrate to the appropriate final card block type with proper entry links.
 
 - **Cards intro field** — `intro` ContentNode[] on cards blocks imported to outer `richText` CKEditor field above the card grid.
 
@@ -36,9 +36,9 @@
 
 - **FAQ nodes handler** — `faqNodes` handler splits the `nodes` array at the `faq_items` boundary: content before → `richText`, items → inner accordion entries, content after → `extraRichText`, CTA buttons → `actionButtons` Matrix. Supports both `fields.items` (primary) and `nodes.faq_items` (fallback) as FAQ item sources.
 
-- **USP block** — `usp` type maps to `copydeckUsp` with `uspText` (richText with list support).
+- **USP block** — `usp` type maps to `contentiqUsp` with `uspText` (richText with list support).
 
-- **Global block** — `global` type maps to `copydeckGlobal` with `copydeckNotes` for developer staging.
+- **Global block** — `global` type maps to `contentiqGlobal` with `contentiqNotes` for developer staging.
 
 - **Action button support** — `hyperButton` handler in MatrixBuilder converts `{label, url}` to Hyper field data. Sets `showLinkAsSeparateButton` when button present.
 
@@ -52,13 +52,13 @@
 
 - **Image downloads via Guzzle** — Replaced `file_get_contents()` with `Craft::createGuzzleClient()` for SSL compatibility with dev domains.
 
-- **Slug mapping** — `config/copydeck.php` `slugMap` translates Craft slugs to Copydeck slugs for the sidebar widget sync.
+- **Slug mapping** — `config/contentiq.php` `slugMap` translates Craft slugs to ContentIQ slugs for the sidebar widget sync.
 
-- **CLI default action** — `ImportController::$defaultAction = 'import'` so `copydeck-importer/import` works without repeating `import`.
+- **CLI default action** — `ImportController::$defaultAction = 'import'` so `contentiq-importer/import` works without repeating `import`.
 
 - **CP nav icon** — Uses Craft's built-in `copyright` system icon.
 
-- **Sidebar block notes** — Collects `notes` from each block during import, formats as "Block Type\nnote text", stores in `copydeck_entry_syncs.notes` column. Displayed in the sidebar widget below "Synced at". Updates in place on sync. Migration `m250419_000000_add_notes_to_entry_syncs` adds the column.
+- **Sidebar block notes** — Collects `notes` from each block during import, formats as "Block Type\nnote text", stores in `contentiq_entry_syncs.notes` column. Displayed in the sidebar widget below "Synced at". Updates in place on sync. Migration `m250419_000000_add_notes_to_entry_syncs` adds the column.
 
 - **Sidebar reload link** — After a successful sync, a "Reload" link appears next to the timestamp so the editor can refresh to see updated content.
 
@@ -68,11 +68,11 @@
 
 - **Hyper linkClass** — Action buttons in hero and CTA entries now include `linkClass: 'btn btn-primary'`.
 
-- **Hero mobile image** — `mobile_image` field from Copydeck hero blocks imported to `mobileImage` asset field on the hero ContentBlock.
+- **Hero mobile image** — `mobile_image` field from ContentIQ hero blocks imported to `mobileImage` asset field on the hero ContentBlock.
 
-- **Sidebar lock toggle** — CSS-only lightswitch in the COPYDECK sidebar. Locked entries are skipped during batch syncs (SyncJob) with a warning. Stored in `copydeck_entry_syncs.locked`. Migration `m250419_000001_add_locked_to_entry_syncs`.
+- **Sidebar lock toggle** — CSS-only lightswitch in the COPYDECK sidebar. Locked entries are skipped during batch syncs (SyncJob) with a warning. Stored in `contentiq_entry_syncs.locked`. Migration `m250419_000001_add_locked_to_entry_syncs`.
 
-- **Sidebar clear notes** — "Clear" button removes block notes via `copydeck-importer/cp/clear-notes` endpoint.
+- **Sidebar clear notes** — "Clear" button removes block notes via `contentiq-importer/cp/clear-notes` endpoint.
 
 - **Entry title in error messages** — Widget sync errors use the entry title instead of slug for readability.
 
@@ -84,7 +84,7 @@
 
 - **Hero template rewrite** — `hero.twig` rewritten as single file (~100 lines) reading from `entry.hero` ContentBlock. Deleted `hero.slide.twig` and `hero.slide.image.twig`. Removed carousel CSS. Parent image inheritance and global fallback preserved.
 
-- **New content block templates** — `copydeckCards.twig`, `copydeckUsp.twig`, `copydeckGlobal.twig`, `priceList.twig`.
+- **New content block templates** — `contentiqCards.twig`, `contentiqUsp.twig`, `contentiqGlobal.twig`, `priceList.twig`.
 
 - **CKEditor Details/Summary plugin** — Custom CKEditor 5 plugin (`modules/ckeditor-details/`) via `BaseCkeditorPackageAsset`. Single context-aware toolbar button: inserts a fresh `<details>/<summary>` block, or converts selected list items into details blocks. Registered as a Craft module. Built with Vite as ES module. Includes Enter-to-escape keyboard handling (Enter in summary jumps to content, Enter on empty last paragraph escapes the block). Uses Craft's `list-timeline` icon scaled to CKEditor's 20x20 viewBox.
 
@@ -97,7 +97,7 @@ src/
 ├── models/
 │   └── Settings.php             # Plugin settings model
 ├── services/
-│   └── CopydeckApiService.php   # Copydeck API client
+│   └── ContentIQApiService.php   # ContentIQ API client
 └── templates/_cp/
     ├── history.twig             # Import history (moved from index)
     ├── settings.twig            # Plugin settings form
@@ -109,7 +109,7 @@ src/
 
 ```
 src/
-├── CopydeckImporter.php         # Settings, routes, sidebar widget, icon
+├── ContentIQImporter.php         # Settings, routes, sidebar widget, icon
 ├── controllers/CpController.php # Intro, history, sync, widget-sync, hierarchy
 ├── console/controllers/ImportController.php  # defaultAction, hierarchy
 ├── services/ImportService.php   # Homepage, hero ContentBlock, hierarchy

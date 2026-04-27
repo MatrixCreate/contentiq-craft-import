@@ -1,15 +1,15 @@
 <?php
 
 /**
- * Copydeck — default block type mappings.
+ * ContentIQ — default block type mappings.
  *
- * Keys are Copydeck JSON block type strings (exact, from export).
+ * Keys are ContentIQ JSON block type strings (exact, from export).
  * Values define the outer Craft Matrix block type and nested inner Matrix structure.
  *
  * Structure per mapping:
  *   outerType   — handle of the Craft contentBlocks entry type
- *   outerFields — fields set directly on the outer entry, keyed by Copydeck source key:
- *                   [copydeckKey => [craftHandle, handlerType]]
+ *   outerFields — fields set directly on the outer entry, keyed by ContentIQ source key:
+ *                   [contentiqKey => [craftHandle, handlerType]]
  *   innerMatrix — nested Matrix field config:
  *                   outerField  — Matrix field handle on the outer entry type
  *                   innerType   — inner entry type handle
@@ -17,8 +17,8 @@
  *                               | 'repeated' (one inner entry per item in sourceKey array)
  *                               | 'grouped' (consecutive blocks of same type merge into one
  *                                            outer entry with one inner entry per block)
- *                   sourceKey   — (repeated only) Copydeck field key holding the items array
- *                   fields      — inner entry field mapping: [copydeckKey => [craftHandle, handlerType]]
+ *                   sourceKey   — (repeated only) ContentIQ field key holding the items array
+ *                   fields      — inner entry field mapping: [contentiqKey => [craftHandle, handlerType]]
  *
  * Handler types:
  *   'nodes'           → nodes array → NodesRenderer → HTML string
@@ -26,16 +26,16 @@
  *   'heading'         → {level, text} object or plain string → <hN>text</hN> HTML
  *   'body'            → plain string → <p>text</p> HTML
  *   'layout'          → plain string → pass through as-is
- *   'textMediaLayout' → Copydeck layout string → mapped to Craft dropdown value
+ *   'textMediaLayout' → ContentIQ layout string → mapped to Craft dropdown value
  *   'tableHtml'       → rows array [{isHeader, cells}] → HTML <table> string
  *   'hyperButton'     → {label, url} object → Hyper link field array
  *   'buttonNodes'     → ContentNode[] → filters ctaButton nodes → actionButtons Matrix entries
  *   'faqNodes'        → ContentNode[] → splits at faq_items → richText/extraRichText/_faqItems
  *
  * Developer notes:
- *   'notes' is a block-level key (not inside 'fields') emitted by Copydeck when the CSM
+ *   'notes' is a block-level key (not inside 'fields') emitted by ContentIQ when the CSM
  *   adds a developer note to a block. It is read directly from $block['notes'] in
- *   ImportService and written to the copydeckNotes field on the outer entry. It is NOT
+ *   ImportService and written to the contentiqNotes field on the outer entry. It is NOT
  *   present in outerFields here because MatrixBuilder reads from $block['fields'] only.
  *
  * Blocks NOT in this mapping (handled or skipped elsewhere):
@@ -43,7 +43,7 @@
  *   call_to_action — handled separately; creates a callToActionEntry and relates it
  *   table         — no matching block type in this project
  *
- * Override any mapping in config/copydeck.php using the 'blockOverrides' key.
+ * Override any mapping in config/contentiq.php using the 'blockOverrides' key.
  * Overrides replace the entire block definition (not merged at field level).
  */
 
@@ -88,7 +88,7 @@ return [
             'outerField' => 'accordionItems',
             'innerType'  => 'accordionItem',
             'mode'       => 'repeated',
-            'sourceKey'         => 'items',       // new: flat array from Copydeck
+            'sourceKey'         => 'items',       // new: flat array from ContentIQ
             'fallbackSourceKey' => '_faqItems',   // legacy: extracted from nodes.faq_items
             'fields'     => [
                 'question' => ['itemTitle',   'heading'],  // plain string → <h3>
@@ -98,13 +98,13 @@ return [
     ],
 
     'cards' => [
-        'outerType'   => 'copydeckCards',
+        'outerType'   => 'contentiqCards',
         'outerFields' => [
             'intro' => ['richText', 'nodes'],  // ContentNode[] → HTML above card grid
         ],
         'innerMatrix' => [
-            'outerField' => 'copydeckCards',
-            'innerType'  => 'copydeckCard',
+            'outerField' => 'contentiqCards',
+            'innerType'  => 'contentiqCard',
             'mode'       => 'repeated',
             'sourceKey'  => 'cards',
             'fields'     => [
@@ -127,7 +127,7 @@ return [
     ],
 
     'usp' => [
-        'outerType'   => 'copydeckUsp',
+        'outerType'   => 'contentiqUsp',
         'outerFields' => [
             'nodes' => ['uspText', 'nodes'],  // heading + list → CKEditor HTML (richText with list support)
         ],
@@ -135,7 +135,7 @@ return [
     ],
 
     'global' => [
-        'outerType'   => 'copydeckGlobal',
+        'outerType'   => 'contentiqGlobal',
         'outerFields' => [
             'nodes' => ['richText',      'nodes'],  // rendered as HTML into the content field
         ],

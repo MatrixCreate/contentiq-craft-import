@@ -1,6 +1,6 @@
 <?php
 
-namespace matrixcreate\copydeckimporter\console\controllers;
+namespace matrixcreate\contentiqimporter\console\controllers;
 
 use Craft;
 use craft\console\Controller;
@@ -18,7 +18,7 @@ use yii\console\ExitCode;
  * saved correctly via the raw Craft API, with no importer abstraction at all.
  *
  * Usage:
- *   php craft copydeck-importer/test-matrix
+ *   php craft contentiq-importer/test-matrix
  *
  * Everything is hardcoded. If this command saves correctly (draft exists in
  * CP with rich text AND the image asset populated in the image field), the

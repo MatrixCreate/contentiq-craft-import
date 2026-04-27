@@ -1,6 +1,6 @@
 <?php
 
-namespace matrixcreate\copydeckimporter\models;
+namespace matrixcreate\contentiqimporter\models;
 
 use craft\base\Model;
 use craft\helpers\App;
@@ -8,7 +8,7 @@ use craft\helpers\App;
 /**
  * Plugin settings model.
  *
- * Stores Copydeck API connection details used by the sync flow.
+ * Stores ContentIQ API connection details used by the sync flow.
  * Saved via Craft's built-in plugin settings mechanism (project config).
  *
  * @author Matrix Create <hello@matrixcreate.com>
@@ -17,14 +17,14 @@ use craft\helpers\App;
 class Settings extends Model
 {
     /**
-     * Base URL of the Copydeck instance (e.g. https://copydeck.agency.com).
+     * Base URL of the ContentIQ instance (e.g. https://contentiq.agency.com).
      *
      * @var string
      */
-    public string $copydeckUrl = '';
+    public string $contentiqUrl = '';
 
     /**
-     * API key from Copydeck project settings.
+     * API key from ContentIQ project settings.
      *
      * @var string
      */
@@ -36,24 +36,24 @@ class Settings extends Model
     public function defineRules(): array
     {
         return [
-            [['copydeckUrl', 'apiKey'], 'string'],
-            ['copydeckUrl', 'validateParsedUrl'],
+            [['contentiqUrl', 'apiKey'], 'string'],
+            ['contentiqUrl', 'validateParsedUrl'],
         ];
     }
 
     /**
-     * Validates copydeckUrl after resolving any environment variable alias.
+     * Validates contentiqUrl after resolving any environment variable alias.
      */
     public function validateParsedUrl(): void
     {
-        $resolved = App::parseEnv($this->copydeckUrl);
+        $resolved = App::parseEnv($this->contentiqUrl);
 
         if ($resolved === '') {
             return;
         }
 
         if (filter_var($resolved, FILTER_VALIDATE_URL) === false) {
-            $this->addError('copydeckUrl', 'Copydeck URL is not a valid URL.');
+            $this->addError('contentiqUrl', 'ContentIQ URL is not a valid URL.');
         }
     }
 }

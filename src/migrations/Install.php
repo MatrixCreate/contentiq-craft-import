@@ -1,11 +1,11 @@
 <?php
 
-namespace matrixcreate\copydeckimporter\migrations;
+namespace matrixcreate\contentiqimporter\migrations;
 
 use craft\db\Migration;
 
 /**
- * Installation migration for the Copydeck plugin.
+ * Installation migration for the ContentIQ plugin.
  *
  * @author Matrix Create <hello@matrixcreate.com>
  * @since 1.1.0
@@ -31,8 +31,8 @@ class Install extends Migration
      */
     public function safeDown(): bool
     {
-        $this->dropTableIfExists('{{%copydeck_entry_syncs}}');
-        $this->dropTableIfExists('{{%copydeck_import_runs}}');
+        $this->dropTableIfExists('{{%contentiq_entry_syncs}}');
+        $this->dropTableIfExists('{{%contentiq_import_runs}}');
 
         return true;
     }
@@ -41,13 +41,13 @@ class Install extends Migration
     // =========================================================================
 
     /**
-     * Creates the copydeck_import_runs table.
+     * Creates the contentiq_import_runs table.
      *
      * @return void
      */
     private function _createImportRunsTable(): void
     {
-        $this->createTable('{{%copydeck_import_runs}}', [
+        $this->createTable('{{%contentiq_import_runs}}', [
             'id'          => $this->primaryKey(),
             'importedBy'  => $this->integer()->null(),
             'filename'    => $this->string(255)->notNull(),
@@ -63,24 +63,24 @@ class Install extends Migration
 
         $this->addForeignKey(
             null,
-            '{{%copydeck_import_runs}}',
+            '{{%contentiq_import_runs}}',
             'importedBy',
             '{{%users}}',
             'id',
             'SET NULL',
         );
 
-        $this->createIndex(null, '{{%copydeck_import_runs}}', ['dateCreated']);
+        $this->createIndex(null, '{{%contentiq_import_runs}}', ['dateCreated']);
     }
 
     /**
-     * Creates the copydeck_entry_syncs table for per-entry sync tracking.
+     * Creates the contentiq_entry_syncs table for per-entry sync tracking.
      *
      * @return void
      */
     private function _createEntrySyncsTable(): void
     {
-        $this->createTable('{{%copydeck_entry_syncs}}', [
+        $this->createTable('{{%contentiq_entry_syncs}}', [
             'element_id' => $this->integer()->notNull(),
             'locked'     => $this->boolean()->notNull()->defaultValue(false),
             'synced_at'  => $this->dateTime()->null(),
@@ -90,7 +90,7 @@ class Install extends Migration
 
         $this->addForeignKey(
             null,
-            '{{%copydeck_entry_syncs}}',
+            '{{%contentiq_entry_syncs}}',
             'element_id',
             '{{%elements}}',
             'id',

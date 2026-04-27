@@ -1,6 +1,6 @@
 <?php
 
-namespace matrixcreate\copydeckimporter;
+namespace matrixcreate\contentiqimporter;
 
 use Craft;
 use craft\base\Plugin;
@@ -13,18 +13,18 @@ use craft\base\Model;
 use craft\db\Query;
 use craft\helpers\Html;
 use craft\helpers\UrlHelper;
-use matrixcreate\copydeckimporter\models\Settings;
-use matrixcreate\copydeckimporter\services\CopydeckApiService;
-use matrixcreate\copydeckimporter\services\ImageImportService;
-use matrixcreate\copydeckimporter\services\ImportService;
-use matrixcreate\copydeckimporter\services\MatrixBuilder;
-use matrixcreate\copydeckimporter\services\NodesRenderer;
+use matrixcreate\contentiqimporter\models\Settings;
+use matrixcreate\contentiqimporter\services\ContentIQApiService;
+use matrixcreate\contentiqimporter\services\ImageImportService;
+use matrixcreate\contentiqimporter\services\ImportService;
+use matrixcreate\contentiqimporter\services\MatrixBuilder;
+use matrixcreate\contentiqimporter\services\NodesRenderer;
 use yii\base\Event;
 
 /**
- * Copydeck plugin.
+ * ContentIQ plugin.
  *
- * @property-read CopydeckApiService $api
+ * @property-read ContentIQApiService $api
  * @property-read ImageImportService $images
  * @property-read ImportService $imports
  * @property-read MatrixBuilder $matrixBuilder
@@ -34,7 +34,7 @@ use yii\base\Event;
  * @author Matrix Create <hello@matrixcreate.com>
  * @since 1.0.0
  */
-class CopydeckImporter extends Plugin
+class ContentIQImporter extends Plugin
 {
     // Constants
     // =========================================================================
@@ -45,8 +45,8 @@ class CopydeckImporter extends Plugin
     // Static Properties
     // =========================================================================
 
-    /** @var CopydeckImporter|null */
-    public static ?CopydeckImporter $plugin = null;
+    /** @var ContentIQImporter|null */
+    public static ?ContentIQImporter $plugin = null;
 
     // Public Properties
     // =========================================================================
@@ -79,7 +79,7 @@ class CopydeckImporter extends Plugin
         self::$plugin = $this;
 
         $this->setComponents([
-            'api' => CopydeckApiService::class,
+            'api' => ContentIQApiService::class,
             'images' => ImageImportService::class,
             'imports' => ImportService::class,
             'matrixBuilder' => MatrixBuilder::class,
@@ -90,7 +90,7 @@ class CopydeckImporter extends Plugin
         $this->_registerEntrySidebar();
 
         Craft::info(
-            Craft::t('copydeck-importer', '{name} plugin loaded', ['name' => $this->name]),
+            Craft::t('contentiq-importer', '{name} plugin loaded', ['name' => $this->name]),
             __METHOD__,
         );
     }
@@ -102,7 +102,7 @@ class CopydeckImporter extends Plugin
     {
         $item = parent::getCpNavItem();
 
-        $item['label'] = 'Copydeck';
+        $item['label'] = 'ContentIQ';
         $item['icon']  = 'copyright';
 
         return $item;
@@ -125,7 +125,7 @@ class CopydeckImporter extends Plugin
     protected function settingsHtml(): ?string
     {
         return Craft::$app->view->renderTemplate(
-            'copydeck-importer/_cp/settings',
+            'contentiq-importer/_cp/settings',
             ['settings' => $this->getSettings()],
         );
     }
@@ -144,25 +144,25 @@ class CopydeckImporter extends Plugin
             UrlManager::class,
             UrlManager::EVENT_REGISTER_CP_URL_RULES,
             function (RegisterUrlRulesEvent $event) {
-                $event->rules['copydeck-importer']                         = 'copydeck-importer/cp/index';
-                $event->rules['copydeck-importer/history']                 = 'copydeck-importer/cp/history';
-                $event->rules['copydeck-importer/upload']                  = 'copydeck-importer/cp/upload';
-                $event->rules['copydeck-importer/preview']                 = 'copydeck-importer/cp/preview';
-                $event->rules['copydeck-importer/import']                  = 'copydeck-importer/cp/run-import';
-                $event->rules['copydeck-importer/result/<runId:\d+>']      = 'copydeck-importer/cp/result';
-                $event->rules['copydeck-importer/sync']                    = 'copydeck-importer/cp/sync';
-                $event->rules['copydeck-importer/sync/run']                = 'copydeck-importer/cp/run-sync';
-                $event->rules['copydeck-importer/sync/status']             = 'copydeck-importer/cp/sync-status';
-                $event->rules['copydeck-importer/sync/result/<runId:\d+>'] = 'copydeck-importer/cp/sync-result';
-                $event->rules['copydeck-importer/widget-sync']             = 'copydeck-importer/cp/widget-sync';
-                $event->rules['copydeck-importer/clear-notes']           = 'copydeck-importer/cp/clear-notes';
-                $event->rules['copydeck-importer/toggle-lock']           = 'copydeck-importer/cp/toggle-lock';
+                $event->rules['contentiq-importer']                         = 'contentiq-importer/cp/index';
+                $event->rules['contentiq-importer/history']                 = 'contentiq-importer/cp/history';
+                $event->rules['contentiq-importer/upload']                  = 'contentiq-importer/cp/upload';
+                $event->rules['contentiq-importer/preview']                 = 'contentiq-importer/cp/preview';
+                $event->rules['contentiq-importer/import']                  = 'contentiq-importer/cp/run-import';
+                $event->rules['contentiq-importer/result/<runId:\d+>']      = 'contentiq-importer/cp/result';
+                $event->rules['contentiq-importer/sync']                    = 'contentiq-importer/cp/sync';
+                $event->rules['contentiq-importer/sync/run']                = 'contentiq-importer/cp/run-sync';
+                $event->rules['contentiq-importer/sync/status']             = 'contentiq-importer/cp/sync-status';
+                $event->rules['contentiq-importer/sync/result/<runId:\d+>'] = 'contentiq-importer/cp/sync-result';
+                $event->rules['contentiq-importer/widget-sync']             = 'contentiq-importer/cp/widget-sync';
+                $event->rules['contentiq-importer/clear-notes']           = 'contentiq-importer/cp/clear-notes';
+                $event->rules['contentiq-importer/toggle-lock']           = 'contentiq-importer/cp/toggle-lock';
             },
         );
     }
 
     /**
-     * Appends a Copydeck sync widget to the entry edit screen sidebar.
+     * Appends a ContentIQ sync widget to the entry edit screen sidebar.
      *
      * Uses Entry::EVENT_DEFINE_SIDEBAR_HTML (fires on every entry edit screen
      * render). The handler appends to $event->html — never replaces it.
@@ -190,7 +190,7 @@ class CopydeckImporter extends Plugin
                 // Last successful sync timestamp, notes, and lock state.
                 $syncRow = (new Query())
                     ->select(['synced_at', 'notes', 'locked'])
-                    ->from('{{%copydeck_entry_syncs}}')
+                    ->from('{{%contentiq_entry_syncs}}')
                     ->where(['element_id' => $elementId])
                     ->one();
 
@@ -201,43 +201,43 @@ class CopydeckImporter extends Plugin
                 if ($syncedAt) {
                     $syncedAtFormatted = Craft::$app->getFormatter()->asDatetime($syncedAt, 'short');
                 } else {
-                    $syncedAtFormatted = Craft::t('copydeck-importer', 'Never');
+                    $syncedAtFormatted = Craft::t('contentiq-importer', 'Never');
                 }
 
-                $widgetId       = 'copydeck-sync-' . $elementId;
-                $actionUrl      = UrlHelper::actionUrl('copydeck-importer/cp/widget-sync');
-                $clearNotesUrl  = UrlHelper::actionUrl('copydeck-importer/cp/clear-notes');
-                $toggleLockUrl  = UrlHelper::actionUrl('copydeck-importer/cp/toggle-lock');
+                $widgetId       = 'contentiq-sync-' . $elementId;
+                $actionUrl      = UrlHelper::actionUrl('contentiq-importer/cp/widget-sync');
+                $clearNotesUrl  = UrlHelper::actionUrl('contentiq-importer/cp/clear-notes');
+                $toggleLockUrl  = UrlHelper::actionUrl('contentiq-importer/cp/toggle-lock');
                 $csrfToken      = Craft::$app->getRequest()->getCsrfToken();
 
                 // fieldset + legend matches Craft's native sidebar section style.
                 $html  = '<fieldset>';
-                $html .= '<legend class="h6">' . Html::encode('COPYDECK') . '</legend>';
+                $html .= '<legend class="h6">' . Html::encode('CONTENTIQ') . '</legend>';
                 $html .= Html::beginTag('div', ['id' => $widgetId, 'class' => 'meta']);
 
                 // Locked row — CSS-only lightswitch toggle.
                 $lockedChecked = $locked ? ' checked' : '';
                 $html .= '<style>
-                  .copydeck-switch { position:relative; display:inline-block; width:34px; height:20px; }
-                  .copydeck-switch input { opacity:0; width:0; height:0; }
-                  .copydeck-switch .copydeck-slider { position:absolute; inset:0; background:var(--gray-300); border-radius:10px; transition:background 0.2s; cursor:pointer; }
-                  .copydeck-switch .copydeck-slider::before { content:""; position:absolute; width:14px; height:14px; left:3px; bottom:3px; background:#fff; border-radius:50%; transition:transform 0.2s; }
-                  .copydeck-switch input:checked + .copydeck-slider { background:var(--bg-enabled); box-shadow:inset 0 0px 0px 1px rgba(0,0,0,0.125); }
-                  .copydeck-switch input:checked + .copydeck-slider::before { transform:translateX(14px); }
+                  .contentiq-switch { position:relative; display:inline-block; width:34px; height:20px; }
+                  .contentiq-switch input { opacity:0; width:0; height:0; }
+                  .contentiq-switch .contentiq-slider { position:absolute; inset:0; background:var(--gray-300); border-radius:10px; transition:background 0.2s; cursor:pointer; }
+                  .contentiq-switch .contentiq-slider::before { content:""; position:absolute; width:14px; height:14px; left:3px; bottom:3px; background:#fff; border-radius:50%; transition:transform 0.2s; }
+                  .contentiq-switch input:checked + .contentiq-slider { background:var(--bg-enabled); box-shadow:inset 0 0px 0px 1px rgba(0,0,0,0.125); }
+                  .contentiq-switch input:checked + .contentiq-slider::before { transform:translateX(14px); }
                   #' . $widgetId . '-btn:disabled { opacity:0.35; pointer-events:none; }
                 </style>';
                 $html .= '<div class="field">';
-                $html .= '<div class="heading"><label for="' . $widgetId . '-lock">' . Html::encode(Craft::t('copydeck-importer', 'Locked')) . '</label></div>';
+                $html .= '<div class="heading"><label for="' . $widgetId . '-lock">' . Html::encode(Craft::t('contentiq-importer', 'Locked')) . '</label></div>';
                 $html .= '<div class="input ltr">';
-                $html .= '<label class="copydeck-switch"><input type="checkbox" id="' . $widgetId . '-lock"' . $lockedChecked . '><span class="copydeck-slider"></span></label>';
+                $html .= '<label class="contentiq-switch"><input type="checkbox" id="' . $widgetId . '-lock"' . $lockedChecked . '><span class="contentiq-slider"></span></label>';
                 $html .= '</div></div>';
 
                 // Status row — label + Sync button.
                 $html .= '<div class="field">';
-                $html .= '<div class="heading"><label>' . Html::encode(Craft::t('copydeck-importer', 'Status')) . '</label></div>';
+                $html .= '<div class="heading"><label>' . Html::encode(Craft::t('contentiq-importer', 'Status')) . '</label></div>';
                 $html .= '<div class="input ltr">';
                 $html .= Html::button(
-                    Html::encode(Craft::t('copydeck-importer', 'Sync')),
+                    Html::encode(Craft::t('contentiq-importer', 'Sync')),
                     [
                         'type'     => 'button',
                         'class'    => 'btn small',
@@ -253,7 +253,7 @@ class CopydeckImporter extends Plugin
 
                 // Synced at row.
                 $html .= '<div class="field">';
-                $html .= '<div class="heading"><label>' . Html::encode(Craft::t('copydeck-importer', 'Synced at')) . '</label></div>';
+                $html .= '<div class="heading"><label>' . Html::encode(Craft::t('contentiq-importer', 'Synced at')) . '</label></div>';
                 $html .= '<div class="input ltr">';
                 $html .= Html::tag('span', Html::encode($syncedAtFormatted), [
                     'id'    => $widgetId . '-timestamp',
@@ -263,7 +263,7 @@ class CopydeckImporter extends Plugin
 
                 // Notes row.
                 $html .= '<div class="field">';
-                $html .= '<div class="heading" style="align-items:start;"><label>' . Html::encode(Craft::t('copydeck-importer', 'Notes')) . '</label></div>';
+                $html .= '<div class="heading" style="align-items:start;"><label>' . Html::encode(Craft::t('contentiq-importer', 'Notes')) . '</label></div>';
                 $html .= '<div class="input ltr" style="flex-direction:column; align-items:flex-start; gap:0.75rem;">';
                 $html .= Html::tag('div', $notes !== '' ? nl2br(Html::encode($notes)) : Html::tag('span', Html::encode('None'), ['class' => 'light']), [
                     'id'    => $widgetId . '-notes',
@@ -271,7 +271,7 @@ class CopydeckImporter extends Plugin
                 ]);
                 if ($notes !== '') {
                     $html .= Html::button(
-                        Html::encode(Craft::t('copydeck-importer', 'Clear')),
+                        Html::encode(Craft::t('contentiq-importer', 'Clear')),
                         [
                             'type'  => 'button',
                             'class' => 'btn small',

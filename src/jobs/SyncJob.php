@@ -1,6 +1,6 @@
 <?php
 
-namespace matrixcreate\copydeckimporter\jobs;
+namespace matrixcreate\contentiqimporter\jobs;
 
 use Craft;
 use craft\db\Query;
@@ -8,12 +8,12 @@ use craft\helpers\Json;
 use craft\helpers\StringHelper;
 use craft\i18n\Translation;
 use craft\queue\BaseJob;
-use matrixcreate\copydeckimporter\CopydeckImporter;
+use matrixcreate\contentiqimporter\ContentIQImporter;
 
 /**
- * Queue job that runs a full Copydeck API sync.
+ * Queue job that runs a full ContentIQ API sync.
  *
- * Fetches the export from the Copydeck API, then imports each page
+ * Fetches the export from the ContentIQ API, then imports each page
  * through the existing ImportService pipeline. Saves the result to
  * the import history table for the sync report screen.
  *
@@ -38,7 +38,7 @@ class SyncJob extends BaseJob
         // the project root — match the CLI behaviour.
         chdir(Craft::getAlias('@webroot'));
 
-        $plugin = CopydeckImporter::$plugin;
+        $plugin = ContentIQImporter::$plugin;
 
         // 1. Fetch export from API.
         $apiResult = $plugin->api->fetchExport();
@@ -63,7 +63,7 @@ class SyncJob extends BaseJob
         $hasWarnings   = false;
 
         // Resolve section for structure positioning.
-        $config        = Craft::$app->config->getConfigFromFile('copydeck');
+        $config        = Craft::$app->config->getConfigFromFile('contentiq');
         $sectionHandle = $config['section'] ?? 'pages';
         $section       = Craft::$app->entries->getSectionByHandle($sectionHandle);
         $structureId   = $section?->structureId;
@@ -86,7 +86,7 @@ class SyncJob extends BaseJob
             if ($existingEntry !== null) {
                 $isLocked = (new Query())
                     ->select(['locked'])
-                    ->from('{{%copydeck_entry_syncs}}')
+                    ->from('{{%contentiq_entry_syncs}}')
                     ->where(['element_id' => $existingEntry->id])
                     ->scalar();
 
@@ -190,7 +190,7 @@ class SyncJob extends BaseJob
 
         // 5. Update the pre-created run record.
         Craft::$app->getDb()->createCommand()->update(
-            '{{%copydeck_import_runs}}',
+            '{{%contentiq_import_runs}}',
             [
                 'pageCount'   => count($pageResults),
                 'imageCount'  => $totalImages,
@@ -215,18 +215,18 @@ class SyncJob extends BaseJob
             $entryId = $result['entryId'];
 
             $exists = (new Query())
-                ->from('{{%copydeck_entry_syncs}}')
+                ->from('{{%contentiq_entry_syncs}}')
                 ->where(['element_id' => $entryId])
                 ->exists();
 
             if ($exists) {
-                $db->createCommand()->update('{{%copydeck_entry_syncs}}', [
+                $db->createCommand()->update('{{%contentiq_entry_syncs}}', [
                     'locked'    => true,
                     'synced_at' => $now,
                     'notes'     => $result['blockNotes'] ?? '',
                 ], ['element_id' => $entryId])->execute();
             } else {
-                $db->createCommand()->insert('{{%copydeck_entry_syncs}}', [
+                $db->createCommand()->insert('{{%contentiq_entry_syncs}}', [
                     'element_id' => $entryId,
                     'locked'     => true,
                     'synced_at'  => $now,
@@ -241,7 +241,7 @@ class SyncJob extends BaseJob
      */
     protected function defaultDescription(): ?string
     {
-        return Translation::prep('copydeck-importer', 'Syncing content from Copydeck');
+        return Translation::prep('contentiq-importer', 'Syncing content from ContentIQ');
     }
 
     /**
@@ -252,7 +252,7 @@ class SyncJob extends BaseJob
     private function _failRun(string $error): void
     {
         Craft::$app->getDb()->createCommand()->update(
-            '{{%copydeck_import_runs}}',
+            '{{%contentiq_import_runs}}',
             [
                 'status'      => 'errors',
                 'result'      => Json::encode([['success' => false, 'slug' => '', 'error' => $error, 'warnings' => []]]),

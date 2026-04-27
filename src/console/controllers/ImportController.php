@@ -1,22 +1,22 @@
 <?php
 
-namespace matrixcreate\copydeckimporter\console\controllers;
+namespace matrixcreate\contentiqimporter\console\controllers;
 
 use Craft;
 use craft\console\Controller;
 use craft\helpers\App;
 use craft\helpers\Console;
 use craft\elements\Entry;
-use matrixcreate\copydeckimporter\CopydeckImporter;
+use matrixcreate\contentiqimporter\ContentIQImporter;
 use yii\console\ExitCode;
 
 /**
- * Copydeck import console controller.
+ * ContentIQ import console controller.
  *
  * Usage:
- *   php craft copydeck-importer/import --file=export.json
- *   php craft copydeck-importer/import --file=export.json --dry-run
- *   php craft copydeck-importer/import --file=export.json --verbose
+ *   php craft contentiq-importer/import --file=export.json
+ *   php craft contentiq-importer/import --file=export.json --dry-run
+ *   php craft contentiq-importer/import --file=export.json --verbose
  *
  * @author Matrix Create <hello@matrixcreate.com>
  * @since 1.0.0
@@ -32,7 +32,7 @@ class ImportController extends Controller
     // =========================================================================
 
     /**
-     * @var string|null Path to the Copydeck JSON export file.
+     * @var string|null Path to the ContentIQ JSON export file.
      */
     public ?string $file = null;
 
@@ -83,7 +83,7 @@ class ImportController extends Controller
     }
 
     /**
-     * Import a Copydeck JSON export into Craft CMS as draft entries.
+     * Import a ContentIQ JSON export into Craft CMS as draft entries.
      *
      * Detects single-page vs batch format from the JSON shape:
      * - Top-level `blocks` array = single page
@@ -96,7 +96,7 @@ class ImportController extends Controller
         App::maxPowerCaptain();
 
         if ($this->file === null) {
-            $this->failure('`--file` is required. Usage: craft copydeck/import --file=export.json');
+            $this->failure('`--file` is required. Usage: craft contentiq/import --file=export.json');
 
             return ExitCode::USAGE;
         }
@@ -136,7 +136,7 @@ class ImportController extends Controller
             $this->stdout('[DRY RUN] ' . PHP_EOL, Console::FG_YELLOW, Console::BOLD);
         }
 
-        $importService = CopydeckImporter::$plugin->imports;
+        $importService = ContentIQImporter::$plugin->imports;
 
         // Batch format has a top-level 'pages' array.
         if (isset($data['pages']) && is_array($data['pages'])) {
@@ -154,7 +154,7 @@ class ImportController extends Controller
      * Runs a batch import by looping over each page through the single-page pipeline.
      *
      * @param array[] $pages
-     * @param \matrixcreate\copydeckimporter\services\ImportService $importService
+     * @param \matrixcreate\contentiqimporter\services\ImportService $importService
      * @return int
      */
     private function _runBatch(array $pages, $importService): int
@@ -165,7 +165,7 @@ class ImportController extends Controller
         $slugToEntryId = [];
 
         // Resolve section for structure positioning.
-        $config        = Craft::$app->config->getConfigFromFile('copydeck');
+        $config        = Craft::$app->config->getConfigFromFile('contentiq');
         $sectionHandle = $config['section'] ?? 'pages';
         $section       = Craft::$app->entries->getSectionByHandle($sectionHandle);
         $structureId   = $section?->structureId;
@@ -235,7 +235,7 @@ class ImportController extends Controller
      * Runs the import pipeline for a single page and renders output.
      *
      * @param array $data
-     * @param \matrixcreate\copydeckimporter\services\ImportService $importService
+     * @param \matrixcreate\contentiqimporter\services\ImportService $importService
      * @return int
      */
     private function _runSinglePage(array $data, $importService): int

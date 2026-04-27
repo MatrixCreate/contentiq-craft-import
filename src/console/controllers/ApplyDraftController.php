@@ -1,6 +1,6 @@
 <?php
 
-namespace matrixcreate\copydeckimporter\console\controllers;
+namespace matrixcreate\contentiqimporter\console\controllers;
 
 use Craft;
 use craft\console\Controller;
@@ -9,10 +9,10 @@ use craft\helpers\Console;
 use yii\console\ExitCode;
 
 /**
- * Applies a Copydeck Import draft to its canonical entry.
+ * Applies a ContentIQ Import draft to its canonical entry.
  *
  * Usage:
- *   php craft copydeck-importer/apply-draft/apply --draft-id=176
+ *   php craft contentiq-importer/apply-draft/apply --draft-id=176
  *
  * @author Matrix Create <hello@matrixcreate.com>
  * @since 1.0.0
@@ -42,7 +42,7 @@ class ApplyDraftController extends Controller
     }
 
     /**
-     * Apply a Copydeck Import draft to its canonical entry.
+     * Apply a ContentIQ Import draft to its canonical entry.
      *
      * @return int
      */

@@ -1,10 +1,10 @@
 {
-  "name": "matrixcreate/copydeck-craft-import",
-  "description": "Import Copydeck content exports into Craft CMS 5 entries.",
+  "name": "matrixcreate/contentiq-craft-import",
+  "description": "Import ContentIQ content exports into Craft CMS 5 entries.",
   "type": "craft-plugin",
   "license": "MIT",
-  "keywords": ["craft", "cms", "plugin", "import", "copydeck", "content"],
-  "homepage": "https://github.com/MatrixCreate/copydeck-craft-import",
+  "keywords": ["craft", "cms", "plugin", "import", "contentiq", "content"],
+  "homepage": "https://github.com/MatrixCreate/contentiq-craft-import",
   "authors": [
     {
       "name": "Matrix Create",
@@ -12,8 +12,8 @@
     }
   ],
   "support": {
-    "issues": "https://github.com/MatrixCreate/copydeck-craft-import/issues",
-    "source": "https://github.com/MatrixCreate/copydeck-craft-import"
+    "issues": "https://github.com/MatrixCreate/contentiq-craft-import/issues",
+    "source": "https://github.com/MatrixCreate/contentiq-craft-import"
   },
   "require": {
     "php": ">=8.2",
@@ -21,15 +21,15 @@
   },
   "autoload": {
     "psr-4": {
-      "matrixcreate\\copydeckimporter\\": "src/"
+      "matrixcreate\\contentiqimporter\\": "src/"
     }
   },
   "extra": {
-    "name": "Copydeck",
-    "handle": "copydeck-importer",
-    "description": "Import Copydeck content exports into Craft CMS 5 entries.",
+    "name": "ContentIQ",
+    "handle": "contentiq-importer",
+    "description": "Import ContentIQ content exports into Craft CMS 5 entries.",
     "developer": "Matrix Create",
     "developerUrl": "https://matrixcreate.com/",
-    "class": "matrixcreate\\copydeckimporter\\CopydeckImporter"
+    "class": "matrixcreate\\contentiqimporter\\ContentIQImporter"
   }
 }

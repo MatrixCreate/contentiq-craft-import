@@ -1,6 +1,6 @@
 <?php
 
-namespace matrixcreate\copydeckimporter\controllers;
+namespace matrixcreate\contentiqimporter\controllers;
 
 use Craft;
 use craft\db\Query;
@@ -13,13 +13,13 @@ use craft\web\UploadedFile;
 use craft\helpers\StringHelper;
 use GuzzleHttp\Exception\GuzzleException;
 use GuzzleHttp\RequestOptions;
-use matrixcreate\copydeckimporter\CopydeckImporter;
-use matrixcreate\copydeckimporter\jobs\SyncJob;
+use matrixcreate\contentiqimporter\ContentIQImporter;
+use matrixcreate\contentiqimporter\jobs\SyncJob;
 use yii\web\BadRequestHttpException;
 use yii\web\Response;
 
 /**
- * CP controller for the Copydeck dashboard, upload, preview, and result screens.
+ * CP controller for the ContentIQ dashboard, upload, preview, and result screens.
  *
  * @author Matrix Create <hello@matrixcreate.com>
  * @since 1.1.0
@@ -36,11 +36,11 @@ class CpController extends Controller
      */
     public function actionIndex(): Response
     {
-        $settings = CopydeckImporter::$plugin->getSettings();
-        $apiConfigured = $settings->copydeckUrl !== ''
+        $settings = ContentIQImporter::$plugin->getSettings();
+        $apiConfigured = $settings->contentiqUrl !== ''
             && $settings->apiKey !== '';
 
-        return $this->renderTemplate('copydeck-importer/_cp/index', [
+        return $this->renderTemplate('contentiq-importer/_cp/index', [
             'apiConfigured' => $apiConfigured,
         ]);
     }
@@ -54,12 +54,12 @@ class CpController extends Controller
     {
         $runs = (new Query())
             ->select(['id', 'importedBy', 'filename', 'type', 'pageCount', 'imageCount', 'status', 'dateCreated'])
-            ->from('{{%copydeck_import_runs}}')
+            ->from('{{%contentiq_import_runs}}')
             ->orderBy(['dateCreated' => SORT_DESC])
             ->limit(50)
             ->all();
 
-        return $this->renderTemplate('copydeck-importer/_cp/history', [
+        return $this->renderTemplate('contentiq-importer/_cp/history', [
             'runs' => $runs,
         ]);
     }
@@ -71,7 +71,7 @@ class CpController extends Controller
      */
     public function actionUpload(): Response
     {
-        return $this->renderTemplate('copydeck-importer/_cp/upload');
+        return $this->renderTemplate('contentiq-importer/_cp/upload');
     }
 
     /**
@@ -89,7 +89,7 @@ class CpController extends Controller
         if ($uploadedFile === null) {
             Craft::$app->getSession()->setError('No file was uploaded.');
 
-            return $this->redirect('copydeck-importer/upload');
+            return $this->redirect('contentiq-importer/upload');
         }
 
         $json = file_get_contents($uploadedFile->tempName);
@@ -97,7 +97,7 @@ class CpController extends Controller
         if ($json === false) {
             Craft::$app->getSession()->setError('Could not read the uploaded file.');
 
-            return $this->redirect('copydeck-importer/upload');
+            return $this->redirect('contentiq-importer/upload');
         }
 
         $data = json_decode($json, true);
@@ -105,7 +105,7 @@ class CpController extends Controller
         if (json_last_error() !== JSON_ERROR_NONE) {
             Craft::$app->getSession()->setError('Invalid JSON: ' . json_last_error_msg());
 
-            return $this->redirect('copydeck-importer/upload');
+            return $this->redirect('contentiq-importer/upload');
         }
 
         // Detect single vs batch.
@@ -113,7 +113,7 @@ class CpController extends Controller
         $pages   = $isBatch ? $data['pages'] : [$data];
 
         // Prepare services for dry-run.
-        $importService = CopydeckImporter::$plugin->imports;
+        $importService = ContentIQImporter::$plugin->imports;
 
         $previewResults = [];
         $totalWarnings  = 0;
@@ -140,11 +140,11 @@ class CpController extends Controller
         $updateCount = count($previewResults) - $createCount;
 
         // Store JSON in session for the import step.
-        $tempFilename = 'copydeck-import-' . gmdate('ymd_His') . '.json';
+        $tempFilename = 'contentiq-import-' . gmdate('ymd_His') . '.json';
         $tempPath     = Craft::$app->getPath()->getTempPath() . DIRECTORY_SEPARATOR . $tempFilename;
         file_put_contents($tempPath, $json);
 
-        return $this->renderTemplate('copydeck-importer/_cp/preview', [
+        return $this->renderTemplate('contentiq-importer/_cp/preview', [
             'pages'         => $previewResults,
             'isBatch'       => $isBatch,
             'pageCount'     => count($previewResults),
@@ -172,7 +172,7 @@ class CpController extends Controller
         if (!is_file($tempPath)) {
             Craft::$app->getSession()->setError('Import file expired. Please upload again.');
 
-            return $this->redirect('copydeck-importer/upload');
+            return $this->redirect('contentiq-importer/upload');
         }
 
         $json = file_get_contents($tempPath);
@@ -181,7 +181,7 @@ class CpController extends Controller
         if ($data === null) {
             Craft::$app->getSession()->setError('Could not parse import file.');
 
-            return $this->redirect('copydeck-importer/upload');
+            return $this->redirect('contentiq-importer/upload');
         }
 
         // Web requests run from webroot already — no chdir needed (unlike CLI).
@@ -189,7 +189,7 @@ class CpController extends Controller
         $isBatch = isset($data['pages']) && is_array($data['pages']);
         $pages   = $isBatch ? $data['pages'] : [$data];
 
-        $importService = CopydeckImporter::$plugin->imports;
+        $importService = ContentIQImporter::$plugin->imports;
         $pageResults   = [];
         $totalImages   = 0;
         $hasErrors     = false;
@@ -197,7 +197,7 @@ class CpController extends Controller
         $slugToEntryId = [];
 
         // Resolve section for structure positioning.
-        $config        = Craft::$app->config->getConfigFromFile('copydeck');
+        $config        = Craft::$app->config->getConfigFromFile('contentiq');
         $sectionHandle = $config['section'] ?? 'pages';
         $section       = Craft::$app->entries->getSectionByHandle($sectionHandle);
         $structureId   = $section?->structureId;
@@ -282,7 +282,7 @@ class CpController extends Controller
         // Clean up temp file.
         @unlink($tempPath);
 
-        return $this->redirect('copydeck-importer/result/' . $runId);
+        return $this->redirect('contentiq-importer/result/' . $runId);
     }
 
     /**
@@ -294,7 +294,7 @@ class CpController extends Controller
     public function actionResult(int $runId): Response
     {
         $run = (new Query())
-            ->from('{{%copydeck_import_runs}}')
+            ->from('{{%contentiq_import_runs}}')
             ->where(['id' => $runId])
             ->one();
 
@@ -304,7 +304,7 @@ class CpController extends Controller
 
         $run['result'] = Json::decodeIfJson($run['result'] ?? '[]');
 
-        return $this->renderTemplate('copydeck-importer/_cp/result', [
+        return $this->renderTemplate('contentiq-importer/_cp/result', [
             'run' => $run,
         ]);
     }
@@ -316,18 +316,18 @@ class CpController extends Controller
      */
     public function actionSync(): Response
     {
-        $settings = CopydeckImporter::$plugin->getSettings();
+        $settings = ContentIQImporter::$plugin->getSettings();
 
-        if ($settings->copydeckUrl === '' || $settings->apiKey === '') {
-            Craft::$app->getSession()->setError('Copydeck API is not configured. Set URL and API key in plugin settings.');
+        if ($settings->contentiqUrl === '' || $settings->apiKey === '') {
+            Craft::$app->getSession()->setError('ContentIQ API is not configured. Set URL and API key in plugin settings.');
 
-            return $this->redirect('copydeck-importer');
+            return $this->redirect('contentiq-importer');
         }
 
         // Build tree data from existing sync records.
         $syncRecords = (new Query())
             ->select(['element_id', 'locked'])
-            ->from('{{%copydeck_entry_syncs}}')
+            ->from('{{%contentiq_entry_syncs}}')
             ->all();
 
         $hasSyncRecords = count($syncRecords) > 0;
@@ -337,7 +337,7 @@ class CpController extends Controller
             $elementIds = array_column($syncRecords, 'element_id');
             $lockedMap  = array_column($syncRecords, 'locked', 'element_id');
 
-            $config        = Craft::$app->config->getConfigFromFile('copydeck');
+            $config        = Craft::$app->config->getConfigFromFile('contentiq');
             $sectionHandle = $config['section'] ?? 'pages';
 
             $entries = Entry::find()
@@ -375,8 +375,8 @@ class CpController extends Controller
             }
         }
 
-        return $this->renderTemplate('copydeck-importer/_cp/sync', [
-            'copydeckUrl'    => App::parseEnv($settings->copydeckUrl),
+        return $this->renderTemplate('contentiq-importer/_cp/sync', [
+            'contentiqUrl'    => App::parseEnv($settings->contentiqUrl),
             'projectSlug'    => $inferredSlug,
             'hasSyncRecords' => $hasSyncRecords,
             'syncEntries'    => $syncEntries,
@@ -397,12 +397,12 @@ class CpController extends Controller
         $this->requirePostRequest();
         $this->requireAcceptsJson();
 
-        $settings = CopydeckImporter::$plugin->getSettings();
+        $settings = ContentIQImporter::$plugin->getSettings();
 
-        if ($settings->copydeckUrl === '' || $settings->apiKey === '') {
+        if ($settings->contentiqUrl === '' || $settings->apiKey === '') {
             return $this->asJson([
                 'success' => false,
-                'error'   => 'Copydeck API is not configured.',
+                'error'   => 'ContentIQ API is not configured.',
             ]);
         }
 
@@ -416,12 +416,12 @@ class CpController extends Controller
 
             // Lock everything first, then unlock only the selected entries.
             $db->createCommand()
-                ->update('{{%copydeck_entry_syncs}}', ['locked' => true])
+                ->update('{{%contentiq_entry_syncs}}', ['locked' => true])
                 ->execute();
 
             $db->createCommand()
                 ->update(
-                    '{{%copydeck_entry_syncs}}',
+                    '{{%contentiq_entry_syncs}}',
                     ['locked' => false],
                     ['element_id' => $unlockIds],
                 )
@@ -465,7 +465,7 @@ class CpController extends Controller
 
         $status = (new Query())
             ->select(['status'])
-            ->from('{{%copydeck_import_runs}}')
+            ->from('{{%contentiq_import_runs}}')
             ->where(['id' => $runId])
             ->scalar();
 
@@ -483,7 +483,7 @@ class CpController extends Controller
     public function actionSyncResult(int $runId): Response
     {
         $run = (new Query())
-            ->from('{{%copydeck_import_runs}}')
+            ->from('{{%contentiq_import_runs}}')
             ->where(['id' => $runId])
             ->one();
 
@@ -493,17 +493,17 @@ class CpController extends Controller
 
         $run['result'] = Json::decodeIfJson($run['result'] ?? '[]');
 
-        return $this->renderTemplate('copydeck-importer/_cp/sync-result', [
+        return $this->renderTemplate('contentiq-importer/_cp/sync-result', [
             'run' => $run,
         ]);
     }
 
     /**
-     * Syncs a single entry from the Copydeck API.
+     * Syncs a single entry from the ContentIQ API.
      *
-     * Called via AJAX from the Copydeck sidebar widget on the entry edit screen.
+     * Called via AJAX from the ContentIQ sidebar widget on the entry edit screen.
      * Fetches the single-page export for the entry's slug, runs it through
-     * ImportService, and upserts a row in copydeck_entry_syncs on success.
+     * ImportService, and upserts a row in contentiq_entry_syncs on success.
      *
      * Request body: { elementId: int, slug: string }
      * Response:     { success: bool, syncedAt?: string, error?: string }
@@ -527,22 +527,22 @@ class CpController extends Controller
         // Look up entry title for user-facing messages.
         $entryTitle = Entry::find()->id($elementId)->status(null)->select(['title'])->scalar() ?: $slug;
 
-        $settings = CopydeckImporter::$plugin->getSettings();
+        $settings = ContentIQImporter::$plugin->getSettings();
 
-        if ($settings->copydeckUrl === '' || $settings->apiKey === '') {
+        if ($settings->contentiqUrl === '' || $settings->apiKey === '') {
             return $this->asJson([
                 'success' => false,
-                'error'   => 'Copydeck API is not configured. Set URL and API key in plugin settings.',
+                'error'   => 'ContentIQ API is not configured. Set URL and API key in plugin settings.',
             ]);
         }
 
-        // Map Craft slug to Copydeck slug if configured.
-        $config       = Craft::$app->config->getConfigFromFile('copydeck');
+        // Map Craft slug to ContentIQ slug if configured.
+        $config       = Craft::$app->config->getConfigFromFile('contentiq');
         $slugMap      = $config['slugMap'] ?? [];
-        $copydeckSlug = $slugMap[$slug] ?? $slug;
+        $contentiqSlug = $slugMap[$slug] ?? $slug;
 
-        $url      = rtrim(App::parseEnv($settings->copydeckUrl), '/');
-        $endpoint = "{$url}/api/v1/pages/{$copydeckSlug}/export";
+        $url      = rtrim(App::parseEnv($settings->contentiqUrl), '/');
+        $endpoint = "{$url}/api/v1/pages/{$contentiqSlug}/export";
 
         try {
             $response = Craft::createGuzzleClient()->request('GET', $endpoint, [
@@ -558,7 +558,7 @@ class CpController extends Controller
             $data = json_decode($body, true);
 
             if (json_last_error() !== JSON_ERROR_NONE || !is_array($data)) {
-                return $this->asJson(['success' => false, 'error' => 'Copydeck returned invalid JSON.']);
+                return $this->asJson(['success' => false, 'error' => 'ContentIQ returned invalid JSON.']);
             }
         } catch (GuzzleException $e) {
             $status = method_exists($e, 'getResponse') && $e->getResponse() !== null
@@ -566,14 +566,14 @@ class CpController extends Controller
                 : 0;
 
             $message = $status === 404
-                ? "'{$entryTitle}' is not ready for export in Copydeck."
+                ? "'{$entryTitle}' is not ready for export in ContentIQ."
                 : 'API request failed: ' . $e->getMessage();
 
             return $this->asJson(['success' => false, 'error' => $message]);
         }
 
         // Run the import pipeline (no dry-run).
-        $result = CopydeckImporter::$plugin->imports->importPage($data, dryRun: false);
+        $result = ContentIQImporter::$plugin->imports->importPage($data, dryRun: false);
 
         if (!$result['success']) {
             return $this->asJson([
@@ -588,7 +588,7 @@ class CpController extends Controller
         $db    = Craft::$app->getDb();
 
         $exists = (new Query())
-            ->from('{{%copydeck_entry_syncs}}')
+            ->from('{{%contentiq_entry_syncs}}')
             ->where(['element_id' => $elementId])
             ->exists();
 
@@ -596,11 +596,11 @@ class CpController extends Controller
 
         if ($exists) {
             $db->createCommand()
-                ->update('{{%copydeck_entry_syncs}}', $syncData, ['element_id' => $elementId])
+                ->update('{{%contentiq_entry_syncs}}', $syncData, ['element_id' => $elementId])
                 ->execute();
         } else {
             $db->createCommand()
-                ->insert('{{%copydeck_entry_syncs}}', array_merge(['element_id' => $elementId], $syncData))
+                ->insert('{{%contentiq_entry_syncs}}', array_merge(['element_id' => $elementId], $syncData))
                 ->execute();
         }
 
@@ -610,7 +610,7 @@ class CpController extends Controller
     }
 
     /**
-     * Toggles the lock state for an entry's Copydeck sync record.
+     * Toggles the lock state for an entry's ContentIQ sync record.
      *
      * Locked entries are skipped during batch/full syncs.
      *
@@ -629,17 +629,17 @@ class CpController extends Controller
         $db = Craft::$app->getDb();
 
         $exists = (new Query())
-            ->from('{{%copydeck_entry_syncs}}')
+            ->from('{{%contentiq_entry_syncs}}')
             ->where(['element_id' => $elementId])
             ->exists();
 
         if ($exists) {
             $db->createCommand()
-                ->update('{{%copydeck_entry_syncs}}', ['locked' => $locked], ['element_id' => $elementId])
+                ->update('{{%contentiq_entry_syncs}}', ['locked' => $locked], ['element_id' => $elementId])
                 ->execute();
         } else {
             $db->createCommand()
-                ->insert('{{%copydeck_entry_syncs}}', [
+                ->insert('{{%contentiq_entry_syncs}}', [
                     'element_id' => $elementId,
                     'locked'     => $locked,
                     'synced_at'  => (new \DateTime())->format('Y-m-d H:i:s'),
@@ -651,7 +651,7 @@ class CpController extends Controller
     }
 
     /**
-     * Clears the notes for an entry's Copydeck sync record.
+     * Clears the notes for an entry's ContentIQ sync record.
      *
      * @return Response
      * @throws BadRequestHttpException
@@ -664,7 +664,7 @@ class CpController extends Controller
         $elementId = (int)Craft::$app->getRequest()->getRequiredBodyParam('elementId');
 
         Craft::$app->getDb()->createCommand()
-            ->update('{{%copydeck_entry_syncs}}', ['notes' => ''], ['element_id' => $elementId])
+            ->update('{{%contentiq_entry_syncs}}', ['notes' => ''], ['element_id' => $elementId])
             ->execute();
 
         return $this->asJson(['success' => true]);
@@ -694,7 +694,7 @@ class CpController extends Controller
     ): int {
         $db = Craft::$app->getDb();
 
-        $db->createCommand()->insert('{{%copydeck_import_runs}}', [
+        $db->createCommand()->insert('{{%contentiq_import_runs}}', [
             'importedBy'  => Craft::$app->getUser()->getId(),
             'filename'    => $filename,
             'type'        => $type,

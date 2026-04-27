@@ -1,21 +1,21 @@
-# Copydeck Craft Importer — Plugin Spec
+# ContentIQ Craft Importer — Plugin Spec
 
-Craft CMS 5 plugin that imports Copydeck export JSON directly into published Craft entries. Standalone Composer package — pure Craft 5 PHP.
+Craft CMS 5 plugin that imports ContentIQ export JSON directly into published Craft entries. Standalone Composer package — pure Craft 5 PHP.
 
 ## Plugin identity
 
-- Package: `matrixcreate/copydeck-craft-import`
-- Handle: `copydeck-importer`
-- Namespace: `matrixcreate\copydeckimporter`
+- Package: `matrixcreate/contentiq-craft-import`
+- Handle: `contentiq-importer`
+- Namespace: `matrixcreate\contentiqimporter`
 - Minimum Craft: 5.0
-- GitHub: https://github.com/MatrixCreate/copydeck-craft-import
+- GitHub: https://github.com/MatrixCreate/contentiq-craft-import
 
 ## Console command
 
 ```
-php craft copydeck-importer/import --file=path/to/export.json
-php craft copydeck-importer/import --file=path/to/export.json --dry-run
-php craft copydeck-importer/import --file=path/to/export.json --verbose
+php craft contentiq-importer/import --file=path/to/export.json
+php craft contentiq-importer/import --file=path/to/export.json --dry-run
+php craft contentiq-importer/import --file=path/to/export.json --verbose
 ```
 
 - `--dry-run` validates and reports without writing anything or downloading assets.
@@ -26,7 +26,7 @@ php craft copydeck-importer/import --file=path/to/export.json --verbose
 
 ```
 src/
-  CopydeckImporter.php          # Plugin bootstrap, registers services, sidebar widget
+  ContentIQImporter.php          # Plugin bootstrap, registers services, sidebar widget
   console/controllers/
     ImportController.php         # Main import command
     TestMatrixController.php     # Isolated API test (debug tool)
@@ -40,13 +40,13 @@ src/
   services/
     ImportService.php            # Pipeline orchestrator
     ImageImportService.php       # Asset download + idempotent import
-    NodesRenderer.php            # Copydeck nodes → HTML
+    NodesRenderer.php            # ContentIQ nodes → HTML
     MatrixBuilder.php            # Block mapping → Matrix data array
-    CopydeckApiService.php       # Copydeck API client
+    ContentIQApiService.php       # ContentIQ API client
   config/
     defaults.php                 # Block type mappings
   migrations/
-    Install.php                  # Creates copydeck_import_runs + copydeck_entry_syncs
+    Install.php                  # Creates contentiq_import_runs + contentiq_entry_syncs
     m250418_000000_add_entry_syncs_table.php
     m250419_000000_add_notes_to_entry_syncs.php
     m250419_000001_add_locked_to_entry_syncs.php
@@ -62,17 +62,17 @@ CLAUDE.md                       # Settled API patterns — loaded automatically 
 
 ## Config
 
-Installed at `config/copydeck.php` in the Craft project. All keys have defaults:
+Installed at `config/contentiq.php` in the Craft project. All keys have defaults:
 
 ```php
 return [
     'section'        => 'pages',
     'entryType'      => 'pages',
     'assetVolume'    => 'images',
-    'assetFolder'    => 'copydeck',
+    'assetFolder'    => 'contentiq',
     'matrixField'    => 'contentBlocks',
     'seoField'       => 'seo',
-    'slugMap'        => [],   // Craft slug → Copydeck slug overrides for sidebar widget
+    'slugMap'        => [],   // Craft slug → ContentIQ slug overrides for sidebar widget
     'blockOverrides' => [],   // Replaces entire block definitions from defaults.php
 ];
 ```
@@ -81,15 +81,15 @@ return [
 
 Two-level nested Matrix: contentBlocks (outer) → inner entry types.
 
-| Copydeck type    | Outer entry type | Inner Matrix field     | Inner entry type      | Mode     |
+| ContentIQ type    | Outer entry type | Inner Matrix field     | Inner entry type      | Mode     |
 |------------------|------------------|------------------------|-----------------------|----------|
 | `text`           | `text`           | `textBlocks`           | `textBlock`           | single   |
 | `text_and_media` | `textAndMedia`   | `textAndMediaBlocks`   | `textAndMediaBlock`   | grouped  |
 | `faq`            | `faq`            | `accordionItems`       | `accordionItem`       | repeated |
-| `cards`          | `copydeckCards`  | `copydeckCards`        | `copydeckCard`        | repeated |
+| `cards`          | `contentiqCards`  | `contentiqCards`        | `contentiqCard`        | repeated |
 | `price_list`     | `priceList`      | *(none)*               | —                     | outer only |
-| `usp`            | `copydeckUsp`    | *(none)*               | —                     | outer only |
-| `global`         | `copydeckGlobal` | *(none)*               | —                     | outer only |
+| `usp`            | `contentiqUsp`    | *(none)*               | —                     | outer only |
+| `global`         | `contentiqGlobal` | *(none)*               | —                     | outer only |
 
 Handled separately (not via defaults.php):
 - `hero` — ContentBlock field (`hero`) on the page/homepage entry. Sets `enableHero = true`.
@@ -111,7 +111,7 @@ Field handler types: `nodes`, `image`, `heading`, `body`, `layout`, `textMediaLa
 9. Filter field values against the entry's field layout
 10. Set field values directly on the entry (no draft)
 11. Save with `saveElement($entry, false)` (skip validation)
-12. Report result; update `copydeck_entry_syncs` row
+12. Report result; update `contentiq_entry_syncs` row
 
 ## Key behaviours
 
