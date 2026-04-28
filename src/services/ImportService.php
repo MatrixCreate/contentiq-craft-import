@@ -575,7 +575,8 @@ class ImportService extends Component
             $btnCounter = 0;
 
             foreach ($buttons as $button) {
-                $label = (string)($button['label'] ?? '');
+                // ContentIQ hero buttons use 'text' for the display label.
+                $label = (string)($button['text'] ?? $button['label'] ?? '');
                 $url   = (string)($button['url'] ?? '');
 
                 if ($label === '' && $url === '') {

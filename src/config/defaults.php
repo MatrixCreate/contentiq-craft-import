@@ -129,7 +129,7 @@ return [
     'usp' => [
         'outerType'   => 'contentiqUsp',
         'outerFields' => [
-            'nodes' => ['uspText', 'nodes'],  // heading + list → CKEditor HTML (richText with list support)
+            'text' => ['uspText', 'nodes'],  // heading + list nodes → CKEditor HTML
         ],
         'innerMatrix' => null,
     ],
@@ -137,7 +137,7 @@ return [
     'global' => [
         'outerType'   => 'contentiqGlobal',
         'outerFields' => [
-            'nodes' => ['richText',      'nodes'],  // rendered as HTML into the content field
+            'nodes' => ['globalContent', 'nodes'],  // rendered as HTML into the globalContent CKEditor field
         ],
         'innerMatrix' => null,
     ],
