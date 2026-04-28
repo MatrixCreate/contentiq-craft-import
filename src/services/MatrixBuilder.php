@@ -637,7 +637,7 @@ class MatrixBuilder extends Component
                 [
                     'type'       => 'verbb\\hyper\\links\\Url',
                     'handle'    => 'default-verbb-hyper-links-url',
-                    'linkValue' => $url,
+                    'linkValue' => $url !== '' ? $url : '#',
                     'linkText'  => $label,
                     'linkClass' => 'btn btn-primary',
                 ],
@@ -693,7 +693,7 @@ class MatrixBuilder extends Component
                                 [
                                     'type'      => 'verbb\\hyper\\links\\Url',
                                     'handle'    => 'default-verbb-hyper-links-url',
-                                    'linkValue' => $url,
+                                    'linkValue' => $url !== '' ? $url : '#',
                                     'linkText'  => $label,
                                     'linkClass' => 'btn btn-primary',
                                 ],
@@ -771,7 +771,7 @@ class MatrixBuilder extends Component
                         [
                             'type'      => 'verbb\\hyper\\links\\Url',
                             'handle'    => 'default-verbb-hyper-links-url',
-                            'linkValue' => $url,
+                            'linkValue' => $url !== '' ? $url : '#',
                             'linkText'  => $label,
                             'linkClass' => 'btn btn-primary',
                         ],

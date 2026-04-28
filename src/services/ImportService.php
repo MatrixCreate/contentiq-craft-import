@@ -590,7 +590,7 @@ class ImportService extends Component
                             [
                                 'type'      => 'verbb\\hyper\\links\\Url',
                                 'handle'    => 'default-verbb-hyper-links-url',
-                                'linkValue' => $url,
+                                'linkValue' => $url !== '' ? $url : '#',
                                 'linkText'  => $label,
                                 'linkClass' => 'btn btn-primary',
                             ],
@@ -768,7 +768,7 @@ class ImportService extends Component
                             'actionButton' => [[
                                 'type'      => 'verbb\\hyper\\links\\Url',
                                 'handle'    => 'default-verbb-hyper-links-url',
-                                'linkValue' => $url,
+                                'linkValue' => $url !== '' ? $url : '#',
                                 'linkText'  => $label,
                                 'linkClass' => 'btn btn-primary',
                             ]],
@@ -793,6 +793,16 @@ class ImportService extends Component
             if ($imageResult !== null && $imageResult['id'] !== null) {
                 $ctaFieldValues['image'] = [$imageResult['id']];
                 $result['images'][] = ['filename' => $imageResult['filename'], 'reused' => $imageResult['reused']];
+            }
+        }
+
+        // desktopBackgroundImage — import background_image if present.
+        $bgImageData = $fields['background_image'] ?? null;
+        if (is_array($bgImageData) && !empty($bgImageData['url'])) {
+            $bgResult = ContentIQImporter::$plugin->images->importFromField($bgImageData, $dryRun);
+            if ($bgResult !== null && $bgResult['id'] !== null) {
+                $ctaFieldValues['desktopBackgroundImage'] = [$bgResult['id']];
+                $result['images'][] = ['filename' => $bgResult['filename'], 'reused' => $bgResult['reused']];
             }
         }
 
@@ -873,7 +883,7 @@ class ImportService extends Component
                     'actionButton' => [[
                         'type'      => 'verbb\\hyper\\links\\Url',
                         'handle'    => 'default-verbb-hyper-links-url',
-                        'linkValue' => $url,
+                        'linkValue' => $url !== '' ? $url : '#',
                         'linkText'  => $label,
                         'linkClass' => 'btn btn-primary',
                     ]],

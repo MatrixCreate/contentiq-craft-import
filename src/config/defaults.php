@@ -129,7 +129,7 @@ return [
     'usp' => [
         'outerType'   => 'contentiqUsp',
         'outerFields' => [
-            'text' => ['uspText', 'nodes'],  // heading + list nodes → CKEditor HTML
+            'nodes' => ['uspText', 'nodes'],  // heading + list nodes → CKEditor HTML
         ],
         'innerMatrix' => null,
     ],
