@@ -592,7 +592,7 @@ class CpController extends Controller
             ->where(['element_id' => $elementId])
             ->exists();
 
-        $syncData = ['synced_at' => $now, 'notes' => $notes];
+        $syncData = ['synced_at' => $now, 'notes' => $notes, 'locked' => true];
 
         if ($exists) {
             $db->createCommand()

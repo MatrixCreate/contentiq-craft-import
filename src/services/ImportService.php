@@ -153,7 +153,12 @@ class ImportService extends Component
                 $note = $block['notes'] ?? '';
                 if (is_string($note) && trim($note) !== '') {
                     $blockType = $block['type'] ?? 'unknown';
+                    $acronyms = ['usp' => 'USP', 'faq' => 'FAQ', 'cta' => 'CTA'];
                     $blockLabel = ucwords(str_replace('_', ' ', $blockType));
+                    $blockLabel = strtr($blockLabel, array_combine(
+                        array_map('ucfirst', array_keys($acronyms)),
+                        array_values($acronyms),
+                    ));
                     $noteLines[] = $blockLabel . "\n" . trim($note);
                 }
             }

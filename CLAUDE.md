@@ -174,7 +174,7 @@ Critical requirements:
 | `text` | `text` | `textBlocks` | `textBlock` | single | — |
 | `text_and_media` | `textAndMedia` | `textAndMediaBlocks` | `textAndMediaBlock` | grouped | `blockLayout` |
 | `faq` | `faq` | `accordionItems` | `accordionItem` | repeated | `richText`, `extraRichText`, `actionButtons` (via `faqNodes`) |
-| `cards` | `contentiqCards` | `contentiqCards` | `contentiqCard` | repeated | `richText` (intro) |
+| `cards` | `entryCards` | `entryCards` | `card` | repeated | `richText` (intro) |
 | `price_list` | `priceList` | *(none)* | — | outer fields only | `richText`, `priceList`, `actionButtons` (via `buttonNodes`) |
 | `usp` | `contentiqUsp` | *(none)* | — | outer fields only | `uspText` |
 | `global` | `contentiqGlobal` | *(none)* | — | outer fields only | `contentiqNotes` |
@@ -366,13 +366,15 @@ $response = Craft::createGuzzleClient()->request('GET', $endpoint, [
 
 ---
 
-## ContentIQ Cards staging block
+## Cards block
 
-Cards from ContentIQ import to `contentiqCards` (not `contentCards`). This is a staging block — editors manually migrate cards to the appropriate final block type with proper entry links. ContentIQ can't know which card type to use or what internal links to set.
+Cards from ContentIQ import directly to `entryCards`. Inner entry type is `card`.
+
+Field mapping (inner entries): `cardTitle` (heading), `cardText` (CKEditor, nodes), `cardImage` (asset), `actionButtonLabel` (CKEditor, label text only — editor sets the URL in the CMS). The `contentiqNotes` field on the outer `entryCards` entry is populated automatically from `block.notes`.
 
 Card body fields are `ContentNode[]` arrays (not plain strings), processed through `NodesRenderer`. This supports paragraphs, lists, and embedded FAQ items in card content.
 
-The `intro` field on the outer `contentiqCards` entry is also a `ContentNode[]` array, rendered to the `richText` CKEditor field above the card grid.
+The `intro` field on the outer `entryCards` entry is also a `ContentNode[]` array, rendered to the `richText` CKEditor field above the card grid.
 
 ---
 

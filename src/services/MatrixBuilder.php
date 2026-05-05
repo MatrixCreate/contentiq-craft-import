@@ -497,6 +497,7 @@ class MatrixBuilder extends Component
             'textMediaLayout' => $this->_handleTextMediaLayout($craftHandle, $value),
             'tableHtml'       => $this->_handleTableHtml($craftHandle, $value),
             'hyperButton'     => $this->_handleHyperButton($craftHandle, $value),
+            'buttonLabel'     => $this->_handleButtonLabel($craftHandle, $value),
             'faqNodes'        => $this->_handleFaqNodes($craftHandle, $value),
             'buttonNodes'     => $this->_handleButtonNodes($craftHandle, $value),
             'uspContent'      => $this->_handleUspContent($craftHandle, $value),
@@ -758,13 +759,29 @@ class MatrixBuilder extends Component
                 [
                     'type'       => 'verbb\\hyper\\links\\Url',
                     'handle'    => 'default-verbb-hyper-links-url',
-                    'linkValue' => $url !== '' ? $url : '#',
+                    'linkValue' => $url !== '' ? $url : 'https://',
                     'linkText'  => $label,
                     'linkClass' => 'btn btn-primary',
                 ],
             ],
             'showLinkAsSeparateButton' => true,
         ];
+    }
+
+    /**
+     * Extracts the label from a {label, url} button object and renders it as CKEditor HTML.
+     *
+     * @param string $handle
+     * @param mixed  $value  {label: string, url: string} or null
+     * @return array<string, string>
+     */
+    private function _handleButtonLabel(string $handle, mixed $value): array
+    {
+        if (!is_array($value) || empty($value['label'])) {
+            return [$handle => ''];
+        }
+
+        return [$handle => (string)$value['label']];
     }
 
     /**
@@ -814,7 +831,7 @@ class MatrixBuilder extends Component
                                 [
                                     'type'      => 'verbb\\hyper\\links\\Url',
                                     'handle'    => 'default-verbb-hyper-links-url',
-                                    'linkValue' => $url !== '' ? $url : '#',
+                                    'linkValue' => $url !== '' ? $url : 'https://',
                                     'linkText'  => $label,
                                     'linkClass' => 'btn btn-primary',
                                 ],
@@ -892,7 +909,7 @@ class MatrixBuilder extends Component
                         [
                             'type'      => 'verbb\\hyper\\links\\Url',
                             'handle'    => 'default-verbb-hyper-links-url',
-                            'linkValue' => $url !== '' ? $url : '#',
+                            'linkValue' => $url !== '' ? $url : 'https://',
                             'linkText'  => $label,
                             'linkClass' => 'btn btn-primary',
                         ],

@@ -106,20 +106,20 @@ return [
     ],
 
     'cards' => [
-        'outerType'   => 'contentiqCards',
+        'outerType'   => 'entryCards',
         'outerFields' => [
             'intro' => ['richText', 'nodes'],  // ContentNode[] → HTML above card grid
         ],
         'innerMatrix' => [
-            'outerField' => 'contentiqCards',
-            'innerType'  => 'contentiqCard',
+            'outerField' => 'entryCards',
+            'innerType'  => 'card',
             'mode'       => 'repeated',
             'sourceKey'  => 'cards',
             'fields'     => [
-                'heading' => ['heading',      'heading'],     // {level,text} → <hN>
-                'body'    => ['richText',     'nodes'],       // ContentNode[] → HTML via NodesRenderer
-                'image'   => ['image',        'image'],
-                'button'  => ['actionButton', 'hyperButton'], // {label,url} → Hyper link
+                'heading' => ['cardTitle',         'heading'],     // {level,text} → <hN>
+                'body'    => ['cardText',          'nodes'],       // ContentNode[] → HTML via NodesRenderer
+                'image'   => ['cardImage',         'image'],
+                'button'  => ['actionButtonLabel', 'buttonLabel'], // {label,url} → label text only
             ],
         ],
     ],
