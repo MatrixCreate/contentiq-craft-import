@@ -56,11 +56,13 @@
 return [
     'text' => [
         'outerType'   => 'text',
-        'outerFields' => [],
+        'outerFields' => [
+            'columns' => ['columnLayout', 'layout'],
+        ],
         'innerMatrix' => [
             'outerField' => 'textBlocks',
             'innerType'  => 'textBlock',
-            'mode'       => 'single',
+            'mode'       => 'text_columns',
             'fields'     => [
                 'nodes' => ['richText', 'nodes'],
             ],

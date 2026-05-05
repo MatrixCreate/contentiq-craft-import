@@ -339,6 +339,65 @@ class MatrixBuilder extends Component
             ];
 
             $reportedFields = array_merge($reportedFields, $innerReportedFields);
+        } elseif ($mode === 'text_columns') {
+            $columns = $sourceFields['columns'] ?? 'singleColumn';
+            $nodes   = $sourceFields['nodes'] ?? [];
+
+            // Find the first heading node to determine the split point.
+            $headingIndex = -1;
+            if ($columns === 'twoColumns') {
+                foreach ($nodes as $i => $node) {
+                    if (($node['type'] ?? '') === 'heading') {
+                        $headingIndex = $i;
+                        break;
+                    }
+                }
+            }
+
+            if ($columns === 'twoColumns' && $headingIndex !== -1) {
+                // Left column: nodes up to and including the first heading.
+                $firstNodes  = array_values(array_slice($nodes, 0, $headingIndex + 1));
+                $secondNodes = array_values(array_slice($nodes, $headingIndex + 1));
+
+                [$innerFields1, $innerReportedFields] = $this->_buildSingleInnerEntry(
+                    $innerConfig,
+                    array_merge($sourceFields, ['nodes' => $firstNodes]),
+                    $imageReport,
+                    $dryRun,
+                );
+                $innerEntries['new1'] = [
+                    'type'   => $innerConfig['innerType'],
+                    'fields' => $innerFields1,
+                ];
+
+                if (!empty($secondNodes)) {
+                    [$innerFields2] = $this->_buildSingleInnerEntry(
+                        $innerConfig,
+                        array_merge($sourceFields, ['nodes' => $secondNodes]),
+                        $imageReport,
+                        $dryRun,
+                    );
+                    $innerEntries['new2'] = [
+                        'type'   => $innerConfig['innerType'],
+                        'fields' => $innerFields2,
+                    ];
+                }
+
+                $reportedFields = array_merge($reportedFields, $innerReportedFields);
+            } else {
+                // singleColumn or twoColumns with no heading — one inner entry.
+                [$innerFields, $innerReportedFields] = $this->_buildSingleInnerEntry(
+                    $innerConfig,
+                    $sourceFields,
+                    $imageReport,
+                    $dryRun,
+                );
+                $innerEntries['new1'] = [
+                    'type'   => $innerConfig['innerType'],
+                    'fields' => $innerFields,
+                ];
+                $reportedFields = array_merge($reportedFields, $innerReportedFields);
+            }
         } else {
             $sourceKey   = $innerConfig['sourceKey'] ?? '';
             $items       = $sourceFields[$sourceKey] ?? [];
