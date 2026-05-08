@@ -1,8 +1,8 @@
 {% import '_includes/forms' as forms %}
 
 {{ forms.autosuggestField({
-    label: 'ContentIQ URL'|t('contentiq-importer'),
-    instructions: 'The base URL of your ContentIQ instance.'|t('contentiq-importer'),
+    label: 'ContentiQ URL'|t('contentiq-importer'),
+    instructions: 'The base URL of your ContentiQ instance.'|t('contentiq-importer'),
     id: 'contentiqUrl',
     name: 'contentiqUrl',
     value: settings.contentiqUrl,
@@ -13,7 +13,7 @@
 
 {{ forms.autosuggestField({
     label: 'API Key'|t('contentiq-importer'),
-    instructions: 'The project API key from ContentIQ settings.'|t('contentiq-importer'),
+    instructions: 'The project API key from ContentiQ settings.'|t('contentiq-importer'),
     id: 'apiKey',
     name: 'apiKey',
     value: settings.apiKey,

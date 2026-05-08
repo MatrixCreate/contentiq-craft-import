@@ -241,7 +241,7 @@ class SyncJob extends BaseJob
      */
     protected function defaultDescription(): ?string
     {
-        return Translation::prep('contentiq-importer', 'Syncing content from ContentIQ');
+        return Translation::prep('contentiq-importer', 'Syncing content from ContentiQ');
     }
 
     /**

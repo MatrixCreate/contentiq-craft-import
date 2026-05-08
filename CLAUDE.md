@@ -310,10 +310,10 @@ The `settings` namespace is handled automatically by Craft's settings response.
 
 ### API key format and project inference
 
-The API key embeds the project slug: `cpd_{project-slug}_{32chars}`. The plugin no longer stores `projectSlug` as a separate setting — it's inferred from the key at runtime:
+The API key embeds the project slug: `ciq_{project-slug}_{32chars}`. The plugin no longer stores `projectSlug` as a separate setting — it's inferred from the key at runtime:
 
 ```php
-// Strip "cpd_" prefix, find last underscore, everything before it is the slug
+// Strip "ciq_" prefix, find last underscore, everything before it is the slug
 $withoutPrefix = substr($apiKey, 4);
 $lastUnderscore = strrpos($withoutPrefix, '_');
 $slug = substr($withoutPrefix, 0, $lastUnderscore);

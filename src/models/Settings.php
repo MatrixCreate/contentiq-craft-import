@@ -53,7 +53,7 @@ class Settings extends Model
         }
 
         if (filter_var($resolved, FILTER_VALIDATE_URL) === false) {
-            $this->addError('contentiqUrl', 'ContentIQ URL is not a valid URL.');
+            $this->addError('contentiqUrl', 'ContentiQ URL is not a valid URL.');
         }
     }
 }

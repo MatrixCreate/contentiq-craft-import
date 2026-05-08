@@ -1,6 +1,6 @@
 {
   "name": "matrixcreate/contentiq-craft-import",
-  "description": "Import ContentIQ content exports into Craft CMS 5 entries.",
+  "description": "Import ContentiQ content exports into Craft CMS 5 entries.",
   "type": "craft-plugin",
   "license": "MIT",
   "keywords": ["craft", "cms", "plugin", "import", "contentiq", "content"],
@@ -25,9 +25,9 @@
     }
   },
   "extra": {
-    "name": "ContentIQ",
+    "name": "ContentiQ",
     "handle": "contentiq-importer",
-    "description": "Import ContentIQ content exports into Craft CMS 5 entries.",
+    "description": "Import ContentiQ content exports into Craft CMS 5 entries.",
     "developer": "Matrix Create",
     "developerUrl": "https://matrixcreate.com/",
     "class": "matrixcreate\\contentiqimporter\\ContentIQImporter"

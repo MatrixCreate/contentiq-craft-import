@@ -3,7 +3,7 @@
 {% set title = 'Upload Export' %}
 
 {% set crumbs = [
-    { label: 'ContentIQ', url: url('contentiq-importer') },
+    { label: 'ContentiQ', url: url('contentiq-importer') },
 ] %}
 
 {% block content %}
@@ -22,7 +22,7 @@
                     </svg>
                 </div>
                 <p class="contentiq-upload-text">
-                    {{ 'Drag and drop your ContentIQ JSON export here'|t('contentiq-importer') }}
+                    {{ 'Drag and drop your ContentiQ JSON export here'|t('contentiq-importer') }}
                 </p>
                 <p class="contentiq-upload-or light">{{ 'or'|t('contentiq-importer') }}</p>
                 <label class="btn submit" for="jsonFileInput">
@@ -157,7 +157,7 @@
                         const hasBlocks = Array.isArray(data.blocks);
                         const hasPages = Array.isArray(data.pages);
                         if (!hasBlocks && !hasPages) {
-                            showError('This JSON file does not appear to be a ContentIQ export. Expected "blocks" or "pages" at the top level.');
+                            showError('This JSON file does not appear to be a ContentiQ export. Expected "blocks" or "pages" at the top level.');
                             return;
                         }
                         // Valid — show filename and submit button.

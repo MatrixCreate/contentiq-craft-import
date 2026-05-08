@@ -3,7 +3,7 @@
 {% set title = 'Sync Report' %}
 
 {% set crumbs = [
-    { label: 'ContentIQ', url: url('contentiq-importer') },
+    { label: 'ContentiQ', url: url('contentiq-importer') },
 ] %}
 
 {% block actionButton %}
@@ -121,17 +121,49 @@
         {% endif %}
     </div>
 
-    {# Build tree lookup maps from parentSlug #}
+    {# Warnings panel — list every warning with its page so totals match details. #}
+    {% set warningPages = [] %}
+    {% for page in pages %}
+        {% if (page.warnings ?? [])|length > 0 %}
+            {% set warningPages = warningPages|merge([page]) %}
+        {% endif %}
+    {% endfor %}
+
+    {% if warningPages|length %}
+        <div class="pane" style="background:var(--yellow-050); border:1px solid var(--yellow-300); margin-bottom:24px; padding:16px; border-radius:8px;">
+            <h2 style="margin:0 0 8px 0; font-size:14px;">{{ 'Warnings'|t('contentiq-importer') }}</h2>
+            <ul style="margin:0; padding-left:20px;">
+                {% for page in warningPages %}
+                    {% for warning in page.warnings %}
+                        <li style="margin-bottom:4px;">
+                            <strong>{{ page.title ?? page.slug ?? '?' }}</strong>
+                            <code style="font-size:12px; color:var(--medium-text-color);">{{ page.slug ?? '?' }}</code>
+                            — {{ warning }}
+                        </li>
+                    {% endfor %}
+                {% endfor %}
+            </ul>
+        </div>
+    {% endif %}
+
+    {# Build tree lookup maps from parentSlug. First pass collects every slug so
+       the second pass can detect orphans — pages whose parent isn't in this
+       batch — and surface them as roots instead of silently dropping them. #}
     {% set slugToPage = {} %}
+    {% for page in pages %}
+        {% set slug = page.slug ?? '' %}
+        {% set slugToPage = slugToPage|merge({ (slug): page }) %}
+    {% endfor %}
+
     {% set childrenOf = {} %}
     {% set rootSlugs = [] %}
 
     {% for page in pages %}
         {% set slug = page.slug ?? '' %}
         {% set parentSlug = page.parentSlug ?? null %}
-        {% set slugToPage = slugToPage|merge({ (slug): page }) %}
+        {% set parentInBatch = parentSlug and parentSlug != '' and slugToPage[parentSlug] is defined %}
 
-        {% if parentSlug and parentSlug != '' %}
+        {% if parentInBatch %}
             {% set existing = childrenOf[parentSlug] ?? [] %}
             {% set childrenOf = childrenOf|merge({ (parentSlug): existing|merge([slug]) }) %}
         {% else %}

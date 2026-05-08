@@ -102,7 +102,7 @@ class ContentIQImporter extends Plugin
     {
         $item = parent::getCpNavItem();
 
-        $item['label'] = 'ContentIQ';
+        $item['label'] = 'ContentiQ';
         $item['icon']  = 'copyright';
 
         return $item;

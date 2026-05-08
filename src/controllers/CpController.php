@@ -319,7 +319,7 @@ class CpController extends Controller
         $settings = ContentIQImporter::$plugin->getSettings();
 
         if ($settings->contentiqUrl === '' || $settings->apiKey === '') {
-            Craft::$app->getSession()->setError('ContentIQ API is not configured. Set URL and API key in plugin settings.');
+            Craft::$app->getSession()->setError('ContentiQ API is not configured. Set URL and API key in plugin settings.');
 
             return $this->redirect('contentiq-importer');
         }
@@ -362,11 +362,11 @@ class CpController extends Controller
             }
         }
 
-        // Parse the project slug from the API key (cpd_{slug}_{32chars}) for display.
+        // Parse the project slug from the API key (ciq_{slug}_{32chars}) for display.
         $inferredSlug = '';
         $apiKey = App::parseEnv($settings->apiKey);
 
-        if (str_starts_with($apiKey, 'cpd_')) {
+        if (str_starts_with($apiKey, 'ciq_')) {
             $withoutPrefix = substr($apiKey, 4);
             $lastUnderscore = strrpos($withoutPrefix, '_');
 
@@ -402,7 +402,7 @@ class CpController extends Controller
         if ($settings->contentiqUrl === '' || $settings->apiKey === '') {
             return $this->asJson([
                 'success' => false,
-                'error'   => 'ContentIQ API is not configured.',
+                'error'   => 'ContentiQ API is not configured.',
             ]);
         }
 
@@ -532,7 +532,7 @@ class CpController extends Controller
         if ($settings->contentiqUrl === '' || $settings->apiKey === '') {
             return $this->asJson([
                 'success' => false,
-                'error'   => 'ContentIQ API is not configured. Set URL and API key in plugin settings.',
+                'error'   => 'ContentiQ API is not configured. Set URL and API key in plugin settings.',
             ]);
         }
 
@@ -558,7 +558,7 @@ class CpController extends Controller
             $data = json_decode($body, true);
 
             if (json_last_error() !== JSON_ERROR_NONE || !is_array($data)) {
-                return $this->asJson(['success' => false, 'error' => 'ContentIQ returned invalid JSON.']);
+                return $this->asJson(['success' => false, 'error' => 'ContentiQ returned invalid JSON.']);
             }
         } catch (GuzzleException $e) {
             $status = method_exists($e, 'getResponse') && $e->getResponse() !== null
@@ -566,7 +566,7 @@ class CpController extends Controller
                 : 0;
 
             $message = $status === 404
-                ? "'{$entryTitle}' is not ready for export in ContentIQ."
+                ? "'{$entryTitle}' is not ready for export in ContentiQ."
                 : 'API request failed: ' . $e->getMessage();
 
             return $this->asJson(['success' => false, 'error' => $message]);

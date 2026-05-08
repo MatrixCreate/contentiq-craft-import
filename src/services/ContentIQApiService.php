@@ -36,7 +36,7 @@ class ContentIQApiService extends Component
             return [
                 'success' => false,
                 'data'    => null,
-                'error'   => 'ContentIQ API is not fully configured. Set URL and API key in plugin settings.',
+                'error'   => 'ContentiQ API is not fully configured. Set URL and API key in plugin settings.',
             ];
         }
 
@@ -59,7 +59,7 @@ class ContentIQApiService extends Component
                 return [
                     'success' => false,
                     'data'    => null,
-                    'error'   => 'ContentIQ returned invalid JSON: ' . json_last_error_msg(),
+                    'error'   => 'ContentiQ returned invalid JSON: ' . json_last_error_msg(),
                 ];
             }
 

@@ -1,9 +1,9 @@
 {% extends '_layouts/cp' %}
 
-{% set title = 'Sync from ContentIQ' %}
+{% set title = 'Sync from ContentiQ' %}
 
 {% set crumbs = [
-    { label: 'ContentIQ', url: url('contentiq-importer') },
+    { label: 'ContentiQ', url: url('contentiq-importer') },
 ] %}
 
 {# Recursive macro for rendering the entry tree with checkboxes #}
@@ -58,7 +58,7 @@
                 {# API info (right) #}
                 <div style="display:flex; gap:48px;">
                     <div>
-                        <div class="light" style="margin-bottom:4px; font-size:13px;">ContentIQ Instance</div>
+                        <div class="light" style="margin-bottom:4px; font-size:13px;">ContentiQ Instance</div>
                         <div><strong>{{ contentiqUrl }}</strong></div>
                     </div>
                     <div>
