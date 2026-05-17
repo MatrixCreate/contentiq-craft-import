@@ -528,8 +528,10 @@ class ImportService extends Component
 
             if (is_array($heading) && isset($heading['text'])) {
                 $level = max(1, min(6, (int)($heading['level'] ?? 1)));
-                $text  = htmlspecialchars((string)$heading['text'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-                $innerFields['heading'] = "<h{$level}>{$text}</h{$level}>";
+                $inner = isset($heading['content']) && is_array($heading['content'])
+                    ? ContentIQImporter::$plugin->nodes->renderInlineContent($heading['content'])
+                    : htmlspecialchars((string)$heading['text'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                $innerFields['heading'] = "<h{$level}>{$inner}</h{$level}>";
             } elseif (is_string($heading) && $heading !== '') {
                 $text = htmlspecialchars($heading, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
                 $innerFields['heading'] = "<h1>{$text}</h1>";
@@ -543,8 +545,10 @@ class ImportService extends Component
             $sub = $fields['subheading'];
             if (is_array($sub) && isset($sub['text']) && $sub['text'] !== '') {
                 $subLevel = max(2, min(6, (int)($sub['level'] ?? 2)));
-                $subText  = htmlspecialchars((string)$sub['text'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-                $richTextParts[] = "<h{$subLevel}>{$subText}</h{$subLevel}>";
+                $inner    = isset($sub['content']) && is_array($sub['content'])
+                    ? ContentIQImporter::$plugin->nodes->renderInlineContent($sub['content'])
+                    : htmlspecialchars((string)$sub['text'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                $richTextParts[] = "<h{$subLevel}>{$inner}</h{$subLevel}>";
             }
         }
 

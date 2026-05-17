@@ -46,6 +46,8 @@
 
 - **Price List richer intro** — `nodes` (intro content) now contains headings, paragraphs, lists, and CTA buttons — all rendered via `NodesRenderer` into `richText`. No mapping change needed; `NodesRenderer` handles the new node types automatically.
 
+- **Inline mark rendering** — `NodesRenderer` now renders ProseMirror inline marks (bold, italic, code, strike, underline, link) to HTML tags (`<strong>`, `<em>`, `<code>`, `<s>`, `<u>`, `<a href>`). All render methods check for `content`/`itemContents`/`questionContent`/`answerContent`/`cellContents` and use `_renderInlineContent()` when present, falling back to plain text. `MatrixBuilder::_handleHeading()` and `ImportService::_buildHeroInnerFields()` also use inline content when present. Public `renderInlineContent()` wrapper added for cross-service access.
+
 - **Price List post-table buttons** — `postNodes` (CTA buttons after the table) mapped to `actionButtons` Matrix via new `buttonNodes` handler in `MatrixBuilder`. Handler filters `ctaButton` nodes from a `ContentNode[]` array and builds the same Hyper `actionButton` Matrix structure used by other blocks.
 
 - **Asset filename sanitization** — `Assets::prepareAssetName()` applied before idempotency lookup. Prevents mismatch when Craft sanitizes filenames on save (spaces → hyphens).

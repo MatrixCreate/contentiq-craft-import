@@ -610,9 +610,14 @@ class MatrixBuilder extends Component
     {
         if (is_array($value) && isset($value['text'])) {
             $level = max(2, min(6, (int)($value['level'] ?? 3)));
-            $text  = htmlspecialchars((string)$value['text'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 
-            return [$handle => "<h{$level}>{$text}</h{$level}>"];
+            if (isset($value['content']) && is_array($value['content'])) {
+                $inner = ContentIQImporter::$plugin->nodes->renderInlineContent($value['content']);
+            } else {
+                $inner = htmlspecialchars((string)$value['text'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+            }
+
+            return [$handle => "<h{$level}>{$inner}</h{$level}>"];
         }
 
         if (is_string($value) && $value !== '') {
