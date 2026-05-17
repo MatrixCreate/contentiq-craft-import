@@ -4,6 +4,20 @@ Read this at the start of every session. Do not re-discover these patterns.
 
 ---
 
+## Releasing
+
+When tagging a new version, always create a matching GitHub release with human-readable notes. Never tag without a release.
+
+```bash
+git tag 1.x.0
+git push origin main --tags
+gh release create 1.x.0 --title "1.x.0" --notes "- What changed"
+```
+
+Release notes should be a bullet list describing what changed in plain language — not commit messages verbatim. One bullet per logical change, not per commit.
+
+---
+
 ## Local development workflow
 
 The plugin is published to Packagist as `matrixcreate/contentiq-craft-import`. Craft Starter installs it from there by default. To develop the plugin and a Craft project simultaneously, run these from the Craft project root:
