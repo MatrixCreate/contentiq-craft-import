@@ -494,6 +494,7 @@ class MatrixBuilder extends Component
         return match ($handlerType) {
             'nodes'           => $this->_handleNodes($craftHandle, $value),
             'image'           => $this->_handleImage($craftHandle, $value, $imageReport, $dryRun),
+            'images'          => $this->_handleImages($craftHandle, $value, $imageReport, $dryRun),
             'heading'         => $this->_handleHeading($craftHandle, $value),
             'body'            => $this->_handleBody($craftHandle, $value),
             'layout'          => $this->_handlePassThrough($craftHandle, $value),
@@ -597,6 +598,50 @@ class MatrixBuilder extends Component
         }
 
         return [$handle => []];
+    }
+
+    /**
+     * Imports an array of images (Custom block).
+     *
+     * Iterates the images array, imports each asset via ImageImportService,
+     * and collects the IDs. Individual failures are non-fatal — a warning is
+     * logged and the image is skipped so the rest of the block still imports.
+     *
+     * @param string $handle
+     * @param mixed  $value   Array of {key, url, alt} objects
+     * @param array  $imageReport
+     * @param bool   $dryRun
+     * @return array<string, array>
+     */
+    private function _handleImages(string $handle, mixed $value, array &$imageReport, bool $dryRun): array
+    {
+        if (!is_array($value) || empty($value)) {
+            return [$handle => []];
+        }
+
+        $ids = [];
+
+        foreach ($value as $img) {
+            if (!is_array($img) || empty($img['url'])) {
+                continue;
+            }
+
+            try {
+                $result = ContentIQImporter::$plugin->images->importFromField($img, $dryRun);
+
+                if ($result !== null) {
+                    $imageReport[] = ['filename' => $result['filename'], 'reused' => $result['reused']];
+
+                    if ($result['id'] !== null) {
+                        $ids[] = $result['id'];
+                    }
+                }
+            } catch (\Throwable $e) {
+                \Craft::warning('ContentIQ: failed to import custom image "' . ($img['key'] ?? '') . '": ' . $e->getMessage(), __METHOD__);
+            }
+        }
+
+        return [$handle => $ids];
     }
 
     /**
