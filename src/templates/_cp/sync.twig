@@ -127,35 +127,46 @@
                     Select the entries you want to update. Unselected entries will not be changed.
                 </div>
 
-                {# Build tree lookup maps #}
-                {% set slugToPage = {} %}
-                {% set childrenOf = {} %}
-                {% set rootSlugs = [] %}
-
-                {% for entry in syncEntries %}
-                    {% set slug = entry.slug ?? '' %}
-                    {% set parentSlug = entry.parentSlug ?? null %}
-                    {% set slugToPage = slugToPage|merge({ (slug): entry }) %}
-
-                    {% if parentSlug and parentSlug != '' %}
-                        {% set existing = childrenOf[parentSlug] ?? [] %}
-                        {% set childrenOf = childrenOf|merge({ (parentSlug): existing|merge([slug]) }) %}
-                    {% else %}
-                        {% set rootSlugs = rootSlugs|merge([slug]) %}
-                    {% endif %}
-                {% endfor %}
-
                 <table class="data fullwidth">
                     <thead>
                         <tr>
-                            <th>{{ 'Page'|t('contentiq-importer') }}</th>
+                            <th>{{ 'Title'|t('contentiq-importer') }}</th>
                             <th>{{ 'Slug'|t('contentiq-importer') }}</th>
                             <th>{{ 'Status'|t('contentiq-importer') }}</th>
                         </tr>
                     </thead>
-                    <tbody>
-                        {{ _self.pageRows(rootSlugs, slugToPage, childrenOf, 0) }}
-                    </tbody>
+
+                    {# One tbody per section group, each headed by a section label. #}
+                    {% for group in syncGroups %}
+
+                        {# Build tree lookup maps scoped to this group #}
+                        {% set slugToPage = {} %}
+                        {% set childrenOf = {} %}
+                        {% set rootSlugs = [] %}
+
+                        {% for entry in group.entries %}
+                            {% set slug = entry.slug ?? '' %}
+                            {% set parentSlug = entry.parentSlug ?? null %}
+                            {% set slugToPage = slugToPage|merge({ (slug): entry }) %}
+
+                            {% if parentSlug and parentSlug != '' %}
+                                {% set existing = childrenOf[parentSlug] ?? [] %}
+                                {% set childrenOf = childrenOf|merge({ (parentSlug): existing|merge([slug]) }) %}
+                            {% else %}
+                                {% set rootSlugs = rootSlugs|merge([slug]) %}
+                            {% endif %}
+                        {% endfor %}
+
+                        <tbody>
+                            <tr>
+                                <td colspan="3" style="background:var(--gray-050); border-top:1px solid var(--hairline-color); padding:8px 12px;">
+                                    <strong style="text-transform:uppercase; letter-spacing:0.05em; font-size:11px; color:var(--medium-text-color);">{{ group.name }}</strong>
+                                </td>
+                            </tr>
+                            {{ _self.pageRows(rootSlugs, slugToPage, childrenOf, 0) }}
+                        </tbody>
+
+                    {% endfor %}
                 </table>
             </div>
 

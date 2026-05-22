@@ -51,6 +51,28 @@
  *
  * Override any mapping in config/contentiq.php using the 'blockOverrides' key.
  * Overrides replace the entire block definition (not merged at field level).
+ *
+ * ---------------------------------------------------------------------------
+ * Content types ('content_types' key, below)
+ * ---------------------------------------------------------------------------
+ * Maps ContentIQ content_type slugs (set on collection children) to the Craft
+ * section / entry type / content field they import into. Collection children
+ * carry a raw `content` (ProseMirror) field instead of a `blocks` array, which
+ * is serialised to HTML and written to `contentField`.
+ *
+ * Per-slug keys:
+ *   section      — Craft section handle
+ *   entryType    — Craft entry type handle
+ *   contentField — field the serialised ProseMirror HTML is written to
+ *   headingField — (optional) field to receive the H1. When set, the first
+ *                  level-1 heading is lifted out as plain text into this field
+ *                  and removed from the body so it isn't rendered twice.
+ *
+ * These defaults match the Craft Starter. Override per-project in
+ * config/contentiq.php under the 'content_types' key (per-slug replace).
+ * A content_type with no matching entry here is logged and skipped (non-fatal).
+ *
+ * NOTE: 'content_types' is NOT a block mapping — MatrixBuilder excludes it.
  */
 
 return [
@@ -160,5 +182,36 @@ return [
             'image' => ['contentiqImage',   'image'],  // optional single asset
         ],
         'innerMatrix' => null,
+    ],
+
+    // Content type routing for collection children (see header note).
+    // slug => [section, entryType, contentField]
+    'content_types' => [
+        'articles' => [
+            'section'      => 'articles',
+            'entryType'    => 'article',
+            'contentField' => 'articleContent',
+            'headingField' => 'headline',  // H1 lifted out of the body into this field
+        ],
+        'blog_categories' => [
+            'section'      => 'blogCategories',
+            'entryType'    => 'blogCategory',
+            'contentField' => 'body',
+        ],
+        'case_studies' => [
+            'section'      => 'caseStudies',
+            'entryType'    => 'caseStudy',
+            'contentField' => 'articleContent',
+        ],
+        'team' => [
+            'section'      => 'team',
+            'entryType'    => 'teamMember',
+            'contentField' => 'body',
+        ],
+        'offices' => [
+            'section'      => 'offices',
+            'entryType'    => 'office',
+            'contentField' => 'body',
+        ],
     ],
 ];

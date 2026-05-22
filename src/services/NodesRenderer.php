@@ -62,8 +62,127 @@ class NodesRenderer extends Component
         return $this->_renderInlineContent($inlineNodes);
     }
 
+    /**
+     * Renders a raw ProseMirror document to an HTML string.
+     *
+     * Unlike render(), which consumes ContentIQ's block-serialised node shape,
+     * this consumes the raw `pages.content` ProseMirror AST carried by collection
+     * children: a doc node (or bare content array) of block nodes. Handles the
+     * node/mark types ContentIQ produces: paragraph, heading (h1–h6 via attrs.level),
+     * bulletList, orderedList, listItem, hardBreak, horizontalRule, and the inline
+     * marks bold/italic/link (reusing the shared inline renderer).
+     *
+     * @param array|null $doc Raw ProseMirror doc ({type:'doc', content:[...]}) or its content array.
+     * @return string
+     */
+    public function renderDocument(?array $doc): string
+    {
+        if (empty($doc)) {
+            return '';
+        }
+
+        // Accept either a doc node or a bare content array.
+        $nodes = $doc['content'] ?? (isset($doc['type']) ? [] : $doc);
+
+        if (!is_array($nodes)) {
+            return '';
+        }
+
+        $html = '';
+        foreach ($nodes as $node) {
+            if (is_array($node)) {
+                $html .= $this->_renderDocNode($node);
+            }
+        }
+
+        return $html;
+    }
+
+    /**
+     * Extracts the first heading of the given level from a raw ProseMirror doc.
+     *
+     * Returns the heading's plain text (inline marks stripped) plus the document
+     * with that one heading node removed — so it isn't duplicated when the
+     * remaining content is rendered to the body field. When no matching heading
+     * is found, `text` is null and the doc is returned unchanged. The returned
+     * doc keeps the same shape it arrived in (doc node or bare content array).
+     *
+     * @param array|null $doc Raw ProseMirror doc or its content array.
+     * @param int $level Heading level to extract (default 1 — the H1).
+     * @return array{text: ?string, doc: array|null}
+     */
+    public function extractHeading(?array $doc, int $level = 1): array
+    {
+        if (empty($doc)) {
+            return ['text' => null, 'doc' => $doc];
+        }
+
+        $nodes = $doc['content'] ?? (isset($doc['type']) ? [] : $doc);
+
+        if (!is_array($nodes)) {
+            return ['text' => null, 'doc' => $doc];
+        }
+
+        $text = null;
+        $kept = [];
+
+        foreach ($nodes as $node) {
+            if ($text === null
+                && is_array($node)
+                && ($node['type'] ?? '') === 'heading'
+                && (int)($node['attrs']['level'] ?? 0) === $level
+            ) {
+                $text = $this->_plainText($node['content'] ?? []);
+                continue; // drop this heading from the body
+            }
+
+            $kept[] = $node;
+        }
+
+        // Nothing matched — return the doc untouched.
+        if ($text === null) {
+            return ['text' => null, 'doc' => $doc];
+        }
+
+        if (isset($doc['content'])) {
+            $doc['content'] = $kept;
+        } else {
+            $doc = $kept;
+        }
+
+        return ['text' => $text, 'doc' => $doc];
+    }
+
     // Private Methods
     // =========================================================================
+
+    /**
+     * Flattens ProseMirror inline content to plain text, dropping marks.
+     *
+     * Recurses through any nested `content` (e.g. nodes that wrap inline runs)
+     * and concatenates `text`. Used to lift a heading into a plain-text field.
+     *
+     * @param array $inlineNodes
+     * @return string
+     */
+    private function _plainText(array $inlineNodes): string
+    {
+        $text = '';
+
+        foreach ($inlineNodes as $node) {
+            if (!is_array($node)) {
+                continue;
+            }
+
+            if (isset($node['text'])) {
+                $text .= $node['text'];
+            } elseif (isset($node['content']) && is_array($node['content'])) {
+                $text .= $this->_plainText($node['content']);
+            }
+        }
+
+        return trim($text);
+    }
 
     /**
      * Renders a single node to HTML.
@@ -88,6 +207,90 @@ class NodesRenderer extends Component
             'ctaButton'      => $this->_renderCtaButton($node),
             default          => '',
         };
+    }
+
+    /**
+     * Renders a single raw-ProseMirror block node to HTML.
+     *
+     * Unknown node types are silently skipped.
+     *
+     * @param array $node
+     * @return string
+     */
+    private function _renderDocNode(array $node): string
+    {
+        $type = $node['type'] ?? '';
+
+        return match ($type) {
+            'heading'        => $this->_renderDocHeading($node),
+            'paragraph'      => '<p>' . $this->_renderInlineContent($node['content'] ?? []) . '</p>',
+            'bulletList'     => $this->_renderDocList($node, 'ul'),
+            'orderedList'    => $this->_renderDocList($node, 'ol'),
+            'listItem'       => '<li>' . $this->_renderListItem($node) . '</li>',
+            'horizontalRule' => '<hr>',
+            'hardBreak'      => '<br>',
+            default          => '',
+        };
+    }
+
+    /**
+     * Renders a raw ProseMirror heading node to <h1>–<h6> (level from attrs.level).
+     *
+     * @param array $node
+     * @return string
+     */
+    private function _renderDocHeading(array $node): string
+    {
+        $level = (int)($node['attrs']['level'] ?? 1);
+        $level = max(1, min(6, $level));
+
+        return "<h{$level}>" . $this->_renderInlineContent($node['content'] ?? []) . "</h{$level}>";
+    }
+
+    /**
+     * Renders a raw ProseMirror bulletList/orderedList to <ul>/<ol>.
+     *
+     * @param array  $node
+     * @param string $tag 'ul' or 'ol'
+     * @return string
+     */
+    private function _renderDocList(array $node, string $tag): string
+    {
+        $items = '';
+        foreach ($node['content'] ?? [] as $child) {
+            if (is_array($child) && ($child['type'] ?? '') === 'listItem') {
+                $items .= '<li>' . $this->_renderListItem($child) . '</li>';
+            }
+        }
+
+        return $items === '' ? '' : "<{$tag}>{$items}</{$tag}>";
+    }
+
+    /**
+     * Renders the inner content of a listItem.
+     *
+     * A listItem holds block children (typically a paragraph, possibly a nested
+     * list). Paragraph children are unwrapped to inline content so the output is
+     * clean `<li>text</li>`; nested lists recurse via the block renderer.
+     *
+     * @param array $node
+     * @return string
+     */
+    private function _renderListItem(array $node): string
+    {
+        $html = '';
+        foreach ($node['content'] ?? [] as $child) {
+            if (!is_array($child)) {
+                continue;
+            }
+            if (($child['type'] ?? '') === 'paragraph') {
+                $html .= $this->_renderInlineContent($child['content'] ?? []);
+            } else {
+                $html .= $this->_renderDocNode($child);
+            }
+        }
+
+        return $html;
     }
 
     /**

@@ -25,6 +25,9 @@
                         <span style="color:var(--hairline-color); margin-right:4px;">{% for i in 1..depth %}&mdash;{% endfor %}</span>
                     {% endif %}
                     <strong>{{ page.title ?? page.slug ?? '?' }}</strong>
+                    {% if page.sectionLabel ?? null %}
+                        <span class="light" style="margin-left:6px;">— {{ page.sectionLabel }}</span>
+                    {% endif %}
                     {% set otherWarnings = (page.warnings ?? [])|filter(w => w != 'Skipped — entry is locked.') %}
                     {% if isLocked %}
                         <span class="light" style="margin-left:6px;">— Skipped (locked)</span>
@@ -40,6 +43,8 @@
                 <td>
                     {% if 'Skipped — entry is locked.' in (page.warnings ?? []) %}
                         <span class="status disabled"></span> Locked
+                    {% elseif page.skipped ?? false %}
+                        <span class="status disabled"></span> Skipped
                     {% elseif page.success ?? false %}
                         {% if page.entryFound ?? false %}
                             <span class="status blue"></span> Updated
@@ -97,11 +102,17 @@
         </div>
     {% endif %}
 
-    {# Summary line #}
+    {# Summary line.
+       'updated' = entries actually written/saved to Craft, 'skipped' = locked or
+       any other skip reason, 'total' = pages found in the API response. Locked
+       and skipped pages appear in run.result but are never written, so counting
+       them separately keeps the headline figure honest. #}
     {% set pages = run.result ?? [] %}
     {% set totalImages = 0 %}
     {% set reusedImages = 0 %}
     {% set totalWarnings = 0 %}
+    {% set updatedCount = 0 %}
+    {% set skippedCount = 0 %}
     {% for page in pages %}
         {% for img in page.images ?? [] %}
             {% set totalImages = totalImages + 1 %}
@@ -110,10 +121,20 @@
             {% endif %}
         {% endfor %}
         {% set totalWarnings = totalWarnings + (page.warnings ?? [])|length %}
+
+        {% set isLocked = 'Skipped — entry is locked.' in (page.warnings ?? []) %}
+        {% set isSkipped = (page.skipped ?? false) or isLocked %}
+        {% if isSkipped %}
+            {% set skippedCount = skippedCount + 1 %}
+        {% elseif page.success ?? false %}
+            {% set updatedCount = updatedCount + 1 %}
+        {% endif %}
     {% endfor %}
 
     <div style="margin-bottom:24px; font-size:14px; color:var(--text-color);">
-        <strong>{{ pages|length }}</strong> {{ pages|length == 1 ? 'page' : 'pages' }} imported
+        <strong>{{ updatedCount }}</strong> updated
+        &middot; <strong>{{ skippedCount }}</strong> skipped
+        &middot; <strong>{{ pages|length }}</strong> total
         &middot; <strong>{{ totalImages - reusedImages }}</strong> images downloaded
         &middot; <strong>{{ reusedImages }}</strong> images reused
         {% if totalWarnings > 0 %}
@@ -130,19 +151,45 @@
     {% endfor %}
 
     {% if warningPages|length %}
-        <div class="pane" style="background:var(--yellow-050); border:1px solid var(--yellow-300); margin-bottom:24px; padding:16px; border-radius:8px;">
-            <h2 style="margin:0 0 8px 0; font-size:14px;">{{ 'Warnings'|t('contentiq-importer') }}</h2>
-            <ul style="margin:0; padding-left:20px;">
-                {% for page in warningPages %}
-                    {% for warning in page.warnings %}
-                        <li style="margin-bottom:4px;">
-                            <strong>{{ page.title ?? page.slug ?? '?' }}</strong>
-                            <code style="font-size:12px; color:var(--medium-text-color);">{{ page.slug ?? '?' }}</code>
-                            — {{ warning }}
-                        </li>
-                    {% endfor %}
-                {% endfor %}
-            </ul>
+        {# Collapsed by default — the "See more" label toggles the hidden checkbox,
+           expanding the list via a grid-rows transition (no JS, exact height). #}
+        {% css %}
+            .cq-warnings .cq-warn-toggle { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
+            .cq-warnings .cq-warn-header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+            .cq-warnings .cq-warn-header h2 { margin:0; font-size:14px; }
+            .cq-warnings .cq-warn-link { cursor:pointer; color:var(--link-color, #2563eb); text-decoration:underline; font-size:13px; white-space:nowrap; }
+            .cq-warnings .cq-warn-link::after { content:'See more'; }
+            .cq-warnings .cq-warn-toggle:checked ~ .cq-warn-header .cq-warn-link::after { content:'See less'; }
+            .cq-warnings .cq-warn-body { display:grid; grid-template-rows:0fr; transition:grid-template-rows .35s ease; }
+            .cq-warnings .cq-warn-toggle:checked ~ .cq-warn-body { grid-template-rows:1fr; }
+            .cq-warnings .cq-warn-inner { overflow:hidden; min-height:0; }
+            .cq-warnings .cq-warn-inner ul { margin:12px 0 0 0; padding-left:20px; }
+        {% endcss %}
+
+        <div class="pane cq-warnings" style="background:var(--yellow-050); border:1px solid var(--yellow-300); margin-bottom:24px; padding:16px; border-radius:8px;">
+            <input type="checkbox" id="cq-warn-toggle" class="cq-warn-toggle">
+            <div class="cq-warn-header">
+                <h2>
+                    {{ 'Warnings'|t('contentiq-importer') }}
+                    <span class="light" style="font-weight:normal;">({{ totalWarnings }})</span>
+                </h2>
+                <label for="cq-warn-toggle" class="cq-warn-link"></label>
+            </div>
+            <div class="cq-warn-body">
+                <div class="cq-warn-inner">
+                    <ul>
+                        {% for page in warningPages %}
+                            {% for warning in page.warnings %}
+                                <li style="margin-bottom:4px;">
+                                    <strong>{{ page.title ?? page.slug ?? '?' }}</strong>
+                                    <code style="font-size:12px; color:var(--medium-text-color);">{{ page.slug ?? '?' }}</code>
+                                    — {{ warning }}
+                                </li>
+                            {% endfor %}
+                        {% endfor %}
+                    </ul>
+                </div>
+            </div>
         </div>
     {% endif %}
 

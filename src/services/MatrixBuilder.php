@@ -47,6 +47,9 @@ class MatrixBuilder extends Component
         $defaults  = require dirname(__DIR__) . '/config/defaults.php';
         $overrides = $config['blockOverrides'] ?? [];
 
+        // content_types is page-routing config, not a block mapping — drop it here.
+        unset($defaults['content_types']);
+
         // Overrides replace entire block definitions — not merged at field level.
         $this->_mapping = array_replace($defaults, $overrides);
     }

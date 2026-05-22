@@ -331,7 +331,7 @@ class CpController extends Controller
             ->all();
 
         $hasSyncRecords = count($syncRecords) > 0;
-        $syncEntries    = [];
+        $syncGroups     = [];
 
         if ($hasSyncRecords) {
             $elementIds = array_column($syncRecords, 'element_id');
@@ -340,24 +340,64 @@ class CpController extends Controller
             $config        = Craft::$app->config->getConfigFromFile('contentiq');
             $sectionHandle = $config['section'] ?? 'pages';
 
+            // Ordered list of collection sections from content_types config.
+            // Pages comes first, then each distinct collection section in config order.
+            $contentTypesMap    = ContentIQImporter::$plugin->imports->getContentTypesMap();
+            $collectionSections = [];
+
+            foreach ($contentTypesMap as $route) {
+                $handle = $route['section'] ?? null;
+
+                if ($handle !== null
+                    && $handle !== $sectionHandle
+                    && !in_array($handle, $collectionSections, true)) {
+                    $collectionSections[] = $handle;
+                }
+            }
+
+            // Query entries across the Pages section (+ homepage Single) and every
+            // collection section, restricted to those that have a sync record.
             $entries = Entry::find()
-                ->section([$sectionHandle, 'homepage'])
+                ->section(array_merge([$sectionHandle, 'homepage'], $collectionSections))
                 ->id($elementIds)
                 ->status(null)
                 ->all();
 
-            foreach ($entries as $entry) {
-                $isHomepage = $entry->section->handle === 'homepage';
-                $parent     = $isHomepage ? null : $entry->getParent();
+            // Bucket entries by their display group. Homepage folds into Pages.
+            $buckets = [];
 
-                $syncEntries[] = [
+            foreach ($entries as $entry) {
+                $entrySection = $entry->section;
+                $handle       = $entrySection->handle;
+                $isHomepage   = $handle === 'homepage';
+                $groupHandle  = $isHomepage ? $sectionHandle : $handle;
+                $isStructure  = $entrySection->type === 'structure';
+                $parent       = ($isStructure && !$isHomepage) ? $entry->getParent() : null;
+
+                $buckets[$groupHandle][] = [
                     'elementId'  => $entry->id,
                     'title'      => $entry->title,
                     'slug'       => $entry->slug,
                     'locked'     => (bool)($lockedMap[$entry->id] ?? true),
                     'parentSlug' => $parent?->slug,
-                    'depth'      => $isHomepage ? 0 : ($entry->level - 1),
+                    'depth'      => ($isStructure && !$isHomepage) ? max(0, $entry->level - 1) : 0,
                     'isHomepage' => $isHomepage,
+                ];
+            }
+
+            // Build ordered groups: Pages first, then collection sections in config
+            // order. Omit any group with no entries (e.g. a collection not yet synced).
+            foreach (array_merge([$sectionHandle], $collectionSections) as $groupHandle) {
+                if (empty($buckets[$groupHandle])) {
+                    continue;
+                }
+
+                $section = Craft::$app->entries->getSectionByHandle($groupHandle);
+
+                $syncGroups[] = [
+                    'handle'  => $groupHandle,
+                    'name'    => $section?->name ?? ucfirst($groupHandle),
+                    'entries' => $buckets[$groupHandle],
                 ];
             }
         }
@@ -379,7 +419,7 @@ class CpController extends Controller
             'contentiqUrl'    => App::parseEnv($settings->contentiqUrl),
             'projectSlug'    => $inferredSlug,
             'hasSyncRecords' => $hasSyncRecords,
-            'syncEntries'    => $syncEntries,
+            'syncGroups'     => $syncGroups,
         ]);
     }
 

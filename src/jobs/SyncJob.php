@@ -75,10 +75,15 @@ class SyncJob extends BaseJob
         foreach ($pages as $i => $pageData) {
             $this->setProgress($queue, $i / $total, "Importing page " . ($i + 1) . " of {$total}");
 
-            // Skip locked entries.
+            // Collection children route to their configured section, not Pages.
+            $contentType   = $pageData['document']['content_type'] ?? null;
+            $route         = $importService->getContentTypeRoute($contentType);
+            $lookupSection = $route['section'] ?? $sectionHandle;
+
+            // Skip locked entries — look them up in their actual (routed) section.
             $pageSlug = $pageData['document']['slug'] ?? '';
             $existingEntry = \craft\elements\Entry::find()
-                ->section($sectionHandle)
+                ->section($lookupSection)
                 ->slug($pageSlug)
                 ->status(null)
                 ->one();
@@ -105,6 +110,10 @@ class SyncJob extends BaseJob
                         'seoFieldCount' => 0,
                         'warnings' => ['Skipped — entry is locked.'],
                         'error' => null,
+                        'contentType' => $contentType,
+                        'sectionLabel' => $contentType !== null
+                            ? (Craft::$app->entries->getSectionByHandle($lookupSection)?->name ?? $contentType)
+                            : null,
                     ];
 
                     if ($pageSlug !== '') {
@@ -122,7 +131,10 @@ class SyncJob extends BaseJob
             $slug       = $result['slug'] ?? '';
             $isHomepage = (bool)($pageData['document']['is_homepage'] ?? false);
 
-            if ($entryId !== null && $structureId !== null && !$isHomepage) {
+            // Collection children are routed to their own section and have no Craft
+            // parent (their collection parent is excluded from export) — skip the
+            // Pages structure positioning / parent resolution for them entirely.
+            if ($contentType === null && $entryId !== null && $structureId !== null && !$isHomepage) {
                 $entry = \craft\elements\Entry::find()->id($entryId)->status(null)->one();
 
                 if ($entry !== null) {

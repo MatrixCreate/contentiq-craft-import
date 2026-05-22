@@ -39,6 +39,13 @@ class ImportService extends Component
      */
     private ?array $_config = null;
 
+    /**
+     * Resolved content_types routing map (defaults.php merged with project override).
+     *
+     * @var array<string, array>|null
+     */
+    private ?array $_contentTypesMap = null;
+
     // Public Methods
     // =========================================================================
 
@@ -88,6 +95,17 @@ class ImportService extends Component
             $result['title'] = $title;
 
             $isHomepage = (bool)($data['document']['is_homepage'] ?? false);
+
+            // -----------------------------------------------------------------------
+            // 2a. Collection children carry a content_type and a raw `content` field
+            //     instead of a blocks array. Route them to their configured section
+            //     and import via a separate, simpler path. (Collection parents are
+            //     excluded server-side and never reach the importer.)
+            // -----------------------------------------------------------------------
+            $contentType = $data['document']['content_type'] ?? null;
+            if ($contentType !== null) {
+                return $this->_importCollectionChild($data, $contentType, $config, $dryRun, $result);
+            }
 
             // -----------------------------------------------------------------------
             // 3. Resolve section and entry type.
@@ -313,8 +331,244 @@ class ImportService extends Component
         return $result;
     }
 
+    /**
+     * Resolves the Craft routing config for a ContentIQ content_type slug.
+     *
+     * Returns ['section' => ..., 'entryType' => ..., 'contentField' => ...] when the
+     * slug is mapped, or null when the slug is null or has no mapping. Used by both
+     * importPage() (routing) and SyncJob (section-aware lock check / skipping
+     * structure positioning for collection children).
+     *
+     * @param string|null $contentType
+     * @return array{section: string, entryType: string, contentField: string}|null
+     */
+    public function getContentTypeRoute(?string $contentType): ?array
+    {
+        if ($contentType === null) {
+            return null;
+        }
+
+        return $this->_getContentTypesMap()[$contentType] ?? null;
+    }
+
+    /**
+     * Returns the full resolved content_types routing map (defaults.php merged
+     * with the project config override).
+     *
+     * Used by the sync screen to enumerate every collection section so its
+     * entries can be listed alongside Pages.
+     *
+     * @return array<string, array{section: string, entryType: string, contentField: string}>
+     */
+    public function getContentTypesMap(): array
+    {
+        return $this->_getContentTypesMap();
+    }
+
     // Private Methods
     // =========================================================================
+
+    /**
+     * Loads the content_types routing map: defaults.php merged with the project
+     * config override (config/contentiq.php 'content_types', per-slug replace).
+     *
+     * Cached after the first call.
+     *
+     * @return array<string, array>
+     */
+    private function _getContentTypesMap(): array
+    {
+        if ($this->_contentTypesMap !== null) {
+            return $this->_contentTypesMap;
+        }
+
+        $defaults    = require dirname(__DIR__) . '/config/defaults.php';
+        $defaultMap  = is_array($defaults['content_types'] ?? null) ? $defaults['content_types'] : [];
+
+        $projectConfig = Craft::$app->getConfig()->getConfigFromFile('contentiq');
+        $override      = (is_array($projectConfig) && is_array($projectConfig['content_types'] ?? null))
+            ? $projectConfig['content_types']
+            : [];
+
+        // Per-slug replace — a project override replaces a slug's whole definition.
+        $this->_contentTypesMap = array_replace($defaultMap, $override);
+
+        return $this->_contentTypesMap;
+    }
+
+    /**
+     * Imports a collection child (a page with document.content_type set).
+     *
+     * Collection children differ from standard pages: they carry a raw `content`
+     * ProseMirror field (not a blocks array), route to their configured section,
+     * never have a Craft parent (their collection parent is excluded from export),
+     * and only carry SEO for portal-on collections. Content is serialised to HTML
+     * and written to the configured contentField.
+     *
+     * Returns the standard result shape with `contentType`/`sectionLabel` set, or a
+     * non-fatal skip (success, skipped=true, warning) when the content_type is unmapped.
+     *
+     * @param array  $data
+     * @param string $contentType
+     * @param array  $config
+     * @param bool   $dryRun
+     * @param array  $result Pre-populated result skeleton (slug/title already set).
+     * @return array
+     */
+    private function _importCollectionChild(array $data, string $contentType, array $config, bool $dryRun, array $result): array
+    {
+        $result['contentType'] = $contentType;
+
+        $slug  = $result['slug'];
+        $title = $result['title'];
+
+        // Resolve routing — unmapped content_type is skipped (non-fatal).
+        $route = $this->getContentTypeRoute($contentType);
+        if ($route === null) {
+            $result['skipped']      = true;
+            $result['success']      = true;
+            $result['sectionLabel'] = $contentType;
+            $result['warnings'][]   = "Content type '{$contentType}' has no mapping in config — page skipped.";
+            Craft::warning("ContentIQImporter: unmapped content_type '{$contentType}' for page '{$slug}' — skipped.", __METHOD__);
+
+            return $result;
+        }
+
+        $sectionHandle      = $route['section'];
+        $entryTypeHandle    = $route['entryType'];
+        $contentFieldHandle = $route['contentField'];
+        $headingFieldHandle = $route['headingField'] ?? null;
+
+        $section = Craft::$app->entries->getSectionByHandle($sectionHandle);
+        if ($section === null) {
+            return $this->_fatal($result, "Section '{$sectionHandle}' (content type '{$contentType}') not found in Craft. Check config/contentiq.php.");
+        }
+
+        $entryType = Craft::$app->entries->getEntryTypeByHandle($entryTypeHandle);
+        if ($entryType === null) {
+            return $this->_fatal($result, "Entry type '{$entryTypeHandle}' (content type '{$contentType}') not found in Craft. Check config/contentiq.php.");
+        }
+
+        $result['sectionLabel'] = $section->name ?: $contentType;
+
+        // Prepare image service (used by SEO og_image import).
+        $volumeHandle = $config['assetVolume'] ?? 'images';
+        $folderPath   = $config['assetFolder'] ?? 'contentiq';
+        ContentIQImporter::$plugin->images->prepare($volumeHandle, $folderPath);
+
+        // Serialise the raw ProseMirror content to HTML for the content field.
+        $content     = $data['content'] ?? [];
+        $fieldValues = [];
+
+        // Optionally lift the H1 (level-1 heading) into a dedicated heading field,
+        // stripping it from the body so it isn't rendered twice. Only when the
+        // route configures a 'headingField' and the content actually has an H1.
+        if ($headingFieldHandle !== null) {
+            $extracted = ContentIQImporter::$plugin->nodes->extractHeading($content, 1);
+
+            if (($extracted['text'] ?? '') !== '') {
+                $fieldValues[$headingFieldHandle] = $extracted['text'];
+                $content = $extracted['doc'];
+            }
+        }
+
+        $fieldValues[$contentFieldHandle] = ContentIQImporter::$plugin->nodes->renderDocument($content);
+
+        // SEO is only present for portal-on collections — set it only when supplied.
+        if (!empty($data['seo'])) {
+            $fieldValues = array_merge($fieldValues, $this->_resolveSeoFields($data['seo'], $config, $dryRun));
+        }
+
+        // Find existing entry by slug within the routed section.
+        $existing = Entry::find()
+            ->section($sectionHandle)
+            ->slug($slug)
+            ->status(null)
+            ->one();
+
+        if ($existing !== null) {
+            $result['entryFound'] = true;
+            $result['entryId']    = $existing->id;
+        }
+
+        if ($dryRun) {
+            $result['success'] = true;
+
+            return $result;
+        }
+
+        if ($existing !== null) {
+            $filtered = $this->_filterToValidFields($fieldValues, $existing->getFieldLayout(), $result);
+            $result['seoFieldCount'] = $this->_countSeoFields($filtered, $config);
+            $existing->title = $title;
+            $existing->setFieldValues($filtered);
+
+            if (!Craft::$app->getElements()->saveElement($existing, false)) {
+                $errors = implode(', ', $existing->getFirstErrors());
+
+                return $this->_fatal($result, "Failed to save entry: {$errors}");
+            }
+
+            $this->_refreshUri($existing, $result);
+
+            $result['entryId'] = $existing->id;
+            $result['success'] = true;
+
+            return $result;
+        }
+
+        $entry = new Entry();
+        $entry->sectionId = $section->id;
+        $entry->typeId    = $entryType->id;
+        $entry->siteId    = Craft::$app->getSites()->getPrimarySite()->id;
+        $entry->title     = $title;
+        $entry->slug      = $slug;
+
+        $filtered = $this->_filterToValidFields($fieldValues, $entryType->getFieldLayout(), $result);
+        $result['seoFieldCount'] = $this->_countSeoFields($filtered, $config);
+        $entry->setFieldValues($filtered);
+
+        if (!Craft::$app->getElements()->saveElement($entry, false)) {
+            $errors = implode(', ', $entry->getFirstErrors());
+            $this->_logNestedErrors($entry);
+
+            return $this->_fatal($result, "Failed to save entry: {$errors}");
+        }
+
+        $this->_refreshUri($entry, $result);
+
+        $result['entryId'] = $entry->id;
+        $result['success'] = true;
+
+        return $result;
+    }
+
+    /**
+     * Generates and persists the entry's URI after a validation-skipped save.
+     *
+     * The importer saves collection children with saveElement($entry, false) to
+     * bypass nested-Matrix validation, but URI generation in Craft is a
+     * validation-time concern (ElementUriValidator), so a skipped save leaves
+     * uri = null — the entry has no front-end URL (no globe link in the CP).
+     * updateElementSlugAndUri() regenerates and writes slug + URI directly
+     * without re-running element validation.
+     *
+     * Pages get this for free via Structures::append() → afterMoveInStructure();
+     * collection children are channel entries with no structure step, so the
+     * importer must trigger it explicitly. No-op when the section has no URLs
+     * (setElementUri just leaves uri = null).
+     *
+     * @param Entry $entry
+     * @param array $result
+     */
+    private function _refreshUri(Entry $entry, array &$result): void
+    {
+        try {
+            Craft::$app->getElements()->updateElementSlugAndUri($entry, true, false);
+        } catch (\Throwable $e) {
+            $result['warnings'][] = 'Could not generate a front-end URL: ' . $e->getMessage();
+        }
+    }
 
     /**
      * Returns an empty result skeleton.
@@ -334,6 +588,9 @@ class ImportService extends Component
             'blockNotes'    => '',
             'warnings'      => [],
             'error'         => null,
+            'skipped'       => false,
+            'contentType'   => null,
+            'sectionLabel'  => null,
         ];
     }
 
