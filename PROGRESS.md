@@ -12,6 +12,10 @@ The Custom block mapping has been updated to match ContentiQ's new multi-image e
 - Added `'images'` handler to `_resolveFieldByHandler()` dispatch table.
 - New `_handleImages(string $handle, mixed $value, array &$imageReport, bool $dryRun): array` method: iterates the images array (up to 10), calls `ImageImportService::importFromField()` for each, collects Craft asset IDs. Individual failures are non-fatal — logged as a warning, image skipped, rest of block continues.
 
+## Removed em-dash nesting markers in Sync view (2026-05-22)
+
+Dropped the `&mdash;` indicator span from the pre-sync entry tree (`sync.twig` `pageRows` macro). The `padding-left` indentation (24px per depth) already makes nesting clear, so the leading dashes were redundant. The `depth`/`indent` calculation stays — only the visual marker was removed.
+
 ## Collapsible warnings panel (2026-05-22)
 
 The sync report's Warnings panel is now collapsed to a small bar by default (heading + count + a "See more"/"See less" toggle). Expanding is CSS-only: a visually-hidden checkbox driven by the `<label>`, with the list animated open via a `grid-template-rows: 0fr → 1fr` transition (animates to exact content height — no JS, no magic max-height). Styles registered via `{% css %}` in `sync-result.twig`.

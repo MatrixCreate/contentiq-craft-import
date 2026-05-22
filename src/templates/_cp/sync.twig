@@ -19,9 +19,6 @@
                                class="contentiq-sync-cb"
                                data-element-id="{{ page.elementId }}"
                                {{ not page.locked ? 'checked' : '' }}>
-                        {% if depth > 0 %}
-                            <span style="color:var(--hairline-color); margin-right:4px;">{% for i in 1..depth %}&mdash;{% endfor %}</span>
-                        {% endif %}
                         <strong>{{ page.title ?? page.slug }}</strong>
                         {% if page.isHomepage ?? false %}
                             <span class="light" style="font-size:12px;">(Homepage)</span>
