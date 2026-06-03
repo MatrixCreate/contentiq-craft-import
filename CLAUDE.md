@@ -212,6 +212,8 @@ Critical requirements:
 | Handler | Input | Output |
 |---|---|---|
 | `nodes` | `ContentNode[]` | HTML string via NodesRenderer |
+| `mediaNodes` | `ContentNode[]` with `ctaButton` nodes | richText HTML + `actionButtons` Matrix (ctaButtons lifted out of the HTML) |
+| `mediaType` (`textMediaMedia`) | whole inner block (`_block`) | `mediaType` + image routed to `image` or `desktop`/`mobileBackgroundImage` |
 | `image` | `{key, url, alt}` | asset ID array `[$id]` |
 | `heading` | `{level, text}` or string | `<hN>text</hN>` |
 | `body` | plain string | `<p>text</p>` (legacy — use `nodes` for structured content) |
@@ -241,6 +243,17 @@ Critical requirements:
 Consecutive `text_and_media` blocks in the JSON are merged into a single `textAndMedia` outer entry with multiple `textAndMediaBlock` inner entries. The outer entry's `blockLayout` field is set from the first block's `layout` value. The CMS template handles alternating image positions automatically.
 
 A non-`text_and_media` block (e.g. faq, price_list) breaks the consecutive run and starts a new group.
+
+Each inner `textAndMediaBlock` carries its own `actionButtons` Matrix. `ctaButton` nodes in the block content are lifted out of `richText` into that Matrix via the `mediaNodes` handler (same `actionButton` entry shape as faq/price_list/hero) — they are not rendered as raw `<a>` tags.
+
+### Media type (Image vs Background Image)
+
+ContentiQ's Text & Media `layout` value drives the inner block's Craft `mediaType` Dropdown (the `textMediaMedia` handler, fed the whole block via `_block`):
+
+- `image_left` / `image_right` → `mediaType = image`; image set on the `image` field. Left/right position comes from the **outer** entry's `blockLayout` (`text-left` / `image-left`), taken from the first block in the group.
+- `background` → `mediaType = backgroundImage` (the template renders these as a CSS background and ignores `image`). The block's `image` → `desktopBackgroundImage`; the optional `mobile_image` → `mobileBackgroundImage`, **falling back to the desktop image** when no mobile image was supplied (so mobile never drops to the global placeholder). Position is irrelevant for background, so the outer `blockLayout` falls back to `text-left`.
+
+`mediaType` is per-inner-block; `blockLayout` (position) is per-outer-group. A group with mixed layouts keeps each block's own media type but shares one position derived from the first block.
 
 ---
 

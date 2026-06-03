@@ -460,7 +460,9 @@ class MatrixBuilder extends Component
         $reportedFields = [];
 
         foreach ($innerConfig['fields'] as $contentiqKey => [$craftHandle, $handlerType]) {
-            $value   = $sourceFields[$contentiqKey] ?? null;
+            // '_block' passes the entire source fields to the handler (e.g. when the
+            // output is derived from multiple keys, like mediaType + image routing).
+            $value    = $contentiqKey === '_block' ? $sourceFields : ($sourceFields[$contentiqKey] ?? null);
             $resolved = $this->_resolveFieldByHandler($handlerType, $craftHandle, $value, $imageReport, $dryRun);
 
             foreach ($resolved as $handle => $fieldValue) {
@@ -493,6 +495,8 @@ class MatrixBuilder extends Component
     ): array {
         return match ($handlerType) {
             'nodes'           => $this->_handleNodes($craftHandle, $value),
+            'mediaNodes'      => $this->_handleMediaNodes($craftHandle, $value),
+            'textMediaMedia'  => $this->_handleTextMediaMedia($value, $imageReport, $dryRun),
             'image'           => $this->_handleImage($craftHandle, $value, $imageReport, $dryRun),
             'images'          => $this->_handleImages($craftHandle, $value, $imageReport, $dryRun),
             'heading'         => $this->_handleHeading($craftHandle, $value),
@@ -521,6 +525,84 @@ class MatrixBuilder extends Component
         $html = ContentIQImporter::$plugin->nodes->render(is_array($value) ? $value : []);
 
         return [$handle => $html];
+    }
+
+    /**
+     * Renders a nodes array to richText while lifting ctaButton nodes into an actionButtons Matrix.
+     *
+     * Used by blocks (e.g. text_and_media) whose entry type has both a richText
+     * field and an actionButtons Matrix. ctaButton nodes are removed from the
+     * rendered HTML and emitted as managed Action Button entries instead of raw
+     * <a> tags — matching the behaviour of the faq and price_list blocks.
+     *
+     * @param string $handle The richText field handle.
+     * @param mixed  $value  ContentNode[] that may contain ctaButton nodes.
+     * @return array<string, mixed>
+     */
+    private function _handleMediaNodes(string $handle, mixed $value): array
+    {
+        if (!is_array($value)) {
+            $value = [];
+        }
+
+        $contentNodes = array_values(array_filter(
+            $value,
+            static fn($node) => ($node['type'] ?? '') !== 'ctaButton',
+        ));
+
+        $result = [$handle => ContentIQImporter::$plugin->nodes->render($contentNodes)];
+
+        $actionButtons = $this->_buildActionButtonsMatrix($value);
+        if (!empty($actionButtons)) {
+            $result['actionButtons'] = $actionButtons;
+        }
+
+        return $result;
+    }
+
+    /**
+     * Resolves the mediaType and image fields for a text_and_media inner block.
+     *
+     * The block's `layout` selects the Craft media treatment:
+     *   - 'background' → mediaType 'backgroundImage'; the images render as a
+     *     full-bleed CSS background, so they are routed to the desktop/mobile
+     *     background image fields the template reads (NOT the standard image field).
+     *     `image` is the desktop background; the optional `mobile_image` is the
+     *     mobile background, falling back to the desktop image when not supplied.
+     *   - anything else → mediaType 'image'; the image is set on the image field
+     *     (the left/right position comes from the outer entry's blockLayout).
+     *
+     * Receives the entire inner block fields array (via the '_block' source key).
+     *
+     * @param mixed $value        The inner block fields array ({nodes, image, mobile_image, layout}).
+     * @param array &$imageReport Image report array, mutated by the image handler.
+     * @param bool  $dryRun
+     * @return array<string, mixed>
+     */
+    private function _handleTextMediaMedia(mixed $value, array &$imageReport, bool $dryRun): array
+    {
+        $fields = is_array($value) ? $value : [];
+        $layout = (string)($fields['layout'] ?? '');
+        $image  = $fields['image'] ?? null;
+
+        if ($layout === 'background') {
+            $desktopIds = $this->_handleImage('desktopBackgroundImage', $image, $imageReport, $dryRun)['desktopBackgroundImage'];
+
+            // Optional mobile background — fall back to the desktop image when absent
+            // so mobile doesn't drop to the global placeholder.
+            $mobileImage = $fields['mobile_image'] ?? null;
+            $mobileIds   = is_array($mobileImage) && !empty($mobileImage['url'])
+                ? $this->_handleImage('mobileBackgroundImage', $mobileImage, $imageReport, $dryRun)['mobileBackgroundImage']
+                : $desktopIds;
+
+            return [
+                'mediaType'              => 'backgroundImage',
+                'desktopBackgroundImage' => $desktopIds,
+                'mobileBackgroundImage'  => $mobileIds,
+            ];
+        }
+
+        return ['mediaType' => 'image'] + $this->_handleImage('image', $image, $imageReport, $dryRun);
     }
 
     /**
@@ -808,15 +890,7 @@ class MatrixBuilder extends Component
         }
 
         return [
-            $handle => [
-                [
-                    'type'       => 'verbb\\hyper\\links\\Url',
-                    'handle'    => 'default-verbb-hyper-links-url',
-                    'linkValue' => $url !== '' ? $url : 'https://',
-                    'linkText'  => $label,
-                    'linkClass' => 'btn btn-primary',
-                ],
-            ],
+            $handle => [$this->_buildActionButtonLink($label, $url)],
             'showLinkAsSeparateButton' => true,
         ];
     }
@@ -859,7 +933,6 @@ class MatrixBuilder extends Component
         $beforeNodes    = [];
         $afterNodes     = [];
         $faqItems       = [];
-        $ctaButtons     = [];
         $foundFaqItems  = false;
 
         foreach ($value as $node) {
@@ -871,27 +944,8 @@ class MatrixBuilder extends Component
                 continue;
             }
 
+            // ctaButton nodes are lifted into the actionButtons Matrix below.
             if ($type === 'ctaButton') {
-                // Collect CTA buttons as actionButtons Matrix entries.
-                $label = (string)($node['label'] ?? '');
-                $url   = (string)($node['url'] ?? '');
-
-                if ($label !== '' || $url !== '') {
-                    $ctaButtons[] = [
-                        'type'   => 'actionButton',
-                        'fields' => [
-                            'actionButton' => [
-                                [
-                                    'type'      => 'verbb\\hyper\\links\\Url',
-                                    'handle'    => 'default-verbb-hyper-links-url',
-                                    'linkValue' => $url !== '' ? $url : 'https://',
-                                    'linkText'  => $label,
-                                    'linkClass' => 'btn btn-primary',
-                                ],
-                            ],
-                        ],
-                    ];
-                }
                 continue;
             }
 
@@ -904,21 +958,15 @@ class MatrixBuilder extends Component
 
         $renderer = ContentIQImporter::$plugin->nodes;
 
-        // Build actionButtons Matrix data from collected CTA buttons.
-        $actionButtonsData = [];
-        $btnCounter = 0;
-        foreach ($ctaButtons as $btn) {
-            $actionButtonsData['new' . (++$btnCounter)] = $btn;
-        }
-
         $result = [
             'richText'      => $renderer->render($beforeNodes),
             'extraRichText' => $renderer->render($afterNodes),
             '_faqItems'     => $faqItems,
         ];
 
-        if (!empty($actionButtonsData)) {
-            $result['actionButtons'] = $actionButtonsData;
+        $actionButtons = $this->_buildActionButtonsMatrix($value);
+        if (!empty($actionButtons)) {
+            $result['actionButtons'] = $actionButtons;
         }
 
         return $result;
@@ -940,10 +988,25 @@ class MatrixBuilder extends Component
             return [$handle => []];
         }
 
-        $actionButtonsData = [];
-        $btnCounter = 0;
+        return [$handle => $this->_buildActionButtonsMatrix($value)];
+    }
 
-        foreach ($value as $node) {
+    /**
+     * Builds an actionButtons Matrix value from the ctaButton nodes in a nodes array.
+     *
+     * Non-ctaButton nodes are ignored, so the full block nodes array can be passed
+     * in directly. Buttons with neither a label nor a URL are skipped. Returns an
+     * empty array when no buttons qualify.
+     *
+     * @param array $nodes ContentNode[] that may contain ctaButton nodes.
+     * @return array<string, array> Matrix data keyed by 'new1', 'new2', …
+     */
+    private function _buildActionButtonsMatrix(array $nodes): array
+    {
+        $actionButtonsData = [];
+        $btnCounter        = 0;
+
+        foreach ($nodes as $node) {
             if (($node['type'] ?? '') !== 'ctaButton') {
                 continue;
             }
@@ -958,19 +1021,32 @@ class MatrixBuilder extends Component
             $actionButtonsData['new' . (++$btnCounter)] = [
                 'type'   => 'actionButton',
                 'fields' => [
-                    'actionButton' => [
-                        [
-                            'type'      => 'verbb\\hyper\\links\\Url',
-                            'handle'    => 'default-verbb-hyper-links-url',
-                            'linkValue' => $url !== '' ? $url : 'https://',
-                            'linkText'  => $label,
-                            'linkClass' => 'btn btn-primary',
-                        ],
-                    ],
+                    'actionButton' => [$this->_buildActionButtonLink($label, $url)],
                 ],
             ];
         }
 
-        return [$handle => $actionButtonsData];
+        return $actionButtonsData;
+    }
+
+    /**
+     * Builds a single Verbb Hyper Url link array for an action button.
+     *
+     * Empty URLs fall back to the 'https://' placeholder so editors can set the
+     * destination in the CMS after import.
+     *
+     * @param string $label Button text.
+     * @param string $url   Destination URL (may be empty).
+     * @return array<string, string>
+     */
+    private function _buildActionButtonLink(string $label, string $url): array
+    {
+        return [
+            'type'      => 'verbb\\hyper\\links\\Url',
+            'handle'    => 'default-verbb-hyper-links-url',
+            'linkValue' => $url !== '' ? $url : 'https://',
+            'linkText'  => $label,
+            'linkClass' => 'btn btn-primary',
+        ];
     }
 }

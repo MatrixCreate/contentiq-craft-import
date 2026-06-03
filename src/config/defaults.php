@@ -22,6 +22,8 @@
  *
  * Handler types:
  *   'nodes'           → nodes array → NodesRenderer → HTML string
+ *   'mediaNodes'      → nodes array → richText HTML + actionButtons Matrix (ctaButtons lifted out)
+ *   'textMediaMedia'  → whole inner block ('_block') → mediaType + image|desktop/mobileBackgroundImage
  *   'image'           → {key, url, alt} object → ImageImportService → asset ID array
  *   'heading'         → {level, text} object or plain string → <hN>text</hN> HTML
  *   'body'            → plain string → <p>text</p> HTML
@@ -34,9 +36,10 @@
  *   'uspContent'      → entire block fields → {heading:{level,text}, items:[string]} → <hN>+<ul> HTML
  *
  * Special contentiqKey '_block':
- *   When the contentiqKey in outerFields is '_block', the entire block fields array is passed
- *   to the handler instead of a single field value. Used for blocks (like USP) where the output
- *   is derived from multiple source keys combined into one Craft field.
+ *   When the contentiqKey is '_block' (in outerFields OR innerMatrix.fields), the entire block
+ *   fields array is passed to the handler instead of a single field value. Used where the output
+ *   is derived from multiple source keys (e.g. USP combines heading+items; text_and_media's
+ *   textMediaMedia derives mediaType and the image destination from the block's layout + image).
  *
  * Developer notes:
  *   'notes' is a block-level key (not inside 'fields') emitted by ContentIQ when the CSM
@@ -101,8 +104,13 @@ return [
             'innerType'  => 'textAndMediaBlock',
             'mode'       => 'grouped',
             'fields'     => [
-                'nodes' => ['richText', 'nodes'],
-                'image' => ['image',    'image'],
+                // mediaNodes renders text to richText AND lifts ctaButton nodes
+                // into the inner block's actionButtons Matrix (not raw <a> tags).
+                'nodes'  => ['richText', 'mediaNodes'],
+                // textMediaMedia receives the whole inner block (via '_block') so it
+                // can set mediaType (image | backgroundImage) from the block's layout
+                // and route the image to the matching Craft field.
+                '_block' => ['mediaType', 'textMediaMedia'],
             ],
         ],
     ],
