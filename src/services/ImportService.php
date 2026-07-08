@@ -7,6 +7,7 @@ use craft\base\FieldInterface;
 use craft\elements\Entry;
 use craft\models\FieldLayout;
 use matrixcreate\contentiqimporter\ContentIQImporter;
+use matrixcreate\contentiqimporter\helpers\LinkHelper;
 use Throwable;
 use yii\base\Component;
 
@@ -856,7 +857,7 @@ class ImportService extends Component
                             [
                                 'type'      => 'verbb\\hyper\\links\\Url',
                                 'handle'    => 'default-verbb-hyper-links-url',
-                                'linkValue' => $url !== '' ? $url : '#',
+                                'linkValue' => LinkHelper::hyperInertUrl($url),
                                 'linkText'  => $label,
                                 'linkClass' => 'btn btn-primary',
                             ],
@@ -1034,7 +1035,7 @@ class ImportService extends Component
                             'actionButton' => [[
                                 'type'      => 'verbb\\hyper\\links\\Url',
                                 'handle'    => 'default-verbb-hyper-links-url',
-                                'linkValue' => $url !== '' ? $url : '#',
+                                'linkValue' => LinkHelper::hyperInertUrl($url),
                                 'linkText'  => $label,
                                 'linkClass' => 'btn btn-primary',
                             ]],
@@ -1149,7 +1150,7 @@ class ImportService extends Component
                     'actionButton' => [[
                         'type'      => 'verbb\\hyper\\links\\Url',
                         'handle'    => 'default-verbb-hyper-links-url',
-                        'linkValue' => $url !== '' ? $url : '#',
+                        'linkValue' => LinkHelper::hyperInertUrl($url),
                         'linkText'  => $label,
                         'linkClass' => 'btn btn-primary',
                     ]],

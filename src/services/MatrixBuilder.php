@@ -4,6 +4,7 @@ namespace matrixcreate\contentiqimporter\services;
 
 use Craft;
 use matrixcreate\contentiqimporter\ContentIQImporter;
+use matrixcreate\contentiqimporter\helpers\LinkHelper;
 use yii\base\Component;
 
 /**
@@ -1032,8 +1033,9 @@ class MatrixBuilder extends Component
     /**
      * Builds a single Verbb Hyper Url link array for an action button.
      *
-     * Empty URLs fall back to the 'https://' placeholder so editors can set the
-     * destination in the CMS after import.
+     * Inert URLs (empty, null, '#', or a bare scheme) fall back to the
+     * 'https://' placeholder so editors can set the destination in the CMS
+     * after import — see {@see LinkHelper::hyperInertUrl()}.
      *
      * @param string $label Button text.
      * @param string $url   Destination URL (may be empty).
@@ -1044,7 +1046,7 @@ class MatrixBuilder extends Component
         return [
             'type'      => 'verbb\\hyper\\links\\Url',
             'handle'    => 'default-verbb-hyper-links-url',
-            'linkValue' => $url !== '' ? $url : 'https://',
+            'linkValue' => LinkHelper::hyperInertUrl($url),
             'linkText'  => $label,
             'linkClass' => 'btn btn-primary',
         ];
