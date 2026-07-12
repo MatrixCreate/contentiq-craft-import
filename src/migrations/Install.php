@@ -22,6 +22,8 @@ class Install extends Migration
     {
         $this->_createImportRunsTable();
         $this->_createEntrySyncsTable();
+        $this->_createOfficeSyncsTable();
+        $this->_createGlobalsSyncTable();
 
         return true;
     }
@@ -31,6 +33,8 @@ class Install extends Migration
      */
     public function safeDown(): bool
     {
+        $this->dropTableIfExists('{{%contentiq_globals_sync}}');
+        $this->dropTableIfExists('{{%contentiq_office_syncs}}');
         $this->dropTableIfExists('{{%contentiq_entry_syncs}}');
         $this->dropTableIfExists('{{%contentiq_import_runs}}');
 
@@ -91,6 +95,52 @@ class Install extends Migration
         $this->addForeignKey(
             null,
             '{{%contentiq_entry_syncs}}',
+            'element_id',
+            '{{%elements}}',
+            'id',
+            'CASCADE',
+        );
+    }
+
+    /**
+     * Creates the contentiq_globals_sync table (single-row lock state).
+     *
+     * @return void
+     */
+    private function _createGlobalsSyncTable(): void
+    {
+        $this->createTable('{{%contentiq_globals_sync}}', [
+            'id'        => $this->primaryKey(),
+            'locked'    => $this->boolean()->notNull()->defaultValue(true),
+            'synced_at' => $this->dateTime()->null(),
+            'notes'     => $this->text()->null(),
+        ]);
+    }
+
+    /**
+     * Creates the contentiq_office_syncs table (office id → element id map).
+     *
+     * @return void
+     */
+    private function _createOfficeSyncsTable(): void
+    {
+        $this->createTable('{{%contentiq_office_syncs}}', [
+            'id'          => $this->primaryKey(),
+            'office_id'   => $this->integer()->notNull(),
+            'element_id'  => $this->integer()->notNull(),
+            'dateCreated' => $this->dateTime()->notNull(),
+            'dateUpdated' => $this->dateTime()->notNull(),
+        ]);
+
+        $this->createIndex(null, '{{%contentiq_office_syncs}}', ['office_id'], true);
+
+        // Single-claim guard: one office entry may be mapped by at most one wire
+        // office id — a double-claim bug then explodes loudly rather than persisting.
+        $this->createIndex(null, '{{%contentiq_office_syncs}}', ['element_id'], true);
+
+        $this->addForeignKey(
+            null,
+            '{{%contentiq_office_syncs}}',
             'element_id',
             '{{%elements}}',
             'id',

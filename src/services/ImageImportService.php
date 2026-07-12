@@ -51,19 +51,43 @@ class ImageImportService extends Component
      * Resolves the configured volume and folder, caching both for the run.
      *
      * Must be called once before any importFromUrl() calls. Throws if the
-     * volume handle is not found — this is a fatal configuration error.
+     * volume handle is not found — this is a fatal configuration error — UNLESS
+     * $dryRun is true, in which case a missing volume or folder is left
+     * unresolved (no throw, no DB writes) and importFromField() reports each
+     * image as a would-be new import.
      *
      * @param string $volumeHandle  e.g. 'images'
      * @param string $folderPath    e.g. 'contentiq'
+     * @param bool   $dryRun        Read-only resolve — never creates the folder record.
      * @return void
-     * @throws Exception if the volume handle cannot be resolved.
+     * @throws Exception if the volume handle cannot be resolved (non-dry-run only).
      */
-    public function prepare(string $volumeHandle, string $folderPath): void
+    public function prepare(string $volumeHandle, string $folderPath, bool $dryRun = false): void
     {
         $volume = Craft::$app->getVolumes()->getVolumeByHandle($volumeHandle);
 
         if ($volume === null) {
+            if ($dryRun) {
+                // Dry-run must not throw on a misconfigured volume — leave unresolved.
+                $this->_volume = null;
+                $this->_folder = null;
+
+                return;
+            }
+
             throw new Exception("Asset volume '{$volumeHandle}' not found. Check the 'assetVolume' key in config/contentiq.php.");
+        }
+
+        if ($dryRun) {
+            // Read-only resolve: never create the folder record on a dry run. A
+            // not-yet-existing folder resolves to null (nothing to reuse).
+            $this->_volume = $volume;
+            $this->_folder = Craft::$app->getAssets()->findFolder([
+                'volumeId' => $volume->id,
+                'path'     => $folderPath === '' ? '' : rtrim($folderPath, '/') . '/',
+            ]);
+
+            return;
         }
 
         $folder = Craft::$app->getAssets()->ensureFolderByFullPathAndVolume(
@@ -107,6 +131,14 @@ class ImageImportService extends Component
             return null;
         }
 
+        // Volume/folder may be unresolved on a dry run (missing volume, or a
+        // folder that does not exist yet). Nothing can be reused — report a
+        // would-be new import; a non-dry-run should never reach this (prepare
+        // throws), but fail safe.
+        if ($this->_volume === null || $this->_folder === null) {
+            return $dryRun ? ['id' => null, 'filename' => $filename, 'reused' => false] : null;
+        }
+
         // Idempotency check — reuse if already imported.
         $existing = Asset::find()
             ->volumeId($this->_volume->id)
@@ -127,7 +159,9 @@ class ImageImportService extends Component
         // "file already exists" validation does not block the save.
         $this->_deleteOrphanedFile($filename);
 
-        return $this->_download($url, $filename);
+        $alt = isset($imageField['alt']) && $imageField['alt'] !== '' ? (string)$imageField['alt'] : null;
+
+        return $this->_download($url, $filename, $alt);
     }
 
     /**
@@ -176,11 +210,15 @@ class ImageImportService extends Component
      *
      * Returns the result array on success, null on any failure.
      *
+     * The alt text is only applied to newly created assets — existing assets
+     * (reused by filename) are never touched, so editor-set alt text survives.
+     *
      * @param string $url
      * @param string $filename
+     * @param string|null $alt Alt text from the wire image object (new assets only).
      * @return array{id: int, filename: string, reused: false}|null
      */
-    private function _download(string $url, string $filename): ?array
+    private function _download(string $url, string $filename, ?string $alt = null): ?array
     {
         $tempPath = Craft::$app->getPath()->getTempPath() . DIRECTORY_SEPARATOR . uniqid('contentiq_') . '_' . $filename;
 
@@ -202,6 +240,10 @@ class ImageImportService extends Component
             // newLocation is what SCENARIO_CREATE validation requires — format: {folder:X}filename
             $asset->newLocation  = "{folder:{$this->_folder->id}}{$filename}";
             $asset->title        = pathinfo($filename, PATHINFO_FILENAME);
+
+            if ($alt !== null) {
+                $asset->alt = $alt;
+            }
 
             $saved = Craft::$app->getElements()->saveElement($asset);
 

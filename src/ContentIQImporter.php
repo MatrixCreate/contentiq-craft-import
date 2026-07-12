@@ -15,6 +15,7 @@ use craft\helpers\Html;
 use craft\helpers\UrlHelper;
 use matrixcreate\contentiqimporter\models\Settings;
 use matrixcreate\contentiqimporter\services\ContentIQApiService;
+use matrixcreate\contentiqimporter\services\GlobalsImportService;
 use matrixcreate\contentiqimporter\services\ImageImportService;
 use matrixcreate\contentiqimporter\services\ImportService;
 use matrixcreate\contentiqimporter\services\MatrixBuilder;
@@ -25,6 +26,7 @@ use yii\base\Event;
  * ContentIQ plugin.
  *
  * @property-read ContentIQApiService $api
+ * @property-read GlobalsImportService $globals
  * @property-read ImageImportService $images
  * @property-read ImportService $imports
  * @property-read MatrixBuilder $matrixBuilder
@@ -40,7 +42,7 @@ class ContentIQImporter extends Plugin
     // =========================================================================
 
     /** @var string */
-    public const VERSION = '1.2.0';
+    public const VERSION = '1.3.0';
 
     // Static Properties
     // =========================================================================
@@ -64,7 +66,7 @@ class ContentIQImporter extends Plugin
     /**
      * @var string
      */
-    public string $schemaVersion = '1.0.0';
+    public string $schemaVersion = '1.1.0';
 
     // Public Methods
     // =========================================================================
@@ -80,6 +82,7 @@ class ContentIQImporter extends Plugin
 
         $this->setComponents([
             'api' => ContentIQApiService::class,
+            'globals' => GlobalsImportService::class,
             'images' => ImageImportService::class,
             'imports' => ImportService::class,
             'matrixBuilder' => MatrixBuilder::class,
@@ -146,6 +149,7 @@ class ContentIQImporter extends Plugin
             function (RegisterUrlRulesEvent $event) {
                 $event->rules['contentiq-importer']                         = 'contentiq-importer/cp/index';
                 $event->rules['contentiq-importer/history']                 = 'contentiq-importer/cp/history';
+                $event->rules['contentiq-importer/mappings']                = 'contentiq-importer/cp/mappings';
                 $event->rules['contentiq-importer/upload']                  = 'contentiq-importer/cp/upload';
                 $event->rules['contentiq-importer/preview']                 = 'contentiq-importer/cp/preview';
                 $event->rules['contentiq-importer/import']                  = 'contentiq-importer/cp/run-import';

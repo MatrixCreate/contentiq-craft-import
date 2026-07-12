@@ -1,0 +1,222 @@
+{% extends '_layouts/cp' %}
+
+{% set title = 'Collection Mappings'|t('contentiq-importer') %}
+
+{% set crumbs = [
+    { label: 'ContentiQ', url: url('contentiq-importer') },
+] %}
+
+{% block content %}
+
+    <div style="max-width:1100px;">
+
+        <p class="light" style="margin-bottom:20px;">
+            {{ 'Map each ContentiQ collection to the Craft section, entry type and fields its children import into. Rows defined in config/contentiq.php are read-only — the file wins.'|t('contentiq-importer') }}
+        </p>
+
+        {% if apiError %}
+            <div class="pane" style="border-radius:8px; margin-bottom:24px; padding:12px 16px; border-left:3px solid var(--warning-color);">
+                <strong>{{ 'Could not load collections from ContentiQ.'|t('contentiq-importer') }}</strong>
+                <div class="light" style="font-size:13px; margin-top:2px;">{{ apiError }}</div>
+                <div class="light" style="font-size:13px; margin-top:6px;">{{ 'Showing mappings already saved in this project. Fix the connection to see the full collection list.'|t('contentiq-importer') }}</div>
+            </div>
+        {% endif %}
+
+        {% if rows|length %}
+
+            <form method="post" accept-charset="UTF-8">
+                {{ csrfInput() }}
+                {{ actionInput('contentiq-importer/cp/save-mappings') }}
+
+                <table class="data fullwidth" id="contentiq-mappings">
+                    <thead>
+                        <tr>
+                            <th>{{ 'Collection'|t('contentiq-importer') }}</th>
+                            <th>{{ 'Section'|t('contentiq-importer') }}</th>
+                            <th>{{ 'Entry Type'|t('contentiq-importer') }}</th>
+                            <th>{{ 'Content Field'|t('contentiq-importer') }}</th>
+                            <th>{{ 'Heading Field'|t('contentiq-importer') }}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in rows %}
+                            {% set mapping = row.mapping %}
+                            <tr>
+                                {# Collection identity #}
+                                <td style="white-space:nowrap;">
+                                    <strong><code>{{ row.slug }}</code></strong>
+                                    {% if row.urlPrefix %}
+                                        <div class="light" style="font-size:12px; margin-top:2px;">{{ row.urlPrefix }}</div>
+                                    {% endif %}
+                                    {% if row.notInContentiq %}
+                                        <div style="margin-top:4px;"><span class="status orange"></span> <span class="light" style="font-size:12px;">{{ 'not in ContentiQ'|t('contentiq-importer') }}</span></div>
+                                    {% endif %}
+                                    {% if row.inFile %}
+                                        <div style="margin-top:4px;"><span class="status blue"></span> <span class="light" style="font-size:12px;">{{ 'defined in config file'|t('contentiq-importer') }}</span></div>
+                                    {% endif %}
+                                </td>
+
+                                {% if row.inFile %}
+                                    {# Read-only — the config file wins. Show the effective mapping. #}
+                                    <td>{{ mapping.section ?? '—' }}</td>
+                                    <td>{{ mapping.entryType ?? '—' }}</td>
+                                    <td>{{ mapping.contentField ?? '—' }}</td>
+                                    <td>{{ mapping.headingField ?? '—' }}</td>
+                                {% else %}
+                                    <td class="ciq-row"
+                                        data-slug="{{ row.slug }}"
+                                        data-section="{{ mapping.section ?? '' }}"
+                                        data-entrytype="{{ mapping.entryType ?? '' }}"
+                                        data-contentfield="{{ mapping.contentField ?? '' }}"
+                                        data-headingfield="{{ mapping.headingField ?? '' }}">
+                                        <div class="select">
+                                            <select class="ciq-section" name="mappings[{{ row.slug }}][section]">
+                                                <option value="">{{ '— not mapped —'|t('contentiq-importer') }}</option>
+                                                {% for section in sectionsData %}
+                                                    <option value="{{ section.handle }}">{{ section.name }}</option>
+                                                {% endfor %}
+                                            </select>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <div class="select">
+                                            <select class="ciq-entrytype" name="mappings[{{ row.slug }}][entryType]"></select>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <div class="select">
+                                            <select class="ciq-contentfield" name="mappings[{{ row.slug }}][contentField]"></select>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <div class="select">
+                                            <select class="ciq-headingfield" name="mappings[{{ row.slug }}][headingField]"></select>
+                                        </div>
+                                    </td>
+                                {% endif %}
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+
+                <div style="margin-top:24px;">
+                    <button type="submit" class="btn submit">{{ 'Save'|t('contentiq-importer') }}</button>
+                </div>
+            </form>
+
+        {% else %}
+            <div class="zilch">
+                <p>{{ 'No collections to map.'|t('contentiq-importer') }}</p>
+            </div>
+        {% endif %}
+
+    </div>
+
+    <script type="application/json" id="contentiq-sections-data">
+        {{ sectionsData|json_encode(constant('JSON_HEX_TAG') b-or constant('JSON_HEX_AMP') b-or constant('JSON_UNESCAPED_SLASHES'))|raw }}
+    </script>
+
+    <script>
+    (function() {
+        var dataEl = document.getElementById('contentiq-sections-data');
+        if (!dataEl) return;
+
+        var sections = JSON.parse(dataEl.textContent || '[]');
+
+        // Index by handle for quick lookup.
+        var sectionsByHandle = {};
+        sections.forEach(function(section) {
+            var types = {};
+            (section.entryTypes || []).forEach(function(et) { types[et.handle] = et; });
+            sectionsByHandle[section.handle] = { section: section, types: types };
+        });
+
+        function fill(select, options, selected, blankLabel) {
+            select.innerHTML = '';
+            if (blankLabel !== null) {
+                var blank = document.createElement('option');
+                blank.value = '';
+                blank.textContent = blankLabel;
+                select.appendChild(blank);
+            }
+            options.forEach(function(opt) {
+                var o = document.createElement('option');
+                o.value = opt.handle;
+                o.textContent = opt.name + ' (' + opt.handle + ')';
+                if (opt.handle === selected) { o.selected = true; }
+                select.appendChild(o);
+            });
+            // A stored handle that no longer exists must round-trip, not be
+            // silently blanked (and then destroyed) by an unrelated save.
+            if (selected && select.value !== selected) {
+                var missing = document.createElement('option');
+                missing.value = selected;
+                missing.textContent = selected + ' (missing)';
+                missing.selected = true;
+                select.appendChild(missing);
+            }
+        }
+
+        function entryTypesFor(sectionHandle) {
+            var entry = sectionsByHandle[sectionHandle];
+            return entry ? (entry.section.entryTypes || []) : [];
+        }
+
+        function entryType(sectionHandle, entryTypeHandle) {
+            var entry = sectionsByHandle[sectionHandle];
+            return entry ? entry.types[entryTypeHandle] : null;
+        }
+
+        Array.prototype.forEach.call(document.querySelectorAll('.ciq-row'), function(cell) {
+            var tr         = cell.closest('tr');
+            var sectionSel = cell.querySelector('.ciq-section');
+            var typeSel    = tr.querySelector('.ciq-entrytype');
+            var contentSel = tr.querySelector('.ciq-contentfield');
+            var headingSel = tr.querySelector('.ciq-headingfield');
+
+            function refreshFields() {
+                var et = entryType(sectionSel.value, typeSel.value);
+                fill(contentSel, et ? (et.ckeditorFields || []) : [], contentSel.dataset.want || '', '— none —');
+                fill(headingSel, et ? (et.plainTextFields || []) : [], headingSel.dataset.want || '', '— none —');
+            }
+
+            function refreshTypes() {
+                fill(typeSel, entryTypesFor(sectionSel.value), typeSel.dataset.want || '', '— select —');
+                refreshFields();
+            }
+
+            // Stash desired initial values, then cascade to restore them.
+            typeSel.dataset.want    = cell.dataset.entrytype || '';
+            contentSel.dataset.want = cell.dataset.contentfield || '';
+            headingSel.dataset.want = cell.dataset.headingfield || '';
+
+            // Pre-select the section, then build the dependent selects. A stored
+            // section that no longer exists gets a "(missing)" option so it
+            // round-trips instead of posting '' and deleting the row.
+            sectionSel.value = cell.dataset.section || '';
+            if ((cell.dataset.section || '') && sectionSel.value !== cell.dataset.section) {
+                var missingSection = document.createElement('option');
+                missingSection.value = cell.dataset.section;
+                missingSection.textContent = cell.dataset.section + ' (missing)';
+                missingSection.selected = true;
+                sectionSel.appendChild(missingSection);
+                sectionSel.value = cell.dataset.section;
+            }
+            refreshTypes();
+
+            sectionSel.addEventListener('change', function() {
+                typeSel.dataset.want    = '';
+                contentSel.dataset.want = '';
+                headingSel.dataset.want = '';
+                refreshTypes();
+            });
+            typeSel.addEventListener('change', function() {
+                contentSel.dataset.want = '';
+                headingSel.dataset.want = '';
+                refreshFields();
+            });
+        });
+    })();
+    </script>
+
+{% endblock %}

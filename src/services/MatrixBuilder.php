@@ -34,6 +34,16 @@ class MatrixBuilder extends Component
      */
     private ?array $_mapping = null;
 
+    /**
+     * User-facing warnings raised while building the current blocks array.
+     *
+     * Reset at the start of every {@see build()} call and returned under the
+     * `warnings` key so ImportService can merge them into the page result.
+     *
+     * @var string[]
+     */
+    private array $_warnings = [];
+
     // Public Methods
     // =========================================================================
 
@@ -63,15 +73,17 @@ class MatrixBuilder extends Component
      * @return array{
      *   matrixData: array<string, array>,
      *   blockReport: array<int, array{type: string, fields: string[], skipped: bool}>,
-     *   imageReport: array<int, array{filename: string, reused: bool}>
+     *   imageReport: array<int, array{filename: string, reused: bool}>,
+     *   warnings: string[]
      * }
      */
     public function build(array $blocks, bool $dryRun = false): array
     {
-        $matrixData  = [];
-        $blockReport = [];
-        $imageReport = [];
-        $counter     = 0;
+        $matrixData     = [];
+        $blockReport    = [];
+        $imageReport    = [];
+        $counter        = 0;
+        $this->_warnings = [];
 
         // Pre-process: group consecutive blocks that use 'grouped' mode.
         $processedBlocks = $this->_groupConsecutiveBlocks($blocks);
@@ -147,6 +159,7 @@ class MatrixBuilder extends Component
             'matrixData'  => $matrixData,
             'blockReport' => $blockReport,
             'imageReport' => $imageReport,
+            'warnings'    => $this->_warnings,
         ];
     }
 
@@ -495,22 +508,24 @@ class MatrixBuilder extends Component
         bool $dryRun,
     ): array {
         return match ($handlerType) {
-            'nodes'           => $this->_handleNodes($craftHandle, $value),
-            'mediaNodes'      => $this->_handleMediaNodes($craftHandle, $value),
-            'textMediaMedia'  => $this->_handleTextMediaMedia($value, $imageReport, $dryRun),
-            'image'           => $this->_handleImage($craftHandle, $value, $imageReport, $dryRun),
-            'images'          => $this->_handleImages($craftHandle, $value, $imageReport, $dryRun),
-            'heading'         => $this->_handleHeading($craftHandle, $value),
-            'body'            => $this->_handleBody($craftHandle, $value),
-            'layout'          => $this->_handlePassThrough($craftHandle, $value),
-            'textMediaLayout' => $this->_handleTextMediaLayout($craftHandle, $value),
-            'tableHtml'       => $this->_handleTableHtml($craftHandle, $value),
-            'hyperButton'     => $this->_handleHyperButton($craftHandle, $value),
-            'buttonLabel'     => $this->_handleButtonLabel($craftHandle, $value),
-            'faqNodes'        => $this->_handleFaqNodes($craftHandle, $value),
-            'buttonNodes'     => $this->_handleButtonNodes($craftHandle, $value),
-            'uspContent'      => $this->_handleUspContent($craftHandle, $value),
-            default           => $this->_handlePassThrough($craftHandle, $value),
+            'nodes'                  => $this->_handleNodes($craftHandle, $value),
+            'mediaNodes'             => $this->_handleMediaNodes($craftHandle, $value),
+            'textMediaMedia'         => $this->_handleTextMediaMedia($value, $imageReport, $dryRun),
+            'image'                  => $this->_handleImage($craftHandle, $value, $imageReport, $dryRun),
+            'images'                 => $this->_handleImages($craftHandle, $value, $imageReport, $dryRun),
+            'heading'                => $this->_handleHeading($craftHandle, $value),
+            'body'                   => $this->_handleBody($craftHandle, $value),
+            'layout'                 => $this->_handlePassThrough($craftHandle, $value),
+            'textMediaLayout'        => $this->_handleTextMediaLayout($craftHandle, $value),
+            'tableHtml'              => $this->_handleTableHtml($craftHandle, $value),
+            'hyperButton'            => $this->_handleHyperButton($craftHandle, $value),
+            'buttonLabel'            => $this->_handleButtonLabel($craftHandle, $value),
+            'faqNodes'               => $this->_handleFaqNodes($craftHandle, $value),
+            'buttonNodes'            => $this->_handleButtonNodes($craftHandle, $value),
+            'uspContent'             => $this->_handleUspContent($craftHandle, $value),
+            'collectionSection'      => $this->_handleCollectionSection($craftHandle, $value),
+            'collectionListingNodes' => $this->_handleCollectionListingNodes($craftHandle, $value),
+            default                  => $this->_handlePassThrough($craftHandle, $value),
         };
     }
 
@@ -653,6 +668,70 @@ class MatrixBuilder extends Component
         }
 
         return [$handle => $html];
+    }
+
+    /**
+     * Resolves a ContentIQ collection slug to a Craft section handle.
+     *
+     * The wire value is a collection slug from the same vocabulary as
+     * `document.content_type` (e.g. `case_studies`). It is resolved to the
+     * Craft section handle through the content_types routing map. An unmapped
+     * slug is stored raw and raises a user-facing warning (mirroring the
+     * treatment of unmapped content types).
+     *
+     * @param string $handle Destination Craft field handle (e.g. 'listingSection').
+     * @param mixed  $value  ContentIQ collection slug string.
+     * @return array<string, string>
+     */
+    private function _handleCollectionSection(string $handle, mixed $value): array
+    {
+        $slug = is_string($value) ? trim($value) : '';
+
+        if ($slug === '') {
+            return [$handle => ''];
+        }
+
+        $section = ContentIQImporter::$plugin->imports->getContentTypesMap()[$slug]['section'] ?? null;
+
+        if ($section === null) {
+            Craft::warning("ContentIQ collection_listing references unknown collection '{$slug}' — storing raw slug.", __METHOD__);
+            $this->_warnings[] = "Collection Listing references unknown collection '{$slug}' — stored the raw slug; map it under ContentiQ → Mappings (or add a content_types override in config/contentiq.php).";
+
+            return [$handle => $slug];
+        }
+
+        return [$handle => $section];
+    }
+
+    /**
+     * Renders Collection Listing intro nodes, dropping bracketed listing
+     * placeholders first.
+     *
+     * ContentiQ authors mark where the listing sits with a paragraph like
+     * "[Blog Listing]", "[Team Listing]" or "[Listing Grid]". The rendered
+     * listing takes that space in Craft, so any paragraph whose entire text is
+     * square-bracketed and contains the word "listing" or "grid" is dropped
+     * before the remaining nodes render to HTML.
+     *
+     * @param string $handle
+     * @param mixed  $value
+     * @return array<string, string>
+     */
+    private function _handleCollectionListingNodes(string $handle, mixed $value): array
+    {
+        $nodes = is_array($value) ? $value : [];
+
+        $nodes = array_values(array_filter($nodes, function (mixed $node): bool {
+            if (!is_array($node) || ($node['type'] ?? '') !== 'paragraph') {
+                return true;
+            }
+
+            $text = is_scalar($node['text'] ?? null) ? trim((string)$node['text']) : '';
+
+            return !preg_match('/^\[[^\[\]]*\b(listings?|grids?)\b[^\[\]]*\]$/i', $text);
+        }));
+
+        return [$handle => ContentIQImporter::$plugin->nodes->render($nodes)];
     }
 
     /**

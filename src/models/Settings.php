@@ -31,6 +31,19 @@ class Settings extends Model
     public string $apiKey = '';
 
     /**
+     * Collection slug → Craft routing map, edited in the CP Mappings screen.
+     *
+     * Keyed by ContentIQ collection slug. Each row has the shape:
+     *   ['section' => handle, 'entryType' => handle, 'contentField' => handle, 'headingField' => handle|null]
+     *
+     * Merged between defaults.php and the config/contentiq.php `content_types`
+     * override by ImportService::_getContentTypesMap() (defaults ← settings ← file).
+     *
+     * @var array<string, array{section: string, entryType: string, contentField: string, headingField: ?string}>
+     */
+    public array $collectionMappings = [];
+
+    /**
      * @inheritdoc
      */
     public function defineRules(): array
@@ -38,7 +51,45 @@ class Settings extends Model
         return [
             [['contentiqUrl', 'apiKey'], 'string'],
             ['contentiqUrl', 'validateParsedUrl'],
+            ['collectionMappings', 'validateCollectionMappings'],
         ];
+    }
+
+    /**
+     * Normalises collectionMappings: drops rows with an empty section and
+     * coerces each surviving row to the canonical shape.
+     *
+     * Runs as an inline validator, which also marks the attribute safe so
+     * Craft's plugin-settings save assigns it via setAttributes().
+     *
+     * @return void
+     */
+    public function validateCollectionMappings(): void
+    {
+        $normalised = [];
+
+        foreach ($this->collectionMappings as $slug => $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $section = trim((string)($row['section'] ?? ''));
+
+            if ($section === '') {
+                continue;
+            }
+
+            $headingField = trim((string)($row['headingField'] ?? ''));
+
+            $normalised[(string)$slug] = [
+                'section'      => $section,
+                'entryType'    => trim((string)($row['entryType'] ?? '')),
+                'contentField' => trim((string)($row['contentField'] ?? '')),
+                'headingField' => $headingField !== '' ? $headingField : null,
+            ];
+        }
+
+        $this->collectionMappings = $normalised;
     }
 
     /**

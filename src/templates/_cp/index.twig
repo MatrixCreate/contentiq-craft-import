@@ -38,6 +38,19 @@
             </a>
         </div>
 
+        {# Secondary action — Collection Mappings #}
+        <div class="pane" style="padding:24px; margin-bottom:24px; border-radius:8px;">
+            <h3 style="margin-top:0; margin-bottom:6px; font-size:16px;">
+                {{ 'Collection Mappings'|t('contentiq-importer') }}
+            </h3>
+            <p class="light" style="margin-bottom:16px; font-size:14px;">
+                {{ 'Map ContentiQ collections to Craft sections, entry types and fields.'|t('contentiq-importer') }}
+            </p>
+            <a href="{{ url('contentiq-importer/mappings') }}" class="btn">
+                {{ 'Edit Mappings'|t('contentiq-importer') }}
+            </a>
+        </div>
+
         {# History link #}
         <div style="text-align:center;">
             <a href="{{ url('contentiq-importer/history') }}" class="go">

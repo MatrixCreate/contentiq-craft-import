@@ -40,8 +40,48 @@ class ContentIQApiService extends Component
             ];
         }
 
-        $endpoint = "{$url}/api/v1/export";
+        return $this->_get("{$url}/api/v1/export", $key);
+    }
 
+    /**
+     * Fetches the standalone globals payload from the ContentIQ API.
+     *
+     * Calls GET {contentiqUrl}/api/v1/globals with Bearer token authentication.
+     * Used for a globals-only refresh; the batch export envelope remains the
+     * primary path (its `globals` key already arrives with fetchExport()).
+     *
+     * @return array{success: bool, data: array|null, error: string|null}
+     */
+    public function fetchGlobals(): array
+    {
+        $settings = ContentIQImporter::$plugin->getSettings();
+
+        $url = rtrim(App::parseEnv($settings->contentiqUrl), '/');
+        $key = App::parseEnv($settings->apiKey);
+
+        if ($url === '' || $key === '') {
+            return [
+                'success' => false,
+                'data'    => null,
+                'error'   => 'ContentiQ API is not fully configured. Set URL and API key in plugin settings.',
+            ];
+        }
+
+        return $this->_get("{$url}/api/v1/globals", $key);
+    }
+
+    // Private Methods
+    // =========================================================================
+
+    /**
+     * Performs an authenticated GET request and decodes the JSON response.
+     *
+     * @param string $endpoint
+     * @param string $key
+     * @return array{success: bool, data: array|null, error: string|null}
+     */
+    private function _get(string $endpoint, string $key): array
+    {
         try {
             $response = Craft::createGuzzleClient()->request('GET', $endpoint, [
                 RequestOptions::HEADERS => [
@@ -49,7 +89,7 @@ class ContentIQApiService extends Component
                     'Authorization' => "Bearer {$key}",
                 ],
                 RequestOptions::TIMEOUT         => 120,
-                RequestOptions::CONNECT_TIMEOUT  => 10,
+                RequestOptions::CONNECT_TIMEOUT => 10,
             ]);
 
             $body = $response->getBody()->getContents();

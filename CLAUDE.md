@@ -192,6 +192,7 @@ Critical requirements:
 | `price_list` | `priceList` | *(none)* | — | outer fields only | `richText`, `priceList`, `actionButtons` (via `buttonNodes`) |
 | `usp` | `contentiqUsp` | *(none)* | — | outer fields only | `uspText` |
 | `global` | `contentiqGlobal` | *(none)* | — | outer fields only | `contentiqNotes` |
+| `collection_listing` | `collectionListing` | *(none)* | — | outer fields only | `richText` (intro nodes), `listingSection` (collection slug → section handle via `content_types` map; unmapped slug stored raw + page warning) |
 
 ### Special blocks (ImportService handles these)
 
@@ -223,6 +224,8 @@ Critical requirements:
 | `hyperButton` | `{label, url}` | Hyper link field array + `showLinkAsSeparateButton: true` |
 | `faqNodes` | `ContentNode[]` with `faq_items` | splits into `richText`, `extraRichText`, `actionButtons`, `_faqItems` |
 | `buttonNodes` | `ContentNode[]` with `ctaButton` nodes | extracts buttons into `actionButtons` Matrix entries |
+| `collectionSection` | ContentIQ collection slug string | Craft section handle (via `content_types` map; unmapped slug stored raw + page warning) |
+| `collectionListingNodes` | `ContentNode[]` | HTML string via NodesRenderer, minus paragraphs that are whole bracketed listing placeholders (`[Blog Listing]`, `[Listing Grid]`, …) — the rendered listing takes that space |
 
 ### NodesRenderer supported node types
 
@@ -350,6 +353,23 @@ API endpoints are now slug-free (`/api/v1/export`, `/api/v1/pages/{page}/export`
 
 ---
 
+## Collection mappings (content_types precedence)
+
+Collection slugs (ContentiQ `document.content_type` / `collection_listing` slugs) route to Craft sections via a three-layer merge in `ImportService::_getContentTypesMap()`:
+
+```
+defaults.php  ←  settings.collectionMappings (CP UI)  ←  config/contentiq.php 'content_types'
+```
+
+Per-slug replace at each layer via `array_replace` — a later layer replaces a slug's whole definition. The **config file wins** (dev escape hatch). Settings rows with an empty/missing `section` are filtered before merging, so an empty `collectionMappings` yields a byte-identical result to the old defaults ← file merge.
+
+- **UI storage**: `Settings::$collectionMappings` (`slug => ['section', 'entryType', 'contentField', 'headingField'|null]`), saved via `Craft::$app->getPlugins()->savePluginSettings()` into **project config** — same mechanism as url/apiKey. The Settings model's `validateCollectionMappings()` normalises rows and drops any with no section.
+- **CP screen**: `ContentiQ → Mappings` (`CpController::actionMappings` / `actionSaveMappings`, template `_cp/mappings.twig`). Renders one row per project collection from `ContentIQApiService::fetchGlobals()` (`data.globals.collections[]`), unioned with any settings slug no longer on the wire (badged "not in ContentiQ"). Dropdowns cascade section → entry type → CKEditor content field / PlainText heading field via an embedded JSON map. API failure still renders from stored settings with a banner.
+- Rows whose slug is in the config file's `content_types` render **read-only** ("defined in config file"); they carry no inputs, so saving never persists them to settings.
+- Both `MatrixBuilder::_handleCollectionSection` and the globals drift check consume `getContentTypesMap()`, so they inherit the merged result — no duplication.
+
+---
+
 ## Hierarchy / parent entries (Structure sections)
 
 For entries in Structure sections, set the parent after the entry is saved:
@@ -390,6 +410,28 @@ $response = Craft::createGuzzleClient()->request('GET', $endpoint, [
     RequestOptions::TIMEOUT => 120,
 ]);
 ```
+
+---
+
+## Globals import
+
+The batch/sync envelope may carry a top-level `globals` key (company, offices, branding, social networks, trust signals, scripts). `GlobalsImportService::import($globals, dryRun)` writes it into the `offices` section and the `companyInfo`, `globalContent`, and `siteConfig` global sets. Not part of the per-page pipeline — invoked separately by `SyncJob` and dry-run by the CP preview.
+
+### Lock / consent model
+
+Globals are gated by the single-row `contentiq_globals_sync` table (missing row ⇒ locked). Unlike per-entry locks, this is per-run consent:
+
+- The Sync screen shows one globals lightswitch. Ticking it POSTs `unlockGlobals` to `run-sync`, which sets `locked = false` for this run only (`CpController::_setGlobalsLock`).
+- `SyncJob` imports globals only when unlocked, then immediately relocks and stamps `synced_at` (`_relockGlobals`) — so consent never persists across syncs.
+- The upload/import path deliberately SKIPS globals (no consent UI); it flashes "Globals present in file — use Sync to import globals." The CP preview dry-runs globals for display only.
+
+### Sync-owned field boundary
+
+`GlobalsImportService::OFFICE_FIELDS` is the exhaustive list of office handles the sync writes — nothing outside it is ever touched. Every write (offices and global sets) is filtered against the target's field layout via `_filterToLayout()`, so a handle missing on an older project is skipped with a report note instead of throwing. Offices are upserted through `contentiq_office_syncs`; title-matched unmapped entries are adopted, vanished wire ids are deleted, hand-made offices are left alone and surfaced as `unmatched`. Per-entry locks on offices are ignored (globals aren't gated by them) but noted in the report.
+
+### Transforms helper + drift warnings
+
+`helpers/GlobalsTransforms.php` holds the pure, Craft-free transforms (address split, opening hours, country→ISO, url-prefix drift) — unit-tested by `tests/run-transforms.php`. `checkUrlPrefixDrift()` runs read-only on every sync (even when locked): it compares each exported collection `url_prefix` against its mapped section `uriFormat` and emits advisory warnings; it never mutates section settings or project config.
 
 ---
 
@@ -715,6 +757,29 @@ Per-entry sync state for the sidebar widget. Created by `m250418_000000_add_entr
 | `locked` | boolean | Skip during batch sync when true |
 | `synced_at` | datetime | Last successful sync timestamp |
 | `notes` | text | Aggregated block notes from last sync |
+
+### `contentiq_office_syncs`
+
+Maps ContentiQ office ids to their Craft office entries so globals re-syncs update the same entry. Created by `m260712_000000_add_globals_sync_tables`.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | int PK | Auto-increment |
+| `office_id` | int | ContentiQ office id (unique index) |
+| `element_id` | int FK → elements | Craft office entry (CASCADE on delete) |
+| `dateCreated` | datetime | |
+| `dateUpdated` | datetime | |
+
+### `contentiq_globals_sync`
+
+Single-row consent/lock state for globals syncing. Created by `m260712_000000_add_globals_sync_tables`.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | int PK | Auto-increment |
+| `locked` | boolean | Default `true`; a missing row is treated as locked |
+| `synced_at` | datetime | Last successful globals sync (nullable) |
+| `notes` | text | Reserved (nullable) |
 
 ---
 

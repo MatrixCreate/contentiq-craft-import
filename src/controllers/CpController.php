@@ -5,6 +5,7 @@ namespace matrixcreate\contentiqimporter\controllers;
 use Craft;
 use craft\db\Query;
 use craft\elements\Entry;
+use craft\fields\PlainText;
 use craft\helpers\App;
 use craft\helpers\Db;
 use craft\helpers\Json;
@@ -62,6 +63,194 @@ class CpController extends Controller
         return $this->renderTemplate('contentiq-importer/_cp/history', [
             'runs' => $runs,
         ]);
+    }
+
+    /**
+     * Mappings screen — maps ContentIQ collection slugs to Craft routing.
+     *
+     * Renders one row per project collection (from the wire) plus any slug still
+     * held in settings but no longer exported (badged "not in ContentiQ"). Rows
+     * whose slug is defined in config/contentiq.php `content_types` render
+     * read-only — the file wins. On API failure the page still renders from the
+     * stored settings mappings with an error banner.
+     *
+     * @return Response
+     */
+    public function actionMappings(): Response
+    {
+        // Mappings are project config — admin-only, like Craft's own plugin
+        // settings screens (viewing is allowed even when admin changes are off).
+        $this->requireAdmin(false);
+
+        $plugin         = ContentIQImporter::$plugin;
+        $settings       = $plugin->getSettings();
+        $storedMappings = $settings->collectionMappings;
+
+        // Fetch collections from the wire. On failure fall back to stored slugs.
+        $apiError    = null;
+        $collections = [];
+
+        if ($settings->contentiqUrl === '' || $settings->apiKey === '') {
+            $apiError = Craft::t('contentiq-importer', 'ContentiQ API is not configured. Set the URL and API key in plugin settings.');
+        } else {
+            $response = $plugin->api->fetchGlobals();
+
+            if ($response['success']) {
+                $collections = $response['data']['globals']['collections'] ?? [];
+            } else {
+                $apiError = $response['error'] ?? Craft::t('contentiq-importer', 'Could not reach ContentiQ.');
+            }
+        }
+
+        // Index wire collections by slug.
+        $wireBySlug = [];
+
+        foreach ($collections as $collection) {
+            $slug = (string)($collection['slug'] ?? '');
+
+            if ($slug === '') {
+                continue;
+            }
+
+            $wireBySlug[$slug] = $collection;
+        }
+
+        // Raw config-file content_types — these slugs render read-only (file wins).
+        $projectConfig = Craft::$app->getConfig()->getConfigFromFile('contentiq');
+        $fileSlugs     = (is_array($projectConfig) && is_array($projectConfig['content_types'] ?? null))
+            ? $projectConfig['content_types']
+            : [];
+
+        // Effective merged map (defaults ← settings ← file) drives pre-selection.
+        $effectiveMap = $plugin->imports->getContentTypesMap();
+
+        // Row set = wire collection slugs ∪ stored settings slugs.
+        $slugs = array_values(array_unique(array_merge(
+            array_keys($wireBySlug),
+            array_keys($storedMappings),
+        )));
+        sort($slugs);
+
+        $rows = [];
+
+        foreach ($slugs as $slug) {
+            $rows[] = [
+                'slug'           => $slug,
+                'urlPrefix'      => $wireBySlug[$slug]['url_prefix'] ?? null,
+                'notInContentiq' => !isset($wireBySlug[$slug]),
+                'inFile'         => isset($fileSlugs[$slug]),
+                'mapping'        => $effectiveMap[$slug] ?? null,
+            ];
+        }
+
+        return $this->renderTemplate('contentiq-importer/_cp/mappings', [
+            'rows'         => $rows,
+            'sectionsData' => $this->_buildSectionsData(),
+            'apiError'     => $apiError,
+        ]);
+    }
+
+    /**
+     * Persists the collection mappings edited on the Mappings screen.
+     *
+     * Read-only (config-file) rows carry no inputs, so they never post and never
+     * land in settings — the file stays the escape hatch. Rows with an empty
+     * section are dropped here and again by the Settings model's validation.
+     *
+     * @return Response
+     * @throws BadRequestHttpException
+     */
+    public function actionSaveMappings(): Response
+    {
+        $this->requirePostRequest();
+        // Writes project config — admin + allowAdminChanges, like Craft's own
+        // plugin-settings saves (403 instead of a ProjectConfig 500 on prod).
+        $this->requireAdmin();
+
+        $posted = Craft::$app->getRequest()->getBodyParam('mappings');
+
+        // A missing/malformed param means the form rendered no editable rows (or
+        // a broken client) — treat as a no-op rather than deleting every row.
+        if (!is_array($posted)) {
+            $posted = [];
+        }
+
+        $str = static fn(mixed $v): string => is_scalar($v) ? trim((string)$v) : '';
+
+        $mappings   = [];
+        $incomplete = [];
+
+        foreach ($posted as $slug => $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $section = $str($row['section'] ?? '');
+
+            if ($section === '') {
+                continue;
+            }
+
+            $entryType    = $str($row['entryType'] ?? '');
+            $contentField = $str($row['contentField'] ?? '');
+
+            // A mapped collection needs all three — a partial row would fatal
+            // per-page at import time ("Entry type '' not found").
+            if ($entryType === '' || $contentField === '') {
+                $incomplete[] = (string)$slug;
+                continue;
+            }
+
+            $headingField = $str($row['headingField'] ?? '');
+
+            $mappings[(string)$slug] = [
+                'section'      => $section,
+                'entryType'    => $entryType,
+                'contentField' => $contentField,
+                'headingField' => $headingField !== '' ? $headingField : null,
+            ];
+        }
+
+        // Rows shadowed by a config-file override render read-only (no inputs),
+        // so they never post — re-preserve their stored values instead of
+        // silently deleting them on every unrelated save.
+        $projectConfig = Craft::$app->getConfig()->getConfigFromFile('contentiq');
+        $fileSlugs     = (is_array($projectConfig) && is_array($projectConfig['content_types'] ?? null))
+            ? $projectConfig['content_types']
+            : [];
+
+        foreach (ContentIQImporter::$plugin->getSettings()->collectionMappings as $slug => $row) {
+            if (isset($fileSlugs[$slug]) && !isset($mappings[$slug])) {
+                $mappings[$slug] = $row;
+            }
+        }
+
+        // savePluginSettings() replaces the whole project-config settings node
+        // with only the keys passed here (toArray(array_keys($settings))), so a
+        // partial array would wipe contentiqUrl/apiKey. Always pass every key.
+        $settings = ContentIQImporter::$plugin->getSettings();
+
+        $saved = Craft::$app->getPlugins()->savePluginSettings(ContentIQImporter::$plugin, [
+            'contentiqUrl'       => $settings->contentiqUrl,
+            'apiKey'             => $settings->apiKey,
+            'collectionMappings' => $mappings,
+        ]);
+
+        if (!$saved) {
+            Craft::$app->getSession()->setError(Craft::t('contentiq-importer', 'Couldn’t save mappings.'));
+
+            return $this->redirect('contentiq-importer/mappings');
+        }
+
+        if (!empty($incomplete)) {
+            Craft::$app->getSession()->setNotice(Craft::t('contentiq-importer', 'Mappings saved. Skipped incomplete rows (need entry type + content field): {slugs}', [
+                'slugs' => implode(', ', $incomplete),
+            ]));
+        } else {
+            Craft::$app->getSession()->setNotice(Craft::t('contentiq-importer', 'Mappings saved.'));
+        }
+
+        return $this->redirect('contentiq-importer/mappings');
     }
 
     /**
@@ -139,20 +328,32 @@ class CpController extends Controller
         $createCount = count(array_filter($previewResults, fn($r) => $r['willCreate']));
         $updateCount = count($previewResults) - $createCount;
 
+        // Dry-run the globals payload when present so the preview can summarise it.
+        // The service's dryRun path writes nothing (offices, global sets, and image
+        // imports are all gated on !$dryRun).
+        $globalsPreview = null;
+
+        if (isset($data['globals']) && is_array($data['globals'])) {
+            $globalsPreview          = ContentIQImporter::$plugin->globals->import($data['globals'], dryRun: true);
+            $globalsPreview['drift'] = ContentIQImporter::$plugin->globals
+                ->checkUrlPrefixDrift($data['globals']['collections'] ?? []);
+        }
+
         // Store JSON in session for the import step.
         $tempFilename = 'contentiq-import-' . gmdate('ymd_His') . '.json';
         $tempPath     = Craft::$app->getPath()->getTempPath() . DIRECTORY_SEPARATOR . $tempFilename;
         file_put_contents($tempPath, $json);
 
         return $this->renderTemplate('contentiq-importer/_cp/preview', [
-            'pages'         => $previewResults,
-            'isBatch'       => $isBatch,
-            'pageCount'     => count($previewResults),
-            'createCount'   => $createCount,
-            'updateCount'   => $updateCount,
-            'totalWarnings' => $totalWarnings,
-            'tempFilename'  => $tempFilename,
-            'exportDate'    => $data['exported_at'] ?? null,
+            'pages'          => $previewResults,
+            'isBatch'        => $isBatch,
+            'pageCount'      => count($previewResults),
+            'createCount'    => $createCount,
+            'updateCount'    => $updateCount,
+            'totalWarnings'  => $totalWarnings,
+            'tempFilename'   => $tempFilename,
+            'exportDate'     => $data['exported_at'] ?? null,
+            'globalsPreview' => $globalsPreview,
         ]);
     }
 
@@ -281,6 +482,15 @@ class CpController extends Controller
 
         // Clean up temp file.
         @unlink($tempPath);
+
+        // The upload path intentionally does not import globals — that needs the
+        // lock/consent model, which only the Sync screen exposes. Flag it so the
+        // editor knows the globals in the file were left untouched.
+        if (isset($data['globals']) && is_array($data['globals']) && !empty($data['globals'])) {
+            Craft::$app->getSession()->setNotice(
+                Craft::t('contentiq-importer', 'Globals present in file — use Sync to import globals.'),
+            );
+        }
 
         return $this->redirect('contentiq-importer/result/' . $runId);
     }
@@ -415,11 +625,26 @@ class CpController extends Controller
             }
         }
 
+        // Globals consent — a single lightswitch above the Pages group. Missing
+        // row ⇒ locked (the safe default).
+        $globalsRow    = (new Query())
+            ->select(['locked'])
+            ->from('{{%contentiq_globals_sync}}')
+            ->one();
+        $globalsLocked = $globalsRow === null ? true : (bool)$globalsRow['locked'];
+
+        $globalsOfficeCount = (int)(new Query())
+            ->from('{{%contentiq_office_syncs}}')
+            ->count();
+
         return $this->renderTemplate('contentiq-importer/_cp/sync', [
             'contentiqUrl'    => App::parseEnv($settings->contentiqUrl),
             'projectSlug'    => $inferredSlug,
             'hasSyncRecords' => $hasSyncRecords,
             'syncGroups'     => $syncGroups,
+            'globalsLocked'     => $globalsLocked,
+            'globalsOfficeCount' => $globalsOfficeCount,
+            'globalsSetNames'    => ['companyInfo', 'globalContent', 'siteConfig'],
         ]);
     }
 
@@ -467,6 +692,11 @@ class CpController extends Controller
                 )
                 ->execute();
         }
+
+        // Persist the globals consent for this run (checkbox = unlock). The
+        // SyncJob relocks after a successful globals import.
+        $unlockGlobals = (bool)$request->getBodyParam('unlockGlobals', false);
+        $this->_setGlobalsLock(!$unlockGlobals);
 
         // Create a pending run record so the frontend has a run ID to poll.
         $runId = $this->_saveRun(
@@ -712,6 +942,77 @@ class CpController extends Controller
 
     // Private Methods
     // =========================================================================
+
+    /**
+     * Builds the cascade data for the Mappings screen: every section with its
+     * entry types, and each entry type's CKEditor and PlainText field handles.
+     *
+     * Embedded as JSON so the vanilla-JS dropdowns can cascade section → entry
+     * type → content field (CKEditor) / heading field (PlainText).
+     *
+     * @return array<int, array{handle: string, name: string, entryTypes: array<int, array{handle: string, name: string, ckeditorFields: array<int, array{handle: string, name: string}>, plainTextFields: array<int, array{handle: string, name: string}>}>}>
+     */
+    private function _buildSectionsData(): array
+    {
+        $data = [];
+
+        foreach (Craft::$app->getEntries()->getAllSections() as $section) {
+            $entryTypes = [];
+
+            foreach ($section->getEntryTypes() as $entryType) {
+                $ckeditorFields  = [];
+                $plainTextFields = [];
+
+                foreach ($entryType->getFieldLayout()->getCustomFields() as $field) {
+                    // CKEditor is an optional dependency — reference it by its
+                    // fully-qualified name so this works without the plugin.
+                    if ($field instanceof \craft\ckeditor\Field) {
+                        $ckeditorFields[] = ['handle' => $field->handle, 'name' => $field->name];
+                    } elseif ($field instanceof PlainText) {
+                        $plainTextFields[] = ['handle' => $field->handle, 'name' => $field->name];
+                    }
+                }
+
+                $entryTypes[] = [
+                    'handle'          => $entryType->handle,
+                    'name'            => $entryType->name,
+                    'ckeditorFields'  => $ckeditorFields,
+                    'plainTextFields' => $plainTextFields,
+                ];
+            }
+
+            $data[] = [
+                'handle'     => $section->handle,
+                'name'       => $section->name,
+                'entryTypes' => $entryTypes,
+            ];
+        }
+
+        return $data;
+    }
+
+    /**
+     * Sets the single globals-sync lock row, creating it if absent.
+     *
+     * @param bool $locked
+     * @return void
+     */
+    private function _setGlobalsLock(bool $locked): void
+    {
+        $db     = Craft::$app->getDb();
+        $exists = (new Query())->from('{{%contentiq_globals_sync}}')->exists();
+
+        if ($exists) {
+            $db->createCommand()
+                ->update('{{%contentiq_globals_sync}}', ['locked' => $locked])
+                ->execute();
+            return;
+        }
+
+        $db->createCommand()
+            ->insert('{{%contentiq_globals_sync}}', ['locked' => $locked])
+            ->execute();
+    }
 
     /**
      * Saves an import run to the history table.

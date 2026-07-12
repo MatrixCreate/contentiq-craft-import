@@ -34,6 +34,8 @@
  *   'buttonNodes'     → ContentNode[] → filters ctaButton nodes → actionButtons Matrix entries
  *   'faqNodes'        → ContentNode[] → splits at faq_items → richText/extraRichText/_faqItems
  *   'uspContent'      → entire block fields → {heading:{level,text}, items:[string]} → <hN>+<ul> HTML
+ *   'collectionSection' → ContentIQ collection slug → Craft section handle (via content_types map;
+ *                         unmapped slug stored raw + page warning)
  *
  * Special contentiqKey '_block':
  *   When the contentiqKey is '_block' (in outerFields OR innerMatrix.fields), the entire block
@@ -192,10 +194,32 @@ return [
         'innerMatrix' => null,
     ],
 
+    'collection_listing' => [
+        'outerType'   => 'collectionListing',
+        'outerFields' => [
+            // Intro nodes → CKEditor HTML, minus bracketed listing placeholders
+            // like "[Blog Listing]" / "[Listing Grid]" — the rendered listing
+            // takes that space, so the placeholder text is dropped on import.
+            'nodes'      => ['richText', 'collectionListingNodes'],
+            // collectionSection resolves the ContentIQ collection slug to a Craft
+            // section handle via the content_types map. An unmapped slug is stored
+            // raw and surfaces a page warning.
+            'collection' => ['listingSection', 'collectionSection'],
+        ],
+        'innerMatrix' => null,
+    ],
+
     // Content type routing for collection children (see header note).
+    // Keys are ContentiQ's default registry slugs; values map to the Craft
+    // Starter's sections/entry types.
     // slug => [section, entryType, contentField]
+    //
+    // NOTE: there is deliberately no default 'offices' route — offices are now
+    // fed by the globals import (GlobalsImportService), not collection children.
+    // A project that still exports offices as a collection can add an explicit
+    // 'offices' override in config/contentiq.php as a legacy escape hatch.
     'content_types' => [
-        'articles' => [
+        'blog' => [
             'section'      => 'articles',
             'entryType'    => 'article',
             'contentField' => 'articleContent',
@@ -214,11 +238,6 @@ return [
         'team' => [
             'section'      => 'team',
             'entryType'    => 'teamMember',
-            'contentField' => 'body',
-        ],
-        'offices' => [
-            'section'      => 'offices',
-            'entryType'    => 'office',
             'contentField' => 'body',
         ],
     ],

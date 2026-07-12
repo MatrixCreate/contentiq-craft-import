@@ -41,6 +41,7 @@
         'price_list': 'Price List',
         'usp': 'USP',
         'global': 'Global',
+        'collection_listing': 'Collection Listing',
         'hero': 'Hero',
         'call_to_action': 'Call to Action',
         'table': 'Table',
@@ -98,6 +99,61 @@
             {% endfor %}
         </tbody>
     </table>
+
+    {# Globals panel — dry-run summary of the file's globals payload. The upload
+       path does not import globals (that needs the Sync consent model), so this
+       is informational: it shows what a Sync of this file would write. #}
+    {% if globalsPreview %}
+        {% set offices = globalsPreview.offices ?? {} %}
+        <div style="margin-top:32px;">
+            <h2>{{ 'Globals'|t('contentiq-importer') }}</h2>
+            <p class="light" style="margin-top:-4px;">
+                {{ 'Uploads do not import globals — use Sync to apply them. This is a preview of what a Sync would do.'|t('contentiq-importer') }}
+            </p>
+
+            <div class="pane" style="border-radius:8px; padding:16px; margin-bottom:16px;">
+                <div style="font-size:14px; margin-bottom:12px;">
+                    <strong>{{ (offices.created ?? [])|length }}</strong> to create
+                    &middot; <strong>{{ (offices.updated ?? [])|length }}</strong> to update
+                    &middot; <strong>{{ (offices.adopted ?? [])|length }}</strong> to adopt
+                    &middot; <strong>{{ (offices.deleted ?? [])|length }}</strong> to delete
+                    &middot; <strong>{{ (offices.unmatched ?? [])|length }}</strong> left alone
+                </div>
+
+                {% for label, key in { 'Create': 'created', 'Update': 'updated', 'Adopt': 'adopted', 'Delete': 'deleted', 'Left alone (hand-made)': 'unmatched' } %}
+                    {% if (offices[key] ?? [])|length %}
+                        <div style="font-size:13px; margin-bottom:4px;">
+                            <span class="light">{{ label }}:</span> {{ offices[key]|join(', ') }}
+                        </div>
+                    {% endif %}
+                {% endfor %}
+            </div>
+
+            {% if (globalsPreview.globalSets ?? {})|length %}
+                <div class="pane" style="border-radius:8px; padding:16px; margin-bottom:16px;">
+                    <strong style="display:block; margin-bottom:8px;">{{ 'Global set fields'|t('contentiq-importer') }}</strong>
+                    {% for setHandle, handles in globalsPreview.globalSets %}
+                        <div style="font-size:13px; margin-bottom:4px;">
+                            <code>{{ setHandle }}</code>
+                            <span class="light">— {{ handles|length ? handles|join(', ') : 'none' }}</span>
+                        </div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+
+            {% set globalsNotes = (globalsPreview.warnings ?? [])|merge(globalsPreview.drift ?? [])|merge(globalsPreview.fieldNotes ?? []) %}
+            {% if globalsNotes|length %}
+                <div class="pane" style="background:var(--yellow-050); border:1px solid var(--yellow-300); border-radius:8px; padding:16px;">
+                    <strong style="display:block; margin-bottom:8px;">{{ 'Globals warnings and notes'|t('contentiq-importer') }}</strong>
+                    <ul style="margin:0; padding-left:20px;">
+                        {% for note in globalsNotes %}
+                            <li style="margin-bottom:4px; font-size:13px;">{{ note }}</li>
+                        {% endfor %}
+                    </ul>
+                </div>
+            {% endif %}
+        </div>
+    {% endif %}
 
     {# Skipped blocks detail #}
     {% set skippedBlocks = [] %}

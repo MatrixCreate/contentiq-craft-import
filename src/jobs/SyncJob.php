@@ -191,7 +191,39 @@ class SyncJob extends BaseJob
 
         $this->setProgress($queue, 1);
 
-        // 4. Determine overall status.
+        // 4. Import globals (envelope may carry a `globals` key). URL-prefix drift
+        //    is advisory and runs read-only regardless of the lock; the write
+        //    path only runs when the user has consented (row unlocked this run).
+        //    The pages path above is completely untouched by any of this.
+        $globalsReport = null;
+
+        if (isset($data['globals']) && is_array($data['globals'])) {
+            $globals = $data['globals'];
+            $drift   = $plugin->globals->checkUrlPrefixDrift($globals['collections'] ?? []);
+
+            if ($this->_globalsLocked()) {
+                $globalsReport = [
+                    'locked'  => true,
+                    'skipped' => 'Skipped — globals are locked.',
+                    'drift'   => $drift,
+                ];
+            } else {
+                $globalsReport          = $plugin->globals->import($globals, dryRun: false);
+                $globalsReport['drift'] = $drift;
+                $totalImages           += $globalsReport['imageCount'] ?? 0;
+
+                // Relock and stamp on success.
+                $this->_relockGlobals();
+            }
+
+            if (!empty($drift)
+                || !empty($globalsReport['warnings'] ?? [])
+                || !empty($globalsReport['fieldNotes'] ?? [])) {
+                $hasWarnings = true;
+            }
+        }
+
+        // 5. Determine overall status.
         if ($hasErrors) {
             $status = 'errors';
         } elseif ($hasWarnings) {
@@ -200,20 +232,21 @@ class SyncJob extends BaseJob
             $status = 'success';
         }
 
-        // 5. Update the pre-created run record.
+        // 6. Update the pre-created run record. The result is a shape-tagged
+        //    object ({pages, globals}); old runs remain flat arrays.
         Craft::$app->getDb()->createCommand()->update(
             '{{%contentiq_import_runs}}',
             [
                 'pageCount'   => count($pageResults),
                 'imageCount'  => $totalImages,
                 'status'      => $status,
-                'result'      => Json::encode($pageResults),
+                'result'      => Json::encode(['pages' => $pageResults, 'globals' => $globalsReport]),
                 'dateUpdated' => (new \DateTime())->format('Y-m-d H:i:s'),
             ],
             ['id' => $this->runId],
         )->execute();
 
-        // 6. Auto-lock all successfully synced entries.
+        // 7. Auto-lock all successfully synced entries.
         // After every sync, imported entries are locked so subsequent syncs
         // won't overwrite them unless the user explicitly unlocks them.
         $db  = Craft::$app->getDb();
@@ -257,6 +290,51 @@ class SyncJob extends BaseJob
     }
 
     /**
+     * Whether the single globals-sync row is locked. A missing row is treated
+     * as locked (the safe default).
+     *
+     * @return bool
+     */
+    private function _globalsLocked(): bool
+    {
+        $row = (new Query())
+            ->select(['locked'])
+            ->from('{{%contentiq_globals_sync}}')
+            ->one();
+
+        if ($row === null) {
+            return true;
+        }
+
+        return (bool)$row['locked'];
+    }
+
+    /**
+     * Relocks the globals-sync row and stamps synced_at, creating the row if
+     * absent.
+     *
+     * @return void
+     */
+    private function _relockGlobals(): void
+    {
+        $db  = Craft::$app->getDb();
+        $now = (new \DateTime())->format('Y-m-d H:i:s');
+
+        $exists = (new Query())->from('{{%contentiq_globals_sync}}')->exists();
+
+        if ($exists) {
+            $db->createCommand()
+                ->update('{{%contentiq_globals_sync}}', ['locked' => true, 'synced_at' => $now])
+                ->execute();
+            return;
+        }
+
+        $db->createCommand()
+            ->insert('{{%contentiq_globals_sync}}', ['locked' => true, 'synced_at' => $now])
+            ->execute();
+    }
+
+    /**
      * Marks the run as failed with an error message.
      *
      * @param string $error
@@ -272,5 +350,15 @@ class SyncJob extends BaseJob
             ],
             ['id' => $this->runId],
         )->execute();
+
+        // Relock globals so a persisted unlock consent does not survive a failed
+        // run and silently drive the next sync. Only touch an existing row.
+        $exists = (new Query())->from('{{%contentiq_globals_sync}}')->exists();
+
+        if ($exists) {
+            Craft::$app->getDb()->createCommand()
+                ->update('{{%contentiq_globals_sync}}', ['locked' => true])
+                ->execute();
+        }
     }
 }

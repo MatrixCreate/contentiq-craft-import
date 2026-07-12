@@ -102,6 +102,28 @@
             </div>
         </div>
 
+        {# Globals consent — one checkbox gates the whole globals payload. #}
+        <div class="pane" style="border-radius:8px; margin-bottom:24px;">
+            <div style="padding:12px 16px; border-bottom:1px solid var(--hairline-color);">
+                <strong style="text-transform:uppercase; letter-spacing:0.05em; font-size:11px; color:var(--medium-text-color);">{{ 'Globals'|t('contentiq-importer') }}</strong>
+            </div>
+            <div style="padding:12px 16px;">
+                <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer;">
+                    <input type="checkbox" id="contentiq-globals-cb" {{ not globalsLocked ? 'checked' : '' }}>
+                    <span>
+                        <strong>{{ 'Sync company, offices, branding and scripts'|t('contentiq-importer') }}</strong>
+                        <span class="light" style="display:block; font-size:12px; margin-top:2px;">
+                            {{ globalsOfficeCount }} {{ globalsOfficeCount == 1 ? 'office' : 'offices' }} mapped
+                            &middot; {{ globalsSetNames|join(', ') }}
+                        </span>
+                        <span class="light" style="display:block; font-size:12px; margin-top:2px;">
+                            {{ 'Overwrites the offices section and the global sets above. Unchecked = left unchanged.'|t('contentiq-importer') }}
+                        </span>
+                    </span>
+                </label>
+            </div>
+        </div>
+
         {% if hasSyncRecords %}
 
             {# Entry tree pane with selection controls #}
@@ -275,6 +297,10 @@
                 });
                 formData.append('unlockIds', JSON.stringify(unlockIds));
             }
+
+            // Globals consent — checked = sync (unlock) this run.
+            var globalsCb = document.getElementById('contentiq-globals-cb');
+            formData.append('unlockGlobals', globalsCb && globalsCb.checked ? '1' : '0');
 
             fetch(Craft.getActionUrl('contentiq-importer/cp/run-sync'), {
                 method: 'POST',

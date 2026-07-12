@@ -129,13 +129,15 @@ Inline marks: `bold`, `italic`, `code`, `strike`, `underline`, `link` (with `att
 |---|---|
 | `hero` | `heading: {level, text}`, `image: {key, url, alt}`, `mobile_image?`, `buttons: [{text, url}]`, `subheading?: {level, text}` |
 | `text` | `nodes: [...]`, `columns: 'singleColumn\|twoColumns'` |
-| `text_and_media` | `nodes: [...]`, `image: {key, url, alt}`, `layout: 'image_right\|image_left'` |
+| `text_and_media` | `nodes: [...]` (may contain `ctaButton` nodes), `image: {key, url, alt}`, `mobile_image?`, `layout: 'image_right\|image_left\|background'` |
 | `faq` | `nodes: [...]` — nodes array contains `faq_items` typed nodes |
 | `cards` | `cards: [{heading, nodes, image, button_label}]`, `nodes: [...]` (intro) |
 | `price_list` | `nodes: [...]`, `price_items: [{...}]`, `nodes` with `ctaButton` nodes |
 | `call_to_action` | `heading`, `nodes`, `image`, `buttons: [{text, url}]` |
 | `usp` | `heading: {level, text}`, `items: [{text}]` |
-| `global` | `notes` (developer-facing only, written to `contentiqNotes` field) |
+| `global` | `nodes: [...]` — rendered to the `globalContent` CKEditor field |
+| `custom` | `nodes: [...]` (→ `contentiqContent` CKEditor), `images: [{key, url, alt}]` (→ `contentiqImages`, up to 10) |
+| `collection_listing` | `nodes: [...]` (intro), `collection` (ContentIQ collection slug → section handle) |
 
 Image fields always use the shape `{ "key": "s3/path/file.jpg", "url": "https://...", "alt": "..." }`. The `key` is the S3 object key used for filename extraction; `url` is the download URL.
 
@@ -236,8 +238,13 @@ ImportService::importPage()
         'innerType'  => 'textAndMediaBlock',  // Inner entry type
         'mode'       => 'grouped',            // How inner entries are generated
         'fields'     => [
-            'nodes' => ['richText', 'nodes'],
-            'image' => ['image',    'image'],
+            // mediaNodes renders text to richText AND lifts ctaButton nodes out
+            // into the inner block's actionButtons Matrix (not raw <a> tags).
+            'nodes'  => ['richText', 'mediaNodes'],
+            // textMediaMedia receives the whole block ('_block') → sets mediaType
+            // (image | backgroundImage) from the layout and routes the image to
+            // the matching field (image, or desktop/mobileBackgroundImage).
+            '_block' => ['mediaType', 'textMediaMedia'],
         ],
     ],
 ],
@@ -257,29 +264,35 @@ ImportService::importPage()
 | Handler | Input | Output |
 |---|---|---|
 | `nodes` | `ContentNode[]` | HTML string via NodesRenderer |
+| `mediaNodes` | `ContentNode[]` with `ctaButton` nodes | richText HTML + `actionButtons` Matrix (ctaButtons lifted out) |
+| `textMediaMedia` | whole inner block (`_block`) | `mediaType` + image routed to `image` or `desktop`/`mobileBackgroundImage` |
 | `image` | `{key, url, alt}` | `[$assetId]` (downloads image) |
+| `images` | `[{key, url, alt}]` | `[$assetId, …]` (multiple assets) |
 | `heading` | `{level, text}` or string | `<hN>text</hN>` |
 | `body` | plain string | `<p>text</p>` |
 | `layout` | string | pass-through |
-| `textMediaLayout` | `image_right\|image_left` | `text-left\|image-left` |
+| `textMediaLayout` | `image_right\|image_left\|background` | `text-left\|image-left` |
 | `hyperButton` | `{label, url}` | Hyper link field array |
 | `buttonLabel` | `{label, url}` | label string only |
 | `faqNodes` | `ContentNode[]` | splits at `faq_items` → `{richText, extraRichText, _faqItems, actionButtons}` |
 | `buttonNodes` | `ContentNode[]` | filters `ctaButton` nodes → actionButtons Matrix entries |
 | `uspContent` | entire block fields | `{heading:{level,text}, items:[]}` → HTML |
+| `collectionSection` | ContentIQ collection slug | Craft section handle (via `content_types` map; unmapped slug stored raw + warning) |
 | `tableHtml` | `[{isHeader, cells}]` | `<table>` HTML string |
 
 ### Standard block mappings
 
 | ContentIQ type | Outer entry type | Inner Matrix field | Inner entry type | Mode |
 |---|---|---|---|---|
-| `text` | `text` | `textBlocks` | `textBlock` | single |
+| `text` | `text` | `textBlocks` | `textBlock` | text_columns |
 | `text_and_media` | `textAndMedia` | `textAndMediaBlocks` | `textAndMediaBlock` | grouped |
 | `faq` | `faq` | `accordionItems` | `accordionItem` | repeated |
 | `cards` | `entryCards` | `entryCards` | `card` | repeated |
 | `price_list` | `priceList` | *(none)* | — | outer fields only |
 | `usp` | `contentiqUsp` | *(none)* | — | outer fields only |
-| `global` | `contentiqGlobal` | *(none)* | — | outer fields only |
+| `global` | `contentiqGlobal` | *(none)* | — | outer fields only (`nodes` → `globalContent`) |
+| `custom` | `contentiqCustom` | *(none)* | — | outer fields only (`nodes` + `images`) |
+| `collection_listing` | `collectionListing` | *(none)* | — | outer fields only (`nodes` intro + `listingSection`) |
 
 ### Special blocks (handled by ImportService, not defaults.php)
 

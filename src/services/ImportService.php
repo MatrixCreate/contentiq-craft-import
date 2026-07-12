@@ -116,7 +116,7 @@ class ImportService extends Component
                 $entryTypeHandle = $config['homepageEntryType'] ?? 'homepage';
             } else {
                 $sectionHandle   = $config['section'] ?? 'pages';
-                $entryTypeHandle = $config['entryType'] ?? 'page';
+                $entryTypeHandle = $config['entryType'] ?? 'pages';
             }
 
             $section = Craft::$app->entries->getSectionByHandle($sectionHandle);
@@ -187,6 +187,7 @@ class ImportService extends Component
 
             $result['blocks']      = $built['blockReport'];
             $result['images']      = $built['imageReport'];
+            $result['warnings']    = array_merge($result['warnings'], $built['warnings'] ?? []);
 
             // -----------------------------------------------------------------------
             // 7. Resolve SEO field values and hero field.
@@ -370,8 +371,14 @@ class ImportService extends Component
     // =========================================================================
 
     /**
-     * Loads the content_types routing map: defaults.php merged with the project
-     * config override (config/contentiq.php 'content_types', per-slug replace).
+     * Loads the content_types routing map, per-slug replace at each layer:
+     *
+     *   defaults.php  ←  settings.collectionMappings (CP Mappings screen)  ←  config/contentiq.php 'content_types'
+     *
+     * The config file stays the dev escape hatch and wins over the UI. Settings
+     * rows with an empty/missing `section` are filtered out before merging, so an
+     * empty collectionMappings leaves the result byte-identical to the old
+     * defaults ← file merge.
      *
      * Cached after the first call.
      *
@@ -386,13 +393,26 @@ class ImportService extends Component
         $defaults    = require dirname(__DIR__) . '/config/defaults.php';
         $defaultMap  = is_array($defaults['content_types'] ?? null) ? $defaults['content_types'] : [];
 
+        // CP-managed mappings (project config) — drop rows with no section.
+        $settings    = ContentIQImporter::$plugin->getSettings();
+        $settingsMap = [];
+
+        foreach ($settings->collectionMappings as $slug => $row) {
+            if (!is_array($row) || empty($row['section'])) {
+                continue;
+            }
+
+            $settingsMap[$slug] = $row;
+        }
+
+        // config/contentiq.php 'content_types' — the dev escape hatch, wins over the UI.
         $projectConfig = Craft::$app->getConfig()->getConfigFromFile('contentiq');
-        $override      = (is_array($projectConfig) && is_array($projectConfig['content_types'] ?? null))
+        $fileOverride  = (is_array($projectConfig) && is_array($projectConfig['content_types'] ?? null))
             ? $projectConfig['content_types']
             : [];
 
-        // Per-slug replace — a project override replaces a slug's whole definition.
-        $this->_contentTypesMap = array_replace($defaultMap, $override);
+        // Per-slug replace — a later layer replaces a slug's whole definition.
+        $this->_contentTypesMap = array_replace($defaultMap, $settingsMap, $fileOverride);
 
         return $this->_contentTypesMap;
     }
@@ -429,7 +449,7 @@ class ImportService extends Component
             $result['skipped']      = true;
             $result['success']      = true;
             $result['sectionLabel'] = $contentType;
-            $result['warnings'][]   = "Content type '{$contentType}' has no mapping in config — page skipped.";
+            $result['warnings'][]   = "Content type '{$contentType}' has no mapping — page skipped. Map it under ContentiQ → Mappings (or add a content_types override in config/contentiq.php).";
             Craft::warning("ContentIQImporter: unmapped content_type '{$contentType}' for page '{$slug}' — skipped.", __METHOD__);
 
             return $result;
@@ -729,15 +749,23 @@ class ImportService extends Component
     }
 
     /**
-     * Builds a flat field values array from a ContentIQ hero block.
+     * Builds the `hero` ContentBlock field value from a ContentIQ hero block.
      *
-     * The pages entry type has hero fields directly on the entry (not in a Matrix):
-     *   heading → heroTitle    (CKEditor, wrapped in <h1>)
-     *   body    → heroRichText (CKEditor, wrapped in <p>)
-     *   image   → heroDesktopImage (asset)
-     *   (also sets enableHero → true so the hero is visible)
+     * Both pages and homepage use the same craft\fields\ContentBlock field.
+     * Returns the ContentBlock shape wrapping the inner hero fields:
+     *   [
+     *     'enableHero' => true,             // sibling lightswitch on the entry type
+     *     'hero' => ['fields' => [
+     *       'heading'       => '<h1>…</h1>',  // CKEditor
+     *       'richText'      => '<h2>…</h2><p>…</p>',  // subheading + body
+     *       'desktopImage'  => [$assetId],   // Assets
+     *       'mobileImage'   => [$assetId],   // Assets (optional)
+     *       'actionButtons' => [...],        // Matrix of actionButton entries
+     *     ]],
+     *   ]
      *
-     * Returns null if no mappable fields are found.
+     * The inner fields are built by _buildHeroInnerFields(). Returns null when
+     * no mappable inner fields are found.
      *
      * @param array $heroBlock ContentIQ hero block (the full block object).
      * @param bool  $dryRun
@@ -874,22 +902,6 @@ class ImportService extends Component
         return $innerFields;
     }
 
-    /**
-     * Builds the homeHero ContentBlock field data for the homepage entry.
-     *
-     * The homeHero is a craft\fields\ContentBlock containing:
-     *   desktopImage → Assets
-     *   mobileImage  → Assets
-     *   heading      → CKEditor (Page Heading H1, handle override)
-     *   richText     → CKEditor
-     *
-     * Data shape for ContentBlock fields:
-     *   ['homeHero' => ['fields' => [handle => value, ...]]]
-     *
-     * @param array $heroBlock Raw hero block from the JSON.
-     * @param bool  $dryRun
-     * @return array|null
-     */
     /**
      * Logs detailed validation errors from an element's field values for debugging.
      *

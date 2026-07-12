@@ -107,7 +107,10 @@
        any other skip reason, 'total' = pages found in the API response. Locked
        and skipped pages appear in run.result but are never written, so counting
        them separately keeps the headline figure honest. #}
-    {% set pages = run.result ?? [] %}
+    {# Result is either the new {pages, globals} object or a legacy flat array. #}
+    {% set result = run.result ?? [] %}
+    {% set pages = result.pages is defined ? result.pages : result %}
+    {% set globals = result.globals is defined ? result.globals : null %}
     {% set totalImages = 0 %}
     {% set reusedImages = 0 %}
     {% set totalWarnings = 0 %}
@@ -130,6 +133,12 @@
             {% set updatedCount = updatedCount + 1 %}
         {% endif %}
     {% endfor %}
+
+    {# Fold globals-sourced images into the image totals. #}
+    {% if globals %}
+        {% set totalImages = totalImages + (globals.imageCount ?? 0) %}
+        {% set reusedImages = reusedImages + (globals.imagesReused ?? 0) %}
+    {% endif %}
 
     <div style="margin-bottom:24px; font-size:14px; color:var(--text-color);">
         <strong>{{ updatedCount }}</strong> updated
@@ -234,5 +243,59 @@
             </tbody>
         </table>
     </div>
+
+    {# Globals report #}
+    {% if globals %}
+        <h2 style="margin-top:32px;">{{ 'Globals'|t('contentiq-importer') }}</h2>
+
+        {% if globals.locked ?? false %}
+            <div class="pane" style="border-radius:8px; padding:16px;">
+                <span class="status disabled"></span> {{ globals.skipped ?? 'Skipped — globals are locked.' }}
+            </div>
+        {% else %}
+            {% set offices = globals.offices ?? {} %}
+            <div class="pane" style="border-radius:8px; padding:16px; margin-bottom:16px;">
+                <div style="font-size:14px; margin-bottom:12px;">
+                    <strong>{{ (offices.created ?? [])|length }}</strong> created
+                    &middot; <strong>{{ (offices.updated ?? [])|length }}</strong> updated
+                    &middot; <strong>{{ (offices.adopted ?? [])|length }}</strong> adopted
+                    &middot; <strong>{{ (offices.deleted ?? [])|length }}</strong> deleted
+                    &middot; <strong>{{ (offices.unmatched ?? [])|length }}</strong> left alone
+                </div>
+
+                {% for label, key in { 'Created': 'created', 'Updated': 'updated', 'Adopted': 'adopted', 'Deleted': 'deleted', 'Left alone (hand-made)': 'unmatched' } %}
+                    {% if (offices[key] ?? [])|length %}
+                        <div style="font-size:13px; margin-bottom:4px;">
+                            <span class="light">{{ label }}:</span> {{ offices[key]|join(', ') }}
+                        </div>
+                    {% endif %}
+                {% endfor %}
+            </div>
+
+            {% if (globals.globalSets ?? {})|length %}
+                <div class="pane" style="border-radius:8px; padding:16px; margin-bottom:16px;">
+                    <strong style="display:block; margin-bottom:8px;">{{ 'Global set fields written'|t('contentiq-importer') }}</strong>
+                    {% for setHandle, handles in globals.globalSets %}
+                        <div style="font-size:13px; margin-bottom:4px;">
+                            <code>{{ setHandle }}</code>
+                            <span class="light">— {{ handles|length ? handles|join(', ') : 'none' }}</span>
+                        </div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endif %}
+
+        {% set globalsNotes = (globals.warnings ?? [])|merge(globals.drift ?? [])|merge(globals.fieldNotes ?? []) %}
+        {% if globalsNotes|length %}
+            <div class="pane" style="background:var(--yellow-050); border:1px solid var(--yellow-300); border-radius:8px; padding:16px;">
+                <strong style="display:block; margin-bottom:8px;">{{ 'Globals warnings and notes'|t('contentiq-importer') }}</strong>
+                <ul style="margin:0; padding-left:20px;">
+                    {% for note in globalsNotes %}
+                        <li style="margin-bottom:4px; font-size:13px;">{{ note }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+        {% endif %}
+    {% endif %}
 
 {% endblock %}
