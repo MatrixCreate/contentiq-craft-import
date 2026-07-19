@@ -128,8 +128,8 @@ return [
             'outerField' => 'accordionItems',
             'innerType'  => 'accordionItem',
             'mode'       => 'repeated',
-            'sourceKey'         => 'items',       // new: flat array from ContentIQ
-            'fallbackSourceKey' => '_faqItems',   // legacy: extracted from nodes.faq_items
+            'sourceKey'         => 'items',       // legacy: flat array, older ContentIQ instances only
+            'fallbackSourceKey' => '_faqItems',   // current: merged from fields.nodes' faq_items nodes
             'fields'     => [
                 'question' => ['itemTitle',   'heading'],  // plain string → <h3>
                 'answer'   => ['itemContent', 'body'],     // plain string → <p>

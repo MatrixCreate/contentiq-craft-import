@@ -419,8 +419,10 @@ class MatrixBuilder extends Component
             $sourceKey   = $innerConfig['sourceKey'] ?? '';
             $items       = $sourceFields[$sourceKey] ?? [];
 
-            // Fallback source key — used when primary is empty (e.g. FAQ
-            // items may come from fields.items or from _faqItems via nodes).
+            // Fallback source key — used when primary is empty. FAQ items now
+            // come from _faqItems (merged from fields.nodes' faq_items nodes via
+            // faqNodes); the flat fields.items array is legacy — present only on
+            // exports from older ContentIQ instances.
             if (empty($items) && isset($innerConfig['fallbackSourceKey'])) {
                 $items = $sourceFields[$innerConfig['fallbackSourceKey']] ?? [];
             }
@@ -994,11 +996,22 @@ class MatrixBuilder extends Component
     /**
      * Splits a FAQ nodes array into richText (before), accordion items, and extraRichText (after).
      *
-     * The nodes array may contain headings, paragraphs, and a single faq_items node.
-     * Content before faq_items → richText (rendered as HTML).
-     * The faq_items node → returned under the _faqItems key for the caller to handle.
-     * Content after faq_items → extraRichText (rendered as HTML).
-     * ctaButton nodes are skipped.
+     * The nodes array may contain headings, paragraphs, and one or more faq_items
+     * nodes — ContentIQ emits one faq_items node per run of consecutive accordion
+     * items, so content interleaved between two runs of accordion items (e.g. a
+     * paragraph splitting one FAQ list into two) produces two separate faq_items
+     * nodes rather than one.
+     *
+     * Content before the FIRST faq_items node → richText (rendered as HTML).
+     * Every faq_items node's items are merged, in document order, into a single
+     * accordion list — returned under the _faqItems key for the caller to handle.
+     * Everything from the first faq_items node onwards that isn't itself a
+     * faq_items node (including any content sitting between two runs) →
+     * extraRichText (rendered as HTML). This is the least-surprising rule: once
+     * the accordion starts, only accordion items are pulled out of the flow —
+     * surrounding prose stays together in extraRichText rather than being
+     * scattered back in between accordion runs.
+     * ctaButton nodes are skipped throughout.
      *
      * @param string $handle Ignored — this handler returns multiple fixed handles.
      * @param mixed  $value  The nodes array from the ContentIQ FAQ block.
@@ -1019,7 +1032,10 @@ class MatrixBuilder extends Component
             $type = $node['type'] ?? '';
 
             if ($type === 'faq_items') {
-                $faqItems      = $node['faqItems'] ?? [];
+                // Merge in document order — a run's items are appended to any
+                // already collected from an earlier faq_items node, rather than
+                // replacing them.
+                $faqItems      = array_merge($faqItems, $node['faqItems'] ?? []);
                 $foundFaqItems = true;
                 continue;
             }
