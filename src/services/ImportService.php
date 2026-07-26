@@ -183,10 +183,11 @@ class ImportService extends Component
             }
             $result['blockNotes'] = implode("\n\n", $noteLines);
 
-            $built = ContentIQImporter::$plugin->matrixBuilder->build($contentBlocks, $dryRun);
+            $built = ContentIQImporter::$plugin->matrixBuilder->build($contentBlocks, $dryRun, $slug);
 
             $result['blocks']      = $built['blockReport'];
             $result['images']      = $built['imageReport'];
+            $result['cardRefs']    = $built['cardRefs'] ?? [];  // Deferred card refs for SyncJob pass 2
             $result['warnings']    = array_merge($result['warnings'], $built['warnings'] ?? []);
 
             // -----------------------------------------------------------------------
