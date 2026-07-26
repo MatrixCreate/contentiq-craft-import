@@ -68,20 +68,23 @@ class MatrixBuilder extends Component
     /**
      * Builds the Matrix field data array and the block report from a ContentIQ blocks array.
      *
-     * @param array[] $blocks   ContentIQ `blocks` array from the JSON.
-     * @param bool    $dryRun  If true, skips image downloads.
+     * @param array[] $blocks       ContentIQ `blocks` array from the JSON.
+     * @param bool    $dryRun       If true, skips image downloads.
+     * @param string  $hostPageSlug The slug of the page being imported (for children mode parent==host detection).
      * @return array{
      *   matrixData: array<string, array>,
      *   blockReport: array<int, array{type: string, fields: string[], skipped: bool}>,
      *   imageReport: array<int, array{filename: string, reused: bool}>,
+     *   cardRefs: array<int, array{blockIndex: int, mode: string, refs?: array, parent?: array}>,
      *   warnings: string[]
      * }
      */
-    public function build(array $blocks, bool $dryRun = false): array
+    public function build(array $blocks, bool $dryRun = false, string $hostPageSlug = ''): array
     {
         $matrixData     = [];
         $blockReport    = [];
         $imageReport    = [];
+        $cardRefs       = [];  // Deferred card references (in-memory, never persisted to Craft)
         $counter        = 0;
         $this->_warnings = [];
 
@@ -123,12 +126,19 @@ class MatrixBuilder extends Component
             } else {
                 $sourceFields = $item['fields'] ?? [];
 
-                [$outerFields, $innerMatrixData, $reportedFields] = $this->_buildBlock(
+                [$outerFields, $innerMatrixData, $reportedFields, $blockCardRefs] = $this->_buildBlock(
+                    $type,
                     $mapping,
                     $sourceFields,
                     $imageReport,
                     $dryRun,
+                    $hostPageSlug,
                 );
+
+                // Collect deferred card references (kept in memory, never persisted to Craft)
+                if (!empty($blockCardRefs)) {
+                    $cardRefs[$counter] = array_merge(['blockIndex' => $counter], $blockCardRefs);
+                }
             }
 
             $allFields = array_merge($outerFields, $innerMatrixData);
@@ -159,6 +169,7 @@ class MatrixBuilder extends Component
             'matrixData'  => $matrixData,
             'blockReport' => $blockReport,
             'imageReport' => $imageReport,
+            'cardRefs'    => $cardRefs,  // Deferred card refs (passed to ImportService, then SyncJob)
             'warnings'    => $this->_warnings,
         ];
     }
@@ -290,28 +301,35 @@ class MatrixBuilder extends Component
 
         $innerMatrixData = [$outerField => $innerEntries];
 
-        return [$outerFields, $innerMatrixData, $reportedFields];
+        return [$outerFields, $innerMatrixData, $reportedFields, []];
     }
 
     /**
      * Builds the outer fields and inner Matrix data for a single block.
      *
-     * Returns a tuple of [outerFields, innerMatrixData, reportedFields].
+     * Returns a tuple of [outerFields, innerMatrixData, reportedFields, cardRefs].
+     * cardRefs is non-empty only for cards blocks in pages/children modes.
      *
-     * @param array  $mapping      Block mapping definition from defaults.php.
-     * @param array  $sourceFields ContentIQ fields for this block.
-     * @param array  &$imageReport Image report array, mutated by image handlers.
+     * @param string $blockType     ContentIQ block type ('cards', 'text', etc).
+     * @param array  $mapping       Block mapping definition from defaults.php.
+     * @param array  $sourceFields  ContentIQ fields for this block.
+     * @param array  &$imageReport  Image report array, mutated by image handlers.
      * @param bool   $dryRun
-     * @return array{0: array, 1: array, 2: string[]}
+     * @param string $hostPageSlug  The slug of the page being imported (for children mode).
+     * @return array{0: array, 1: array, 2: string[], 3: array}
+     *         [outerFields, innerMatrixData, reportedFields, cardRefs]
      */
     private function _buildBlock(
+        string $blockType,
         array $mapping,
         array $sourceFields,
         array &$imageReport,
         bool $dryRun,
+        string $hostPageSlug,
     ): array {
         $outerFields    = [];
         $reportedFields = [];
+        $cardRefs       = [];  // Deferred refs for pages/children modes
 
         // Resolve outer fields (e.g. layout dropdown on the outer entry type).
         foreach ($mapping['outerFields'] ?? [] as $contentiqKey => [$craftHandle, $handlerType]) {
@@ -331,11 +349,42 @@ class MatrixBuilder extends Component
             }
         }
 
+        // Special handling for cards block mode branching (pages/children modes).
+        // For these modes, return deferred card refs and skip inner matrix building.
+        if ($blockType === 'cards') {
+            $cardMode = $sourceFields['mode'] ?? 'detected';
+            if ($cardMode === 'pages' || $cardMode === 'children') {
+                [$cardOuterFields, $cardRefs] = $this->_buildCardsByMode(
+                    $cardMode,
+                    $sourceFields,
+                    $outerFields,
+                    $reportedFields,
+                    $imageReport,
+                    $dryRun,
+                    $hostPageSlug,
+                );
+                // Merge card mode fields into outerFields
+                foreach ($cardOuterFields as $handle => $value) {
+                    if (!isset($outerFields[$handle])) {
+                        $outerFields[$handle] = $value;
+                        $reportedFields[] = $handle;
+                    }
+                }
+                // Return without inner matrix — deferred refs travel in memory via $cardRefs
+                return [$outerFields, [], $reportedFields, $cardRefs];
+            }
+            // For detected mode, set cardsInThisBlock='manual' and continue to inner card matrix
+            $outerFields['cardsInThisBlock'] = 'manual';
+            $reportedFields[] = 'cardsInThisBlock';
+            $outerFields['useChildPages'] = false;
+            $reportedFields[] = 'useChildPages';
+        }
+
         // Build inner Matrix data.
         $innerConfig = $mapping['innerMatrix'] ?? null;
 
         if ($innerConfig === null) {
-            return [$outerFields, [], $reportedFields];
+            return [$outerFields, [], $reportedFields, []];  // Empty cardRefs for non-card blocks
         }
 
         $outerField    = $innerConfig['outerField'];
@@ -451,7 +500,7 @@ class MatrixBuilder extends Component
 
         $innerMatrixData = [$outerField => $innerEntries];
 
-        return [$outerFields, $innerMatrixData, $reportedFields];
+        return [$outerFields, $innerMatrixData, $reportedFields, []];
     }
 
     /**
@@ -1123,6 +1172,126 @@ class MatrixBuilder extends Component
         }
 
         return $actionButtonsData;
+    }
+
+    /**
+     * Builds cards block in 'pages' or 'children' mode.
+     *
+     * Returns outer fields and deferred card references that will be resolved
+     * by SyncJob pass 2 (kept in memory, never persisted to Craft).
+     *
+     * For single-page selections in pages mode, creates a manual card row instead
+     * of automatic mode (D6 caveat: single-entry auto-expansion in automatic mode
+     * would unintentionally expand the page to its children).
+     *
+     * @param string $cardMode       'pages' or 'children'.
+     * @param array  $sourceFields   Block fields from ContentiQ export.
+     * @param array  $outerFields    Existing outer fields (modified in place).
+     * @param array  $reportedFields Field names being reported (modified in place).
+     * @param array  &$imageReport   Image report array.
+     * @param bool   $dryRun         If true, skips image processing.
+     * @param string $hostPageSlug   Slug of the page being imported.
+     * @return array{0: array, 1: array}
+     *         [additionalOuterFields, cardRefs] where cardRefs = ['mode' => mode, 'refs'|'parent' => ...]
+     */
+    private function _buildCardsByMode(
+        string $cardMode,
+        array $sourceFields,
+        array &$outerFields,
+        array &$reportedFields,
+        array &$imageReport,
+        bool $dryRun,
+        string $hostPageSlug,
+    ): array {
+        $additionalFields = [];
+        $cardRefs = ['mode' => $cardMode];
+
+        if ($cardMode === 'pages') {
+            // Resolve intro field
+            if (!isset($outerFields['richText']) && isset($sourceFields['intro'])) {
+                $resolved = $this->_handleNodes('richText', $sourceFields['intro'] ?? []);
+                foreach ($resolved as $handle => $fieldValue) {
+                    $additionalFields[$handle] = $fieldValue;
+                    $reportedFields[] = $handle;
+                }
+            }
+
+            $cards = $sourceFields['cards'] ?? [];
+
+            // D6 CAVEAT: Single-page selections must NOT trigger auto-expansion.
+            // Map single-page selections to manual mode with one card row.
+            if (count($cards) === 1) {
+                $card = $cards[0];
+                $page = $card['page'] ?? [];
+                $slug = $page['slug'] ?? null;
+                $entryId = $page['id'] ?? null;
+
+                if ($slug) {
+                    // Manual mode with one card row using entry relation + useEntryCardDetails:true
+                    $additionalFields['cardsInThisBlock'] = 'manual';
+                    $reportedFields[] = 'cardsInThisBlock';
+                    $additionalFields['useChildPages'] = false;
+                    $reportedFields[] = 'useChildPages';
+
+                    // Deferred ref: pass 2 will create the inner card row
+                    $cardRefs['singlePageMode'] = true;
+                    $cardRefs['refs'] = [['slug' => $slug, 'id' => $entryId]];
+                    return [$additionalFields, $cardRefs];
+                }
+            }
+
+            // Multiple pages: use automatic mode with deferred refs
+            $additionalFields['cardsInThisBlock'] = 'automatic';
+            $reportedFields[] = 'cardsInThisBlock';
+            $additionalFields['useChildPages'] = false;
+            $reportedFields[] = 'useChildPages';
+
+            $pageRefs = [];
+            foreach ($cards as $card) {
+                if (isset($card['page']['slug'])) {
+                    $pageRefs[] = [
+                        'slug' => $card['page']['slug'],
+                        'id' => $card['page']['id'] ?? null,
+                    ];
+                }
+            }
+            $cardRefs['refs'] = $pageRefs;
+
+        } elseif ($cardMode === 'children') {
+            // Resolve intro field
+            if (!isset($outerFields['richText']) && isset($sourceFields['intro'])) {
+                $resolved = $this->_handleNodes('richText', $sourceFields['intro'] ?? []);
+                foreach ($resolved as $handle => $fieldValue) {
+                    $additionalFields[$handle] = $fieldValue;
+                    $reportedFields[] = $handle;
+                }
+            }
+
+            $parent = $sourceFields['parent'] ?? null;
+            $parentSlug = $parent['slug'] ?? null;
+            $parentId = $parent['id'] ?? null;
+
+            $additionalFields['cardsInThisBlock'] = 'automatic';
+            $reportedFields[] = 'cardsInThisBlock';
+
+            // Check if parent equals host page
+            if ($parentSlug && $parentSlug === $hostPageSlug) {
+                // Parent is the host page — use live children query
+                $additionalFields['useChildPages'] = true;
+                $reportedFields[] = 'useChildPages';
+                // No deferred ref needed
+            } else {
+                // Arbitrary parent — defer resolution to pass 2
+                $additionalFields['useChildPages'] = false;
+                $reportedFields[] = 'useChildPages';
+                $cardRefs['parent'] = [
+                    'slug' => $parentSlug ?? '',
+                    'id' => $parentId,
+                ];
+            }
+        }
+
+        return [$additionalFields, $cardRefs];
     }
 
     /**
