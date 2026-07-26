@@ -190,11 +190,13 @@ class ImportService extends Component
             $result['warnings']    = array_merge($result['warnings'], $built['warnings'] ?? []);
 
             // -----------------------------------------------------------------------
-            // 7. Resolve SEO field values and hero field.
+            // 7. Resolve SEO field values, card fields, and hero field.
             // -----------------------------------------------------------------------
             $seoValues    = $this->_resolveSeoFields($data['seo'] ?? [], $config, $dryRun);
             $seoPopulated = array_filter($seoValues, fn($v) => $v !== '' && $v !== null && $v !== []);
             $result['seoFieldCount'] = count($seoPopulated);
+
+            $cardValues = $this->_resolveCardFields($data['document']['card'] ?? null, $dryRun);
 
             // Both pages and homepage use the same hero ContentBlock field.
             $heroData = $heroBlock !== null
@@ -271,6 +273,7 @@ class ImportService extends Component
             $fieldValues = array_merge(
                 [$matrixHandle => $matrixData],
                 $heroData ?? [],
+                $cardValues,
                 $seoValues,
             );
 
@@ -709,6 +712,48 @@ class ImportService extends Component
                 'metaBundleSettings' => $metaBundleSettings,
             ],
         ];
+    }
+
+    /**
+     * Resolves ContentIQ card data into Craft card field values.
+     *
+     * Card data is optional on the page; when absent or null, returns empty array
+     * (skip writing). When present, writes all three fields: cardTitle (from title),
+     * cardText (from summary), and cardImage (from image via ImageImportService).
+     *
+     * All three fields are always written when card data is present — null/empty
+     * values clear the field — so re-imports propagate removals made in ContentIQ.
+     *
+     * @param array|null $card    The card object from document.card, or null if absent.
+     * @param bool       $dryRun
+     * @return array<string, mixed>
+     */
+    private function _resolveCardFields(?array $card, bool $dryRun): array
+    {
+        // Card is absent or null — skip writing any card fields.
+        if ($card === null || !is_array($card)) {
+            return [];
+        }
+
+        $cardValues = [
+            'cardTitle' => (string)($card['title'] ?? ''),
+            'cardText'  => (string)($card['summary'] ?? ''), // ContentIQ calls this field "summary"
+        ];
+
+        // cardImage — from card.image via ImageImportService.importFromField().
+        // Returns an array of asset IDs (or empty array if null/missing).
+        $imageData = $card['image'] ?? null;
+        if (is_array($imageData) && !empty($imageData['url'])) {
+            $imageResult = ContentIQImporter::$plugin->images->importFromField($imageData, $dryRun);
+            $cardValues['cardImage'] = ($imageResult !== null && $imageResult['id'] !== null)
+                ? [$imageResult['id']]
+                : [];
+        } else {
+            // No image, or image is null/empty — set empty array.
+            $cardValues['cardImage'] = [];
+        }
+
+        return $cardValues;
     }
 
     /**
