@@ -24,7 +24,9 @@
 
         {% if rows|length %}
 
-            <form method="post" accept-charset="UTF-8">
+            {# data-saveshortcut makes Craft.cp adopt this as the primary form,
+               so Cmd+S / Ctrl+S submits it (same mechanism fullPageForm uses). #}
+            <form method="post" accept-charset="UTF-8" data-saveshortcut>
                 {{ csrfInput() }}
                 {{ actionInput('contentiq-importer/cp/save-mappings') }}
 
