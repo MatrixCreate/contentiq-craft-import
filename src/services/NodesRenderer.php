@@ -555,6 +555,9 @@ class NodesRenderer extends Component
             return '';
         }
 
-        return "<p><a href=\"{$url}\" class=\"btn btn-primary\">{$label}</a></p>";
+        // `not-prose` opts this button out of the rich-text prose styling. Unlike
+        // template-rendered buttons (button.twig adds not-prose), this <a> is
+        // embedded in CKEditor HTML where prose styles would otherwise restyle it.
+        return "<p><a href=\"{$url}\" class=\"btn btn-primary not-prose\">{$label}</a></p>";
     }
 }
