@@ -445,6 +445,29 @@ Card body fields are `ContentNode[]` arrays (not plain strings), processed throu
 
 The `intro` field on the outer `entryCards` entry is also a `ContentNode[]` array, rendered to the `richText` CKEditor field above the card grid.
 
+### Cards modes and two-pass resolution
+
+ContentiQ exports `fields.mode`: `detected` (inline card items, imported as manual cards — above), `pages` (a list of page refs), or `children` (a parent page ref whose children become cards). Pages/children modes carry no card items — MatrixBuilder records a deferred ref set per block (`result['cardRefs']`, in memory only) and pass 2 resolves them once the whole run's slug → entry ID map is complete.
+
+Pass 2 is `ImportService::resolveCardReferences(array $allCardRefs, array $slugToEntryId, bool $dryRun = false): array<int, string[]>` (warnings keyed by owner entry ID). It runs from **every** entry point: SyncJob, CLI import (batch and single), CP upload, and the sidebar widget sync (DB-lookups-only there). Blocks are located by `blockIndex` and saved directly as elements — the owner entry is never re-saved.
+
+Resolution per mode:
+- `pages`, 2+ refs → `entries` relation in order.
+- `pages`, single ref (D6) → one manual `card` row with `entry` + `useEntryCardDetails: true`, so Craft's single-entry auto-expansion never fires.
+- `children`, parent == host page → `useChildPages: true` in pass 1, nothing deferred.
+- `children`, arbitrary parent → `entries = [parent]` (template expands to its children).
+
+### Children-mode manual-card fallback
+
+When a children-mode parent slug resolves nowhere (page not in the batch, not in Craft — i.e. not ready for export), the block is NOT left empty. The deferred ref retains the raw `intro` nodes, and `MatrixBuilder::buildChildrenFallbackCards()` parses them back into cards using the same detected-mode rule as ContentiQ's serialisers (card heading level = most prominent level ≥ 2 appearing 2+ times):
+
+- Block becomes `cardsInThisBlock: manual`; one `card` row per heading (`cardTitle`, body → `cardText`, ctaButton → `actionButtonLabel`; no images — the template falls back to the global placeholder).
+- `richText` is rewritten to only the true intro (nodes before the first card heading) so card content isn't duplicated as prose.
+- The warning tells the editor to unlock and re-sync once the parent is exported — the next sync rebuilds the block in automatic mode, so the fallback self-heals.
+- No repeating heading pattern in the intro ⇒ no fallback (old behaviour: warning, empty block).
+
+Intro sweep caveat: ContentiQ's pages/children serialisers put *everything* in the marked range into `intro` — including card-ish prose. On the success path that prose currently stays in `richText` above the real cards (upstream ContentiQ concern, not fixed here).
+
 ---
 
 ## Homepage import

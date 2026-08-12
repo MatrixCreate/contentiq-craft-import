@@ -4,13 +4,11 @@ namespace matrixcreate\contentiqimporter\jobs;
 
 use Craft;
 use craft\db\Query;
-use craft\elements\Entry;
 use craft\helpers\Json;
 use craft\helpers\StringHelper;
 use craft\i18n\Translation;
 use craft\queue\BaseJob;
 use matrixcreate\contentiqimporter\ContentIQImporter;
-use Throwable;
 
 /**
  * Queue job that runs a full ContentIQ API sync.
@@ -201,10 +199,25 @@ class SyncJob extends BaseJob
 
         $this->setProgress($queue, 1);
 
-        // 4. PASS 2: Resolve deferred card references.
-        // Note: dryRun applies to pass 1 only (skips image downloads). Pass 2 always
-        // resolves and reports, but only writes if not dry-run.
-        $this->_resolveCardReferencesPass2($pageResults, $allCardRefs, $slugToEntryId, false);
+        // 4. PASS 2: Resolve deferred card references via the shared resolver.
+        //    Warnings land on the owning page's result row and count toward the
+        //    run status (previously pass-2 warnings never flipped $hasWarnings).
+        $cardWarnings = $importService->resolveCardReferences($allCardRefs, $slugToEntryId);
+
+        foreach ($cardWarnings as $entryId => $warnings) {
+            if (empty($warnings)) {
+                continue;
+            }
+
+            $hasWarnings = true;
+
+            foreach ($pageResults as $i => $r) {
+                if (($r['entryId'] ?? null) === $entryId) {
+                    array_push($pageResults[$i]['warnings'], ...$warnings);
+                    break;
+                }
+            }
+        }
 
         // 5. Import globals (envelope may carry a `globals` key). URL-prefix drift
         //    is advisory and runs read-only regardless of the lock; the write
@@ -292,157 +305,6 @@ class SyncJob extends BaseJob
                     'synced_at'  => $now,
                     'notes'      => $result['blockNotes'] ?? '',
                 ])->execute();
-            }
-        }
-    }
-
-    /**
-     * PASS 2: Resolve deferred card references in entryCards blocks.
-     *
-     * After all pages are imported (so the slug→entry ID map is complete), each
-     * deferred ref set recorded by MatrixBuilder is applied to its block:
-     *   - pages (2+ refs): populate the block's `entries` relation in order.
-     *   - pages (single ref, D6): write one manual `card` row with the `entry`
-     *     relation + useEntryCardDetails, so Craft's single-entry auto-expansion
-     *     never fires (pages mode is literal).
-     *   - children (arbitrary parent): `entries` = [parent] — the template's
-     *     single-entry expansion renders the parent's children.
-     *   - children (parent == host page): nothing deferred (useChildPages set
-     *     in pass 1).
-     *
-     * Blocks are located by blockIndex — the 0-based position among the matrix
-     * blocks MatrixBuilder emitted, which matches the saved contentBlocks order.
-     * Nested matrix blocks are elements, so each modified block is saved
-     * directly; the owner entry is never re-saved. Unresolvable slugs degrade
-     * to a warning on the page result.
-     *
-     * @param array $pageResults   Page result array, updated with resolution warnings.
-     * @param array $allCardRefs   Deferred ref sets keyed by entryId; each value is a LIST
-     *                             of {blockIndex, mode, refs?|parent?, singlePageMode?}.
-     * @param array $slugToEntryId In-batch slug→entry ID map from pass 1.
-     * @param bool  $dryRun        If true, resolve and warn but write nothing.
-     * @return void
-     */
-    private function _resolveCardReferencesPass2(array &$pageResults, array $allCardRefs, array $slugToEntryId, bool $dryRun): void
-    {
-        $config        = Craft::$app->config->getConfigFromFile('contentiq');
-        $sectionHandle = $config['section'] ?? 'pages';
-
-        // Resolve a page slug to an entry ID: in-batch map first, then DB fallback.
-        $resolve = function (string $slug) use ($slugToEntryId, $sectionHandle): ?int {
-            if (isset($slugToEntryId[$slug])) {
-                return $slugToEntryId[$slug];
-            }
-
-            return Entry::find()
-                ->section($sectionHandle)
-                ->slug($slug)
-                ->status(null)
-                ->one()?->id;
-        };
-
-        foreach ($allCardRefs as $entryId => $refSets) {
-            // Locate this entry's page result so warnings land on the right row.
-            $resultIdx = null;
-            foreach ($pageResults as $i => $r) {
-                if (($r['entryId'] ?? null) === $entryId) {
-                    $resultIdx = $i;
-                    break;
-                }
-            }
-
-            if ($resultIdx === null) {
-                continue;
-            }
-
-            $entry = Entry::find()->id($entryId)->status(null)->one();
-            if (!$entry) {
-                continue;
-            }
-
-            // Ordered nested blocks — positions match MatrixBuilder's emitted order.
-            $blocks = $entry->getFieldValue('contentBlocks')->status(null)->all();
-
-            foreach ($refSets as $refSet) {
-                $blockIndex = $refSet['blockIndex'] ?? null;
-                $block      = $blockIndex !== null ? ($blocks[$blockIndex] ?? null) : null;
-
-                if (!$block || $block->getType()->handle !== 'entryCards') {
-                    $pageResults[$resultIdx]['warnings'][] = 'Cards block at position '
-                        . var_export($blockIndex, true) . ' not found — card references skipped.';
-                    continue;
-                }
-
-                $mode  = $refSet['mode'] ?? '';
-                $dirty = false;
-
-                if ($mode === 'pages' && !empty($refSet['singlePageMode'])) {
-                    // D6: one literal page — a single manual card row rendering
-                    // from the referenced entry's own card fields.
-                    $slug       = $refSet['refs'][0]['slug'] ?? '';
-                    $resolvedId = $slug !== '' ? $resolve($slug) : null;
-
-                    if ($resolvedId !== null) {
-                        $block->setFieldValue('entryCards', [
-                            'new1' => [
-                                'type'   => 'card',
-                                'fields' => [
-                                    'entry'               => [$resolvedId],
-                                    'useEntryCardDetails' => true,
-                                ],
-                            ],
-                        ]);
-                        $dirty = true;
-                    } else {
-                        $pageResults[$resultIdx]['warnings'][] = "Card reference slug '{$slug}' not found — card left empty.";
-                    }
-                } elseif ($mode === 'pages') {
-                    $entryIds = [];
-
-                    foreach ($refSet['refs'] ?? [] as $ref) {
-                        $slug = $ref['slug'] ?? '';
-                        if ($slug === '') {
-                            continue;
-                        }
-
-                        $resolvedId = $resolve($slug);
-                        if ($resolvedId !== null) {
-                            $entryIds[] = $resolvedId;
-                        } else {
-                            $pageResults[$resultIdx]['warnings'][] = "Card reference slug '{$slug}' not found — card skipped.";
-                        }
-                    }
-
-                    $block->setFieldValue('entries', $entryIds);
-                    $dirty = true;
-                } elseif ($mode === 'children') {
-                    $slug = $refSet['parent']['slug'] ?? '';
-                    if ($slug === '') {
-                        // Host-page children — useChildPages was set in pass 1.
-                        continue;
-                    }
-
-                    $parentEntryId = $resolve($slug);
-                    if ($parentEntryId !== null) {
-                        $block->setFieldValue('entries', [$parentEntryId]);
-                        $dirty = true;
-                    } else {
-                        $pageResults[$resultIdx]['warnings'][] = "Children parent slug '{$slug}' not found — children cards not populated.";
-                    }
-                }
-
-                if ($dirty && !$dryRun) {
-                    try {
-                        // Nested matrix blocks are elements — saving the block
-                        // persists its field changes; the owner needs no re-save.
-                        if (!Craft::$app->elements->saveElement($block)) {
-                            $pageResults[$resultIdx]['warnings'][] = 'Could not save card references: '
-                                . implode('; ', $block->getFirstErrors());
-                        }
-                    } catch (Throwable $e) {
-                        $pageResults[$resultIdx]['warnings'][] = 'Could not save card references: ' . $e->getMessage();
-                    }
-                }
             }
         }
     }

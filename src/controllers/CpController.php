@@ -396,6 +396,7 @@ class CpController extends Controller
         $hasErrors     = false;
         $hasWarnings   = false;
         $slugToEntryId = [];
+        $allCardRefs   = [];  // Deferred card ref sets keyed by entry ID, for pass 2
 
         // Resolve section for structure positioning.
         $config        = Craft::$app->config->getConfigFromFile('contentiq');
@@ -414,6 +415,11 @@ class CpController extends Controller
 
             if ($entryId !== null && $slug !== '') {
                 $slugToEntryId[$slug] = $entryId;
+            }
+
+            // Collect deferred card ref sets from this page for pass 2 resolution.
+            if ($entryId !== null && !empty($result['cardRefs'])) {
+                $allCardRefs[$entryId] = array_values($result['cardRefs']);
             }
 
             if ($entryId !== null && $structureId !== null && !$isHomepage) {
@@ -458,6 +464,24 @@ class CpController extends Controller
             }
             if (!empty($result['warnings'])) {
                 $hasWarnings = true;
+            }
+        }
+
+        // PASS 2: resolve deferred card references now the slug map is complete.
+        $cardWarnings = $importService->resolveCardReferences($allCardRefs, $slugToEntryId);
+
+        foreach ($cardWarnings as $entryId => $warnings) {
+            if (empty($warnings)) {
+                continue;
+            }
+
+            $hasWarnings = true;
+
+            foreach ($pageResults as $i => $r) {
+                if (($r['entryId'] ?? null) === $entryId) {
+                    array_push($pageResults[$i]['warnings'], ...$warnings);
+                    break;
+                }
             }
         }
 
@@ -850,6 +874,18 @@ class CpController extends Controller
                 'success' => false,
                 'error'   => $result['error'] ?? 'Import failed.',
             ]);
+        }
+
+        // PASS 2: resolve deferred card references (single page — DB lookups only).
+        if (!empty($result['cardRefs']) && ($result['entryId'] ?? null) !== null) {
+            $cardWarnings = ContentIQImporter::$plugin->imports->resolveCardReferences(
+                [$result['entryId'] => array_values($result['cardRefs'])],
+                [],
+            );
+
+            foreach ($cardWarnings[$result['entryId']] ?? [] as $warning) {
+                Craft::warning("Widget sync card refs ({$slug}): {$warning}", __METHOD__);
+            }
         }
 
         // Upsert the sync timestamp and notes.

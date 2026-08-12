@@ -1288,10 +1288,126 @@ class MatrixBuilder extends Component
                     'slug' => $parentSlug ?? '',
                     'id' => $parentId,
                 ];
+                // Retain the raw intro nodes (in memory only, like all deferred
+                // refs) so pass 2 can build manual fallback cards from the
+                // block's own prose if the parent slug never resolves.
+                $cardRefs['intro'] = $sourceFields['intro'] ?? [];
             }
         }
 
         return [$additionalFields, $cardRefs];
+    }
+
+    /**
+     * Builds manual fallback card rows from a children-mode block's intro nodes.
+     *
+     * Children mode exports no card items — only {mode, intro, parent} — but the
+     * intro sweep carries everything in the marked range, including the per-card
+     * headings and ctaButtons from the source prose. When pass 2 cannot resolve
+     * the parent slug (page not exported yet), this parses that prose back into
+     * cards so the block renders real manual cards instead of nothing.
+     *
+     * The card pattern rule mirrors detected mode in ContentiQ's serialisers
+     * (Cards.ts / ProseMirrorBlockBuilder): the card heading level is the
+     * most prominent (lowest-numbered) level >= 2 appearing 2+ times. Nodes
+     * before the first card heading are the true intro; each card heading
+     * starts an item whose paragraphs/lists become the body and whose
+     * ctaButton becomes the button (last wins, as in detected mode).
+     *
+     * Items are built through the standard cards innerMatrix mapping so the
+     * fallback uses the same field handlers as detected-mode cards
+     * (heading → cardTitle, body → cardText, button → actionButtonLabel).
+     * No repeating pattern ⇒ cardCount 0, and the caller keeps the block as-is.
+     *
+     * @param array $introNodes ContentNode[] retained in the deferred ref.
+     * @return array{introHtml: string, cardRows: array<string, array>, cardCount: int}
+     */
+    public function buildChildrenFallbackCards(array $introNodes): array
+    {
+        $none = ['introHtml' => '', 'cardRows' => [], 'cardCount' => 0];
+
+        $innerConfig = $this->_mapping['cards']['innerMatrix'] ?? null;
+        if ($innerConfig === null || empty($introNodes)) {
+            return $none;
+        }
+
+        // Pre-scan: count qualifying heading levels to find the card pattern.
+        $levelCounts = [];
+        foreach ($introNodes as $node) {
+            if (($node['type'] ?? '') === 'heading'
+                && (int)($node['level'] ?? 0) >= 2
+                && trim((string)($node['text'] ?? '')) !== ''
+            ) {
+                $level = (int)$node['level'];
+                $levelCounts[$level] = ($levelCounts[$level] ?? 0) + 1;
+            }
+        }
+
+        $cardLevels = array_keys(array_filter($levelCounts, fn(int $count): bool => $count >= 2));
+        sort($cardLevels);
+        $cardHeadingLevel = $cardLevels[0] ?? null;
+
+        if ($cardHeadingLevel === null) {
+            return $none;
+        }
+
+        // Split: true intro before the first card heading, then one item per
+        // card heading, shaped exactly like a detected-mode card item.
+        $trueIntro = [];
+        $items     = [];
+        $current   = null;
+
+        foreach ($introNodes as $node) {
+            $type = $node['type'] ?? '';
+            $isCardHeading = $type === 'heading'
+                && (int)($node['level'] ?? 0) === $cardHeadingLevel
+                && trim((string)($node['text'] ?? '')) !== '';
+
+            if ($isCardHeading) {
+                if ($current !== null) {
+                    $items[] = $current;
+                }
+                $current = [
+                    'heading' => array_diff_key($node, ['type' => true]),
+                    'body'    => [],
+                    'button'  => null,
+                    'image'   => null,
+                ];
+            } elseif ($current === null) {
+                $trueIntro[] = $node;
+            } elseif ($type === 'ctaButton') {
+                $current['button'] = [
+                    'label' => (string)($node['label'] ?? ''),
+                    'url'   => (string)($node['url'] ?? ''),
+                ];
+            } else {
+                $current['body'][] = $node;
+            }
+        }
+
+        if ($current !== null) {
+            $items[] = $current;
+        }
+
+        // Build rows through the standard mapping. Intro nodes carry no images,
+        // so dryRun=true is safe and guarantees no download side effects.
+        $imageReport = [];
+        $cardRows    = [];
+        $counter     = 0;
+
+        foreach ($items as $item) {
+            [$innerFields] = $this->_buildSingleInnerEntry($innerConfig, $item, $imageReport, true);
+            $cardRows['new' . (++$counter)] = [
+                'type'   => $innerConfig['innerType'],
+                'fields' => $innerFields,
+            ];
+        }
+
+        return [
+            'introHtml' => ContentIQImporter::$plugin->nodes->render($trueIntro),
+            'cardRows'  => $cardRows,
+            'cardCount' => count($cardRows),
+        ];
     }
 
     /**

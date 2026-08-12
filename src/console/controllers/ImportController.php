@@ -53,6 +53,14 @@ class ImportController extends Controller
      */
     private ?int $_lastEntryId = null;
 
+    /**
+     * Deferred card ref sets from the most recent _runSinglePage call
+     * (collected for pass 2 resolution).
+     *
+     * @var array
+     */
+    private array $_lastCardRefs = [];
+
     // Public Methods
     // =========================================================================
 
@@ -144,7 +152,17 @@ class ImportController extends Controller
         }
 
         // Single-page format has 'document' and 'blocks' at the top level.
-        return $this->_runSinglePage($data, $importService);
+        $exitCode = $this->_runSinglePage($data, $importService);
+
+        // PASS 2: resolve deferred card references (single page — DB lookups only).
+        if (!$this->dryRun && $this->_lastEntryId !== null && !empty($this->_lastCardRefs)) {
+            $this->_printCardRefWarnings($importService->resolveCardReferences(
+                [$this->_lastEntryId => array_values($this->_lastCardRefs)],
+                [],
+            ));
+        }
+
+        return $exitCode;
     }
 
     // Private Methods
@@ -163,6 +181,7 @@ class ImportController extends Controller
 
         $exitCode      = ExitCode::OK;
         $slugToEntryId = [];
+        $allCardRefs   = [];  // Deferred card ref sets keyed by entry ID, for pass 2
 
         // Resolve section for structure positioning.
         $config        = Craft::$app->config->getConfigFromFile('contentiq');
@@ -177,6 +196,17 @@ class ImportController extends Controller
 
             if ($result !== ExitCode::OK) {
                 $exitCode = ExitCode::UNSPECIFIED_ERROR;
+            }
+
+            // Collect the slug map and deferred card refs for pass 2.
+            if (!$this->dryRun && $this->_lastEntryId !== null) {
+                $slug = $pageData['document']['slug'] ?? '';
+                if ($slug !== '') {
+                    $slugToEntryId[$slug] = $this->_lastEntryId;
+                }
+                if (!empty($this->_lastCardRefs)) {
+                    $allCardRefs[$this->_lastEntryId] = array_values($this->_lastCardRefs);
+                }
             }
 
             // Handle hierarchy after import.
@@ -228,7 +258,27 @@ class ImportController extends Controller
             }
         }
 
+        // PASS 2: resolve deferred card references now the slug map is complete.
+        if (!$this->dryRun && !empty($allCardRefs)) {
+            $this->stdout("\nResolving card references…\n", Console::BOLD);
+            $this->_printCardRefWarnings($importService->resolveCardReferences($allCardRefs, $slugToEntryId));
+        }
+
         return $exitCode;
+    }
+
+    /**
+     * Prints pass-2 card reference warnings keyed by owner entry ID.
+     *
+     * @param array<int, string[]> $warningsByEntry
+     */
+    private function _printCardRefWarnings(array $warningsByEntry): void
+    {
+        foreach ($warningsByEntry as $entryId => $warnings) {
+            foreach ($warnings as $warning) {
+                $this->stdout("  Cards (entry {$entryId}): {$warning}\n", Console::FG_YELLOW);
+            }
+        }
     }
 
     /**
@@ -242,8 +292,9 @@ class ImportController extends Controller
     {
         $result = $importService->importPage($data, $this->dryRun, $this->verbose);
 
-        // Store entry ID for hierarchy resolution in _runBatch.
-        $this->_lastEntryId = $result['entryId'] ?? null;
+        // Store entry ID and deferred card refs for _runBatch / pass 2.
+        $this->_lastEntryId  = $result['entryId'] ?? null;
+        $this->_lastCardRefs = $result['cardRefs'] ?? [];
 
         $prefix = $this->dryRun ? '[DRY RUN] ' : '';
 

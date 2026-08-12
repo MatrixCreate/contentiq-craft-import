@@ -371,6 +371,173 @@ class ImportService extends Component
         return $this->_getContentTypesMap();
     }
 
+    /**
+     * PASS 2: Resolves deferred card references in entryCards blocks.
+     *
+     * After all pages in a run are imported (so the slug→entry ID map is
+     * complete), each deferred ref set recorded by MatrixBuilder is applied to
+     * its block:
+     *   - pages (2+ refs): populate the block's `entries` relation in order.
+     *   - pages (single ref, D6): write one manual `card` row with the `entry`
+     *     relation + useEntryCardDetails, so Craft's single-entry auto-expansion
+     *     never fires (pages mode is literal).
+     *   - children (arbitrary parent): `entries` = [parent] — the template's
+     *     single-entry expansion renders the parent's children. If the parent
+     *     cannot be resolved (not in the batch, not in Craft), fall back to
+     *     manual cards parsed from the block's own intro prose.
+     *   - children (parent == host page): nothing deferred (useChildPages set
+     *     in pass 1).
+     *
+     * Blocks are located by blockIndex — the 0-based position among the matrix
+     * blocks MatrixBuilder emitted, which matches the saved contentBlocks order.
+     * Nested matrix blocks are elements, so each modified block is saved
+     * directly; the owner entry is never re-saved.
+     *
+     * Shared by every import entry point (SyncJob, CLI import, CP upload).
+     *
+     * @param array $allCardRefs   Deferred ref sets keyed by entryId; each value is a LIST
+     *                             of {blockIndex, mode, refs?|parent?, intro?, singlePageMode?}.
+     * @param array $slugToEntryId In-run slug→entry ID map from pass 1.
+     * @param bool  $dryRun        If true, resolve and warn but write nothing.
+     * @return array<int, string[]> Warnings keyed by owner entry ID.
+     */
+    public function resolveCardReferences(array $allCardRefs, array $slugToEntryId, bool $dryRun = false): array
+    {
+        $config        = Craft::$app->config->getConfigFromFile('contentiq');
+        $sectionHandle = $config['section'] ?? 'pages';
+
+        // Resolve a page slug to an entry ID: in-run map first, then DB fallback.
+        $resolve = function (string $slug) use ($slugToEntryId, $sectionHandle): ?int {
+            if (isset($slugToEntryId[$slug])) {
+                return $slugToEntryId[$slug];
+            }
+
+            return Entry::find()
+                ->section($sectionHandle)
+                ->slug($slug)
+                ->status(null)
+                ->one()?->id;
+        };
+
+        $warningsByEntry = [];
+
+        foreach ($allCardRefs as $entryId => $refSets) {
+            $warn = function (string $message) use (&$warningsByEntry, $entryId): void {
+                $warningsByEntry[$entryId][] = $message;
+            };
+
+            $entry = Entry::find()->id($entryId)->status(null)->one();
+            if (!$entry) {
+                continue;
+            }
+
+            // Ordered nested blocks — positions match MatrixBuilder's emitted order.
+            $blocks = $entry->getFieldValue('contentBlocks')->status(null)->all();
+
+            foreach ($refSets as $refSet) {
+                $blockIndex = $refSet['blockIndex'] ?? null;
+                $block      = $blockIndex !== null ? ($blocks[$blockIndex] ?? null) : null;
+
+                if (!$block || $block->getType()->handle !== 'entryCards') {
+                    $warn('Cards block at position '
+                        . var_export($blockIndex, true) . ' not found — card references skipped.');
+                    continue;
+                }
+
+                $mode  = $refSet['mode'] ?? '';
+                $dirty = false;
+
+                if ($mode === 'pages' && !empty($refSet['singlePageMode'])) {
+                    // D6: one literal page — a single manual card row rendering
+                    // from the referenced entry's own card fields.
+                    $slug       = $refSet['refs'][0]['slug'] ?? '';
+                    $resolvedId = $slug !== '' ? $resolve($slug) : null;
+
+                    if ($resolvedId !== null) {
+                        $block->setFieldValue('entryCards', [
+                            'new1' => [
+                                'type'   => 'card',
+                                'fields' => [
+                                    'entry'               => [$resolvedId],
+                                    'useEntryCardDetails' => true,
+                                ],
+                            ],
+                        ]);
+                        $dirty = true;
+                    } else {
+                        $warn("Card reference slug '{$slug}' not found — card left empty.");
+                    }
+                } elseif ($mode === 'pages') {
+                    $entryIds = [];
+
+                    foreach ($refSet['refs'] ?? [] as $ref) {
+                        $slug = $ref['slug'] ?? '';
+                        if ($slug === '') {
+                            continue;
+                        }
+
+                        $resolvedId = $resolve($slug);
+                        if ($resolvedId !== null) {
+                            $entryIds[] = $resolvedId;
+                        } else {
+                            $warn("Card reference slug '{$slug}' not found — card skipped.");
+                        }
+                    }
+
+                    $block->setFieldValue('entries', $entryIds);
+                    $dirty = true;
+                } elseif ($mode === 'children') {
+                    $slug = $refSet['parent']['slug'] ?? '';
+                    if ($slug === '') {
+                        // Host-page children — useChildPages was set in pass 1.
+                        continue;
+                    }
+
+                    $parentEntryId = $resolve($slug);
+                    if ($parentEntryId !== null) {
+                        $block->setFieldValue('entries', [$parentEntryId]);
+                        $dirty = true;
+                    } else {
+                        // Parent page isn't in this run or in Craft (not exported
+                        // yet). Fall back to manual cards parsed from the block's
+                        // own prose so it renders real cards instead of nothing.
+                        // The next sync rebuilds the block in automatic mode, so
+                        // the fallback self-heals once the parent is exported.
+                        $fallback = ContentIQImporter::$plugin->matrixBuilder
+                            ->buildChildrenFallbackCards($refSet['intro'] ?? []);
+
+                        if ($fallback['cardCount'] > 0) {
+                            $block->setFieldValue('cardsInThisBlock', 'manual');
+                            $block->setFieldValue('entryCards', $fallback['cardRows']);
+                            $block->setFieldValue('richText', $fallback['introHtml']);
+                            $dirty = true;
+                            $warn("Children parent slug '{$slug}' not found — created {$fallback['cardCount']} manual cards "
+                                . "from the block content instead. Unlock and re-sync after '{$slug}' is exported "
+                                . 'to switch to automatic child cards.');
+                        } else {
+                            $warn("Children parent slug '{$slug}' not found — children cards not populated.");
+                        }
+                    }
+                }
+
+                if ($dirty && !$dryRun) {
+                    try {
+                        // Nested matrix blocks are elements — saving the block
+                        // persists its field changes; the owner needs no re-save.
+                        if (!Craft::$app->elements->saveElement($block)) {
+                            $warn('Could not save card references: '
+                                . implode('; ', $block->getFirstErrors()));
+                        }
+                    } catch (Throwable $e) {
+                        $warn('Could not save card references: ' . $e->getMessage());
+                    }
+                }
+            }
+        }
+
+        return $warningsByEntry;
+    }
+
     // Private Methods
     // =========================================================================
 
