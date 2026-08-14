@@ -100,6 +100,43 @@ Craft::$app->getElements()->saveElement($entry, false);
 
 ---
 
+## DIFF-AWARE Matrix writes (`preserveBlockIdentity`)
+
+**Config key**: `config/contentiq.php` → `'preserveBlockIdentity' => true`. **Defaults to `false`.** Read in `ImportService::_getConfig()`'s defaults array and `importPage()` (`$preserveBlockIdentity = (bool)($config['preserveBlockIdentity'] ?? false);`), same pattern as `matrixField`/`seoField`/etc.
+
+### Why it's off by default
+
+Every sync used to rebuild the whole `contentBlocks` Matrix with `'new*'` keys, so Craft deleted and recreated every nested block on every save (per "Saving nested Matrix data" above: only an **integer** key updates an existing nested entry in place). That churns the DB and — worse — soft-deletes nested block elements, which cascades to and destroys any editor **provisional draft** attached to those blocks.
+
+This flag makes MatrixBuilder/ImportService reuse an unchanged TOP-LEVEL block's existing nested element id (so Craft updates it in place) instead of always emitting `'new*'`. It rewrites the core Matrix save path and **cannot be integration-tested outside a live Craft instance** (this repo only has standalone pure-PHP test scripts — no Craft runtime/test harness). Leave it off until a human has run through the LIVE-VALIDATION CHECKLIST below on a real Craft instance. When off (or when a block doesn't qualify — see Scope), behaviour is byte-identical to before this feature existed: every key is `'new*'`.
+
+### How it works
+
+1. `ImportService::importPage()` resolves the owner entry (`findExistingEntry()`) **before** calling `MatrixBuilder::build()` (moved up from its previous spot specifically for this), then loads `contentiq_block_syncs` for that owner into `block_id => nested_element_id`.
+2. That map is passed into `MatrixBuilder::build(..., $existingBlockMap)`. For each **top-level, non-grouped** block whose payload `id` is a key in the map, `build()` emits the mapped **int** element id as the Matrix key instead of `'new{N}'`. Every other block (no stable id, no mapping row, grouped, or a defensive guard trip — see `_resolveTopLevelKey()`) still gets `'new{N}'`.
+3. `build()` also returns `blockKeyConsumption`: emitted key => the payload block id(s) it represents, in emission order.
+4. After a successful save (existing-entry OR newly-created entry — a new entry gets its map recorded too, so the *second* sync can preserve identity), `ImportService::_recordBlockSyncMap()` zips `blockKeyConsumption` against the owner's saved top-level blocks in the same order (`$owner->getFieldValue($matrixHandle)->status(null)->all()` — Craft preserves the order the keys were provided in) to recover each block's real nested element id, upserts the map, and prunes rows for block ids no longer present. This is bookkeeping only, wrapped in its own try/catch — a failure here **cannot** fail the page; the next sync just rebuilds from scratch.
+5. The pre-existing empty-matrix guard (2d in `importPage()`) is left intact and takes priority: when it omits the matrix handle entirely (page had no importable blocks, existing blocks preserved), `contentiq_block_syncs` is **not** touched — nothing changed.
+
+### Scope — identity is preserved ONLY for top-level, non-grouped blocks
+
+- **Inner/nested blocks** (`textAndMediaBlock`, `accordionItem`, `card`, `actionButton`, …) **always** use `'new*'` — only the OUTER block's identity is preserved. Preserving the outer element id already saves its drafts/revisions; inner churn is accepted for this pass.
+- **Grouped blocks** (consecutive `text_and_media` merged into one outer entry — see "Text & Media grouping" above) **always** recreate (`'new*'`). Identity would have to be keyed on the group as a whole, and the grouping shape (which blocks merged together) can change between syncs — an ambiguous case. A recreate is safe (today's behaviour); a wrong-id reuse would be corruption.
+- A block with **no stable `id`** in the payload, or **no existing mapping row** (first sync, or a genuinely new block), falls back to `'new*'` — and gets recorded this run so the *next* sync can match it.
+- **Residual risk, not checked**: reuse does not verify the mapped element is still the same Craft entry TYPE the block would produce (e.g. block type changed at the same payload position between syncs). MatrixBuilder has no cheap way to check a live element's type without an extra Craft query per top-level block. Test this explicitly (see checklist) before relying on the flag for content that gets restructured.
+
+### LIVE-VALIDATION CHECKLIST (run on a real Craft instance before enabling)
+
+- [ ] Unchanged block on re-sync keeps its element id **and** any editor provisional draft attached to it.
+- [ ] Editing a block's content updates the same nested entry in place (no new row in `elements`/`entries`).
+- [ ] Adding a new block appears correctly (gets a `'new*'` key this sync, a real id recorded for next sync).
+- [ ] Removing a block deletes it (and its `contentiq_block_syncs` row is pruned).
+- [ ] A grouped `text_and_media` run round-trips correctly (still recreates every sync — confirm this is acceptable, not a regression from the ungated code path).
+- [ ] Reordering blocks in the payload re-syncs correctly (position isn't part of identity — only `id` is).
+- [ ] Changing a block's type at the same payload position does not corrupt the previously-mapped element (the residual risk above) — confirm Craft either rejects the mismatched save cleanly or that this scenario doesn't occur in practice for this project's content.
+
+---
+
 ## SEOmatic SeoSettings field
 
 Single field (handle: `seo`, type: `SeoSettings`). Not individual handles per meta tag.
@@ -780,6 +817,7 @@ Per-entry sync state for the sidebar widget. Created by `m250418_000000_add_entr
 | `locked` | boolean | Skip during batch sync when true |
 | `synced_at` | datetime | Last successful sync timestamp |
 | `notes` | text | Aggregated block notes from last sync |
+| `contentiq_page_id` | int, nullable, indexed | ContentIQ `document.id` for this entry. Primary identity key in `ImportService::findExistingEntry()` — checked before the content_type/homepage/slug lookups, so a slug rename (in ContentIQ or in Craft) still resolves to the same entry instead of creating a duplicate. Not unique (legacy rows and multi-site can leave it null/shared). Added by `m260813_000000_add_page_id_to_entry_syncs`. |
 
 ### `contentiq_office_syncs`
 
@@ -803,6 +841,20 @@ Single-row consent/lock state for globals syncing. Created by `m260712_000000_ad
 | `locked` | boolean | Default `true`; a missing row is treated as locked |
 | `synced_at` | datetime | Last successful globals sync (nullable) |
 | `notes` | text | Reserved (nullable) |
+
+### `contentiq_block_syncs`
+
+Maps a (owner entry, payload block id) pair to the TOP-LEVEL nested Matrix element id it produced. Only populated/consulted when the `preserveBlockIdentity` config flag is on (defaults to `false` — see "DIFF-AWARE Matrix writes" above). Created by `m260814_000002_add_block_syncs_table`.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | int PK | Auto-increment |
+| `owner_element_id` | int, FK → elements (CASCADE) | The page/homepage entry that owns the Matrix field |
+| `block_id` | varchar(255) | The payload block's stable `id` (e.g. `"Call to Action-0"`) |
+| `nested_element_id` | int, FK → elements (CASCADE) | The top-level nested Matrix element this block id currently maps to |
+| `dateCreated` / `dateUpdated` | datetime | |
+
+Unique on `(owner_element_id, block_id)`. Rows are upserted after a successful save and pruned when a block id is no longer produced by a sync — see `ImportService::_recordBlockSyncMap()`.
 
 ---
 

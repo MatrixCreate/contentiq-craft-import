@@ -36,6 +36,13 @@ class LinkHelper
             return 'https://';
         }
 
+        // A disallowed scheme (javascript:, data:, vbscript:, …) collapses to
+        // the same inert placeholder as an empty URL — it must never reach the
+        // Hyper field, which would render it as a clickable stored-XSS link.
+        if (UrlSafety::safeHref($trimmed) === '#') {
+            return 'https://';
+        }
+
         return $trimmed;
     }
 }

@@ -24,6 +24,9 @@ class Install extends Migration
         $this->_createEntrySyncsTable();
         $this->_createOfficeSyncsTable();
         $this->_createGlobalsSyncTable();
+        $this->_createAssetSyncsTable();
+        $this->_createCtaSyncsTable();
+        $this->_createBlockSyncsTable();
 
         return true;
     }
@@ -33,6 +36,9 @@ class Install extends Migration
      */
     public function safeDown(): bool
     {
+        $this->dropTableIfExists('{{%contentiq_block_syncs}}');
+        $this->dropTableIfExists('{{%contentiq_cta_syncs}}');
+        $this->dropTableIfExists('{{%contentiq_asset_syncs}}');
         $this->dropTableIfExists('{{%contentiq_globals_sync}}');
         $this->dropTableIfExists('{{%contentiq_office_syncs}}');
         $this->dropTableIfExists('{{%contentiq_entry_syncs}}');
@@ -85,10 +91,11 @@ class Install extends Migration
     private function _createEntrySyncsTable(): void
     {
         $this->createTable('{{%contentiq_entry_syncs}}', [
-            'element_id' => $this->integer()->notNull(),
-            'locked'     => $this->boolean()->notNull()->defaultValue(false),
-            'synced_at'  => $this->dateTime()->null(),
-            'notes'      => $this->text(),
+            'element_id'        => $this->integer()->notNull(),
+            'locked'            => $this->boolean()->notNull()->defaultValue(false),
+            'synced_at'         => $this->dateTime()->null(),
+            'notes'             => $this->text(),
+            'contentiq_page_id' => $this->integer()->null(),
             'PRIMARY KEY([[element_id]])',
         ]);
 
@@ -100,6 +107,10 @@ class Install extends Migration
             'id',
             'CASCADE',
         );
+
+        // Non-unique — maps a ContentIQ page id to its Craft entry so
+        // findExistingEntry() can resolve by stable id instead of slug.
+        $this->createIndex(null, '{{%contentiq_entry_syncs}}', ['contentiq_page_id']);
     }
 
     /**
@@ -142,6 +153,98 @@ class Install extends Migration
             null,
             '{{%contentiq_office_syncs}}',
             'element_id',
+            '{{%elements}}',
+            'id',
+            'CASCADE',
+        );
+    }
+
+    /**
+     * Creates the contentiq_asset_syncs table (image key → element id map).
+     *
+     * @return void
+     */
+    private function _createAssetSyncsTable(): void
+    {
+        $this->createTable('{{%contentiq_asset_syncs}}', [
+            'id'          => $this->primaryKey(),
+            'image_key'   => $this->string(255)->notNull(),
+            'element_id'  => $this->integer()->notNull(),
+            'dateCreated' => $this->dateTime()->notNull(),
+            'dateUpdated' => $this->dateTime()->notNull(),
+        ]);
+
+        $this->createIndex(null, '{{%contentiq_asset_syncs}}', ['image_key'], true);
+
+        $this->addForeignKey(
+            null,
+            '{{%contentiq_asset_syncs}}',
+            'element_id',
+            '{{%elements}}',
+            'id',
+            'CASCADE',
+        );
+    }
+
+    /**
+     * Creates the contentiq_cta_syncs table ((page_id, block_id) → element id map).
+     *
+     * @return void
+     */
+    private function _createCtaSyncsTable(): void
+    {
+        $this->createTable('{{%contentiq_cta_syncs}}', [
+            'id'          => $this->primaryKey(),
+            'page_id'     => $this->integer()->notNull(),
+            'block_id'    => $this->string(255)->notNull(),
+            'element_id'  => $this->integer()->notNull(),
+            'dateCreated' => $this->dateTime()->notNull(),
+            'dateUpdated' => $this->dateTime()->notNull(),
+        ]);
+
+        $this->createIndex(null, '{{%contentiq_cta_syncs}}', ['page_id', 'block_id'], true);
+
+        $this->addForeignKey(
+            null,
+            '{{%contentiq_cta_syncs}}',
+            'element_id',
+            '{{%elements}}',
+            'id',
+            'CASCADE',
+        );
+    }
+
+    /**
+     * Creates the contentiq_block_syncs table ((owner_element_id, block_id) → nested element id map).
+     *
+     * @return void
+     */
+    private function _createBlockSyncsTable(): void
+    {
+        $this->createTable('{{%contentiq_block_syncs}}', [
+            'id'                => $this->primaryKey(),
+            'owner_element_id'  => $this->integer()->notNull(),
+            'block_id'          => $this->string(255)->notNull(),
+            'nested_element_id' => $this->integer()->notNull(),
+            'dateCreated'       => $this->dateTime()->notNull(),
+            'dateUpdated'       => $this->dateTime()->notNull(),
+        ]);
+
+        $this->createIndex(null, '{{%contentiq_block_syncs}}', ['owner_element_id', 'block_id'], true);
+
+        $this->addForeignKey(
+            null,
+            '{{%contentiq_block_syncs}}',
+            'nested_element_id',
+            '{{%elements}}',
+            'id',
+            'CASCADE',
+        );
+
+        $this->addForeignKey(
+            null,
+            '{{%contentiq_block_syncs}}',
+            'owner_element_id',
             '{{%elements}}',
             'id',
             'CASCADE',
