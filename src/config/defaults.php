@@ -230,15 +230,20 @@ return [
             'entryType'    => 'blogCategory',
             'contentField' => 'body',
         ],
+        // These two rows use the Craft Starter's real field/entry-type handles,
+        // verified against config/project/entryTypes/caseStudy--*.yaml and
+        // team--*.yaml. A site with different handles must override this slug
+        // under 'content_types' in its own config/contentiq.php — the file
+        // override always wins over these defaults (see _getContentTypesMap()).
         'case_studies' => [
             'section'      => 'caseStudies',
             'entryType'    => 'caseStudy',
-            'contentField' => 'articleContent',
+            'contentField' => 'articleBody',
         ],
         'team' => [
             'section'      => 'team',
-            'entryType'    => 'teamMember',
-            'contentField' => 'body',
+            'entryType'    => 'team',
+            'contentField' => 'bio',
         ],
     ],
 ];

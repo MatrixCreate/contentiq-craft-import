@@ -153,6 +153,37 @@ check('static prefix extraction', 'blog/category', GlobalsTransforms::staticUriP
 check('leading token → empty prefix, no drift', false, GlobalsTransforms::urlPrefixDrifts('anything', '{slug}'));
 
 // -----------------------------------------------------------------------------
+// content_types map — every row must have the keys _getContentTypesMap()
+// consumers rely on, with non-empty section/entryType/contentField.
+// headingField is genuinely optional (see blog_categories) so it is not
+// required. This is a shape guard, not a live-Craft check — it cannot catch
+// a handle that doesn't exist in a given site's schema, only a row that's
+// missing a piece the importer will dereference unconditionally.
+// -----------------------------------------------------------------------------
+echo "\ncontent_types map shape\n";
+
+$defaults = require __DIR__ . '/../src/config/defaults.php';
+$contentTypes = $defaults['content_types'] ?? [];
+
+check('content_types is non-empty', true, count($contentTypes) > 0);
+
+foreach ($contentTypes as $slug => $row) {
+    check("{$slug}: is array", true, is_array($row));
+
+    if (!is_array($row)) {
+        continue;
+    }
+
+    foreach (['section', 'entryType', 'contentField'] as $requiredKey) {
+        check(
+            "{$slug}: has non-empty '{$requiredKey}'",
+            true,
+            isset($row[$requiredKey]) && $row[$requiredKey] !== '',
+        );
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Summary.
 // -----------------------------------------------------------------------------
 echo "\n" . ($failures === 0 ? "OK" : "FAILED") . ": {$passes} passed, {$failures} failed\n";
