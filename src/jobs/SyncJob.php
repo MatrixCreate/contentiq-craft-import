@@ -92,13 +92,21 @@ class SyncJob extends BaseJob
                 ->one();
 
             if ($existingEntry !== null) {
-                $isLocked = (new Query())
-                    ->select(['locked'])
+                $syncRow = (new Query())
+                    ->select(['locked', 'notes'])
                     ->from('{{%contentiq_entry_syncs}}')
                     ->where(['element_id' => $existingEntry->id])
-                    ->scalar();
+                    ->one();
+
+                $isLocked = (bool)($syncRow['locked'] ?? false);
 
                 if ($isLocked) {
+                    // Nothing is written this run for a locked entry — 'blocks'
+                    // genuinely stays empty (no MatrixBuilder run happened here
+                    // to report on). blockNotes, however, has a real stored value
+                    // from the last successful sync (contentiq_entry_syncs.notes)
+                    // — surface it instead of a hardcoded '' so the report
+                    // doesn't imply the entry has no content.
                     $pageResults[] = [
                         'success' => true,
                         'slug' => $pageSlug,
@@ -109,7 +117,7 @@ class SyncJob extends BaseJob
                         'parentSlug' => $pageData['document']['parent_slug'] ?? null,
                         'blocks' => [],
                         'images' => [],
-                        'blockNotes' => '',
+                        'blockNotes' => (string)($syncRow['notes'] ?? ''),
                         'seoFieldCount' => 0,
                         'warnings' => ['Skipped — entry is locked.'],
                         'error' => null,

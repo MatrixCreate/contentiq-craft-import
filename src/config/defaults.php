@@ -72,6 +72,10 @@
  *   headingField — (optional) field to receive the H1. When set, the first
  *                  level-1 heading is lifted out as plain text into this field
  *                  and removed from the body so it isn't rendered twice.
+ *   blocksField  — (optional) Matrix field handle to receive `blocks[]` when
+ *                  the collection child carries it (ContentIQ's wire contract
+ *                  is either `blocks` or `content`, never both). Defaults to
+ *                  config['matrixField'] ('contentBlocks') when unset.
  *
  * These defaults match the Craft Starter. Override per-project in
  * config/contentiq.php under the 'content_types' key (per-slug replace).
@@ -239,7 +243,17 @@ return [
             'section'      => 'caseStudies',
             'entryType'    => 'caseStudy',
             'contentField' => 'articleBody',
+            // caseStudy shares the `headline` field with article (same field UID),
+            // and caseStudy.twig renders it as the entry's <h1> exactly as
+            // article.twig does. Without this the H1 stays in the body, and once
+            // blocks own the page the stale headline is never cleared — the
+            // duplicate-<h1> defect the blocks-present clearing rule exists to
+            // prevent. The starter/groves/lucia already set this in their saved CP
+            // mappings; the default was simply missing.
+            'headingField' => 'headline',
         ],
+        // `team` intentionally has no headingField — team.twig does not render
+        // `headline`, and the team entry type does not carry that field.
         'team' => [
             'section'      => 'team',
             'entryType'    => 'team',

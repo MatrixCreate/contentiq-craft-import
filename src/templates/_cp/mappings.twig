@@ -36,6 +36,7 @@
                             <th>{{ 'Entry Type'|t('contentiq-importer') }}</th>
                             <th>{{ 'Content Field'|t('contentiq-importer') }}</th>
                             <th>{{ 'Heading Field'|t('contentiq-importer') }}</th>
+                            <th>{{ 'Blocks Field'|t('contentiq-importer') }}</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -62,13 +63,15 @@
                                     <td>{{ mapping.entryType ?? '—' }}</td>
                                     <td>{{ mapping.contentField ?? '—' }}</td>
                                     <td>{{ mapping.headingField ?? '—' }}</td>
+                                    <td>{{ mapping.blocksField ?? '—' }}</td>
                                 {% else %}
                                     <td class="ciq-row"
                                         data-slug="{{ row.slug }}"
                                         data-section="{{ mapping.section ?? '' }}"
                                         data-entrytype="{{ mapping.entryType ?? '' }}"
                                         data-contentfield="{{ mapping.contentField ?? '' }}"
-                                        data-headingfield="{{ mapping.headingField ?? '' }}">
+                                        data-headingfield="{{ mapping.headingField ?? '' }}"
+                                        data-blocksfield="{{ mapping.blocksField ?? '' }}">
                                         <div class="select">
                                             <select class="ciq-section" name="mappings[{{ row.slug }}][section]">
                                                 <option value="">{{ '— not mapped —'|t('contentiq-importer') }}</option>
@@ -91,6 +94,11 @@
                                     <td>
                                         <div class="select">
                                             <select class="ciq-headingfield" name="mappings[{{ row.slug }}][headingField]"></select>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <div class="select">
+                                            <select class="ciq-blocksfield" name="mappings[{{ row.slug }}][blocksField]"></select>
                                         </div>
                                     </td>
                                 {% endif %}
@@ -173,11 +181,13 @@
             var typeSel    = tr.querySelector('.ciq-entrytype');
             var contentSel = tr.querySelector('.ciq-contentfield');
             var headingSel = tr.querySelector('.ciq-headingfield');
+            var blocksSel  = tr.querySelector('.ciq-blocksfield');
 
             function refreshFields() {
                 var et = entryType(sectionSel.value, typeSel.value);
                 fill(contentSel, et ? (et.ckeditorFields || []) : [], contentSel.dataset.want || '', '— none —');
                 fill(headingSel, et ? (et.plainTextFields || []) : [], headingSel.dataset.want || '', '— none —');
+                fill(blocksSel, et ? (et.matrixFields || []) : [], blocksSel.dataset.want || '', '— default —');
             }
 
             function refreshTypes() {
@@ -189,6 +199,7 @@
             typeSel.dataset.want    = cell.dataset.entrytype || '';
             contentSel.dataset.want = cell.dataset.contentfield || '';
             headingSel.dataset.want = cell.dataset.headingfield || '';
+            blocksSel.dataset.want  = cell.dataset.blocksfield || '';
 
             // Pre-select the section, then build the dependent selects. A stored
             // section that no longer exists gets a "(missing)" option so it
@@ -208,11 +219,13 @@
                 typeSel.dataset.want    = '';
                 contentSel.dataset.want = '';
                 headingSel.dataset.want = '';
+                blocksSel.dataset.want  = '';
                 refreshTypes();
             });
             typeSel.addEventListener('change', function() {
                 contentSel.dataset.want = '';
                 headingSel.dataset.want = '';
+                blocksSel.dataset.want  = '';
                 refreshFields();
             });
         });

@@ -5,6 +5,7 @@ namespace matrixcreate\contentiqimporter\services;
 use Craft;
 use craft\base\FieldInterface;
 use craft\elements\Entry;
+use craft\fields\ContentBlock;
 use craft\models\FieldLayout;
 use matrixcreate\contentiqimporter\ContentIQImporter;
 use matrixcreate\contentiqimporter\helpers\LinkHelper;
@@ -138,60 +139,15 @@ class ImportService extends Component
             ContentIQImporter::$plugin->images->prepare($volumeHandle, $folderPath);
 
             // -----------------------------------------------------------------------
-            // 5. Prepare MatrixBuilder (builds merged mapping once).
+            // 5. Build Matrix field data, hero field, and CTA entries from blocks.
+            //    Shared with the collection-child path when it carries blocks[]
+            //    (see _buildBlockFieldValues()). The target field layout drives
+            //    the hero shape probe (§7.5 — ContentBlock vs flat handles).
             // -----------------------------------------------------------------------
-            ContentIQImporter::$plugin->matrixBuilder->prepare($config);
-
-            // -----------------------------------------------------------------------
-            // 6. Build Matrix field data from blocks.
-            //    Hero blocks are handled separately (entry.hero field, not contentBlocks).
-            // -----------------------------------------------------------------------
-            $blocks = $data['blocks'] ?? [];
-
-            // Extract hero block before passing to MatrixBuilder.
-            // CTA blocks pass through MatrixBuilder (it skips them with a report)
-            // and are resolved separately after the entry is available.
-            $heroBlock     = null;
-            $ctaBlocks     = [];
-            $contentBlocks = [];
-            foreach ($blocks as $block) {
-                $blockType = $block['type'] ?? '';
-                if ($blockType === 'hero') {
-                    $heroBlock = $block;
-                } else {
-                    if ($blockType === 'call_to_action') {
-                        $ctaBlocks[] = $block;
-                    }
-                    $contentBlocks[] = $block;
-                }
-            }
-
-            // Collect block notes for the sidebar widget.
-            $noteLines = [];
-            foreach ($blocks as $block) {
-                $note = $block['notes'] ?? '';
-                if (is_string($note) && trim($note) !== '') {
-                    $blockType = $block['type'] ?? 'unknown';
-                    $acronyms = ['usp' => 'USP', 'faq' => 'FAQ', 'cta' => 'CTA'];
-                    $blockLabel = ucwords(str_replace('_', ' ', $blockType));
-                    $blockLabel = strtr($blockLabel, array_combine(
-                        array_map('ucfirst', array_keys($acronyms)),
-                        array_values($acronyms),
-                    ));
-                    $noteLines[] = $blockLabel . "\n" . trim($note);
-                }
-            }
-            $result['blockNotes'] = implode("\n\n", $noteLines);
-
-            $built = ContentIQImporter::$plugin->matrixBuilder->build($contentBlocks, $dryRun, $slug);
-
-            $result['blocks']      = $built['blockReport'];
-            $result['images']      = $built['imageReport'];
-            $result['cardRefs']    = $built['cardRefs'] ?? [];  // Deferred card refs for SyncJob pass 2
-            $result['warnings']    = array_merge($result['warnings'], $built['warnings'] ?? []);
+            $blockFieldValues = $this->_buildBlockFieldValues($data, $dryRun, $result, $entryType->getFieldLayout());
 
             // -----------------------------------------------------------------------
-            // 7. Resolve SEO field values, card fields, and hero field.
+            // 6. Resolve SEO field values and card fields.
             // -----------------------------------------------------------------------
             $seoValues    = $this->_resolveSeoFields($data['seo'] ?? [], $config, $dryRun);
             $seoPopulated = array_filter($seoValues, fn($v) => $v !== '' && $v !== null && $v !== []);
@@ -199,13 +155,8 @@ class ImportService extends Component
 
             $cardValues = $this->_resolveCardFields($data['document']['card'] ?? null, $dryRun);
 
-            // Both pages and homepage use the same hero ContentBlock field.
-            $heroData = $heroBlock !== null
-                ? $this->_buildHeroField($heroBlock, $dryRun)
-                : null;
-
             // -----------------------------------------------------------------------
-            // 8. Find existing entry (Singles always exist; Structures match by slug).
+            // 7. Find existing entry (Singles always exist; Structures match by slug).
             // -----------------------------------------------------------------------
             if ($isHomepage) {
                 $existing = Entry::find()
@@ -226,7 +177,7 @@ class ImportService extends Component
             }
 
             // -----------------------------------------------------------------------
-            // 9. Dry run — stop before any writes.
+            // 8. Dry run — stop before any writes.
             // -----------------------------------------------------------------------
             if ($dryRun) {
                 $result['success'] = true;
@@ -235,51 +186,17 @@ class ImportService extends Component
             }
 
             // -----------------------------------------------------------------------
-            // 10. Resolve CTA blocks → create callToActionEntry entries and
-            //     patch their IDs into the matrixData placeholders.
+            // 9. Build the complete field values array. CTA blocks were already
+            //    resolved into $blockFieldValues by _buildBlockFieldValues().
             // -----------------------------------------------------------------------
-            $matrixData = $built['matrixData'];
-            $ctaIndex   = 0;
-
-            foreach ($matrixData as $key => &$entry) {
-                if (empty($entry['_cta'])) {
-                    continue;
-                }
-
-                unset($entry['_cta']);
-
-                if (!isset($ctaBlocks[$ctaIndex])) {
-                    $ctaIndex++;
-                    continue;
-                }
-
-                $ctaEntryId = $this->_resolveCtaEntry(
-                    $ctaBlocks[$ctaIndex],
-                    $result,
-                    $dryRun,
-                );
-                $ctaIndex++;
-
-                if ($ctaEntryId !== null) {
-                    $entry['fields']['chooseCallToAction'] = [$ctaEntryId];
-                }
-            }
-            unset($entry);
-
-            // -----------------------------------------------------------------------
-            // 11. Build the complete field values array.
-            // -----------------------------------------------------------------------
-            $matrixHandle = $config['matrixField'] ?? 'contentBlocks';
-
             $fieldValues = array_merge(
-                [$matrixHandle => $matrixData],
-                $heroData ?? [],
+                $blockFieldValues,
                 $cardValues,
                 $seoValues,
             );
 
             // -----------------------------------------------------------------------
-            // 11a. Existing entry → overwrite content directly.
+            // 9a. Existing entry → overwrite content directly.
             // -----------------------------------------------------------------------
             if ($existing !== null) {
                 $filteredValues = $this->_filterToValidFields($fieldValues, $existing->getFieldLayout(), $result);
@@ -303,7 +220,7 @@ class ImportService extends Component
             }
 
             // -----------------------------------------------------------------------
-            // 11b. No existing entry → create and publish directly.
+            // 9b. No existing entry → create and publish directly.
             // -----------------------------------------------------------------------
             $entry = new Entry();
             $entry->sectionId = $section->id;
@@ -340,13 +257,14 @@ class ImportService extends Component
     /**
      * Resolves the Craft routing config for a ContentIQ content_type slug.
      *
-     * Returns ['section' => ..., 'entryType' => ..., 'contentField' => ...] when the
-     * slug is mapped, or null when the slug is null or has no mapping. Used by both
+     * Returns ['section' => ..., 'entryType' => ..., 'contentField' => ..., 'headingField' => ...,
+     * 'blocksField' => ...] when the slug is mapped, or null when the slug is null or has no
+     * mapping. headingField and blocksField are optional and may be null/absent. Used by both
      * importPage() (routing) and SyncJob (section-aware lock check / skipping
      * structure positioning for collection children).
      *
      * @param string|null $contentType
-     * @return array{section: string, entryType: string, contentField: string}|null
+     * @return array{section: string, entryType: string, contentField: string, headingField?: ?string, blocksField?: ?string}|null
      */
     public function getContentTypeRoute(?string $contentType): ?array
     {
@@ -422,6 +340,151 @@ class ImportService extends Component
     }
 
     /**
+     * Builds the block-driven portion of an entry's field values: Matrix field
+     * data from `blocks`, the hero ContentBlock field, and callToActionEntry
+     * creation/patching for call_to_action blocks.
+     *
+     * Shared by standard pages and by collection children that carry a
+     * non-empty `blocks[]` (the routing decision — whether to call this at all
+     * — is made by the caller; see _importCollectionChild()). Mutates $result
+     * with blocks/images/cardRefs/warnings/blockNotes taken from the actual
+     * MatrixBuilder run, so the import/sync report reflects what was really
+     * written rather than the _emptyResult() skeleton's placeholders.
+     *
+     * CTA entry creation/patching is skipped when $dryRun is true — a dry run
+     * must not write callToActionEntry rows (matches the page path's previous
+     * behaviour, where the whole CTA step sat after the dry-run early return).
+     *
+     * @param array            $data              Decoded top-level JSON object for the page (or collection child).
+     * @param bool             $dryRun            If true, skips image downloads and CTA entry writes.
+     * @param array            &$result           Result array, mutated with blocks/images/cardRefs/warnings/blockNotes.
+     * @param FieldLayout|null $targetFieldLayout The destination entry type's field layout — drives the
+     *                                             hero shape probe (§7.5; see _detectHeroShape()). Pages,
+     *                                             homepage, and collection children each pass their own
+     *                                             resolved entry type's layout; null falls back to the
+     *                                             ContentBlock shape.
+     * @return array<string, mixed> Field values keyed by the Matrix field handle
+     *         (config['matrixField']) and, when a hero block is present, either
+     *         'enableHero'/'hero' (ContentBlock shape) or 'enableHero'/'heroTitle'/etc
+     *         (flat shape — see _buildHeroField()). Also carries 'showContentBlocks' => true
+     *         whenever the Matrix is non-empty — harmless where the handle doesn't exist on
+     *         the target field layout, since _filterToValidFields() drops unknown handles.
+     */
+    private function _buildBlockFieldValues(array $data, bool $dryRun, array &$result, ?FieldLayout $targetFieldLayout = null): array
+    {
+        $config = $this->_getConfig();
+        $slug   = $result['slug'];
+
+        ContentIQImporter::$plugin->matrixBuilder->prepare($config);
+
+        $blocks = $data['blocks'] ?? [];
+
+        // Extract hero block before passing to MatrixBuilder.
+        // CTA blocks pass through MatrixBuilder (it skips them with a report)
+        // and are resolved separately below, once it's known whether this is
+        // a dry run.
+        $heroBlock     = null;
+        $ctaBlocks     = [];
+        $contentBlocks = [];
+        foreach ($blocks as $block) {
+            $blockType = $block['type'] ?? '';
+            if ($blockType === 'hero') {
+                $heroBlock = $block;
+            } else {
+                if ($blockType === 'call_to_action') {
+                    $ctaBlocks[] = $block;
+                }
+                $contentBlocks[] = $block;
+            }
+        }
+
+        // Collect block notes for the sidebar widget.
+        $noteLines = [];
+        foreach ($blocks as $block) {
+            $note = $block['notes'] ?? '';
+            if (is_string($note) && trim($note) !== '') {
+                $blockType = $block['type'] ?? 'unknown';
+                $acronyms = ['usp' => 'USP', 'faq' => 'FAQ', 'cta' => 'CTA'];
+                $blockLabel = ucwords(str_replace('_', ' ', $blockType));
+                $blockLabel = strtr($blockLabel, array_combine(
+                    array_map('ucfirst', array_keys($acronyms)),
+                    array_values($acronyms),
+                ));
+                $noteLines[] = $blockLabel . "\n" . trim($note);
+            }
+        }
+        $result['blockNotes'] = implode("\n\n", $noteLines);
+
+        $built = ContentIQImporter::$plugin->matrixBuilder->build($contentBlocks, $dryRun, $slug);
+
+        $result['blocks']   = $built['blockReport'];
+        $result['images']   = $built['imageReport'];
+        $result['cardRefs'] = $built['cardRefs'] ?? [];  // Deferred card refs for SyncJob pass 2
+        $result['warnings'] = array_merge($result['warnings'], $built['warnings'] ?? []);
+
+        // Both pages and homepage use the same hero ContentBlock field; a
+        // collection child's blocks[] can carry one too. §7.5 — article/
+        // caseStudy/team use a *flat* handle shape instead of the ContentBlock
+        // shape on some sites (see _buildHeroField()'s shape probe).
+        $heroData = $heroBlock !== null
+            ? $this->_buildHeroField($heroBlock, $dryRun, $targetFieldLayout)
+            : null;
+
+        // Resolve CTA blocks → create callToActionEntry entries and patch their
+        // IDs into the matrixData placeholders. Skipped on a dry run — no writes.
+        $matrixData = $built['matrixData'];
+
+        if (!$dryRun) {
+            $ctaIndex = 0;
+
+            foreach ($matrixData as $key => &$entry) {
+                if (empty($entry['_cta'])) {
+                    continue;
+                }
+
+                unset($entry['_cta']);
+
+                if (!isset($ctaBlocks[$ctaIndex])) {
+                    $ctaIndex++;
+                    continue;
+                }
+
+                $ctaEntryId = $this->_resolveCtaEntry(
+                    $ctaBlocks[$ctaIndex],
+                    $result,
+                    $dryRun,
+                );
+                $ctaIndex++;
+
+                if ($ctaEntryId !== null) {
+                    $entry['fields']['chooseCallToAction'] = [$ctaEntryId];
+                }
+            }
+            unset($entry);
+        }
+
+        $matrixHandle = $config['matrixField'] ?? 'contentBlocks';
+
+        $fieldValues = array_merge(
+            [$matrixHandle => $matrixData],
+            $heroData ?? [],
+        );
+
+        // §7.4 — article/caseStudy gate content-block rendering behind a
+        // "Content Blocks" lightswitch (handle: showContentBlocks) that
+        // defaults to false and is hidden in the CP behind a condition rule.
+        // Without this, blocks import correctly and render nothing. team has
+        // no such gate (its elementCondition is null), but writing this
+        // unconditionally is harmless there too — _filterToValidFields() drops
+        // handles the target field layout doesn't have.
+        if (!empty($matrixData)) {
+            $fieldValues['showContentBlocks'] = true;
+        }
+
+        return $fieldValues;
+    }
+
+    /**
      * Imports a collection child (a page with document.content_type set).
      *
      * Collection children differ from standard pages: they carry a raw `content`
@@ -429,6 +492,24 @@ class ImportService extends Component
      * never have a Craft parent (their collection parent is excluded from export),
      * and only carry SEO for portal-on collections. Content is serialised to HTML
      * and written to the configured contentField.
+     *
+     * When the wire also carries a non-empty `blocks[]` (ContentIQ's contract is
+     * either `blocks` or `content`, never both), the same Matrix/hero/CTA
+     * machinery the page path uses runs via _buildBlockFieldValues() and is
+     * merged in — routed to `blocksField` when the content_type configures one,
+     * otherwise config['matrixField'].
+     *
+     * §7.6/§7.6.1 (rulings O2/O4) — when blocks[] owns the page, contentField
+     * and headingField are explicitly cleared to '' (see
+     * _buildCollectionChildContentFields()), never left populated from a prior
+     * content-only sync. Two guards fire around that write: (1) the CP
+     * dry-run preview and the real sync report share the same warning-
+     * generation code path, so both surface it identically; (2) the first time
+     * this clears a previously non-empty contentField/headingField, or
+     * replaces a previously non-empty Matrix, a warning is added to the
+     * result (see _buildBlockOwnershipWarnings()) — but nothing is ever
+     * actually written to an existing entry unless a human has unlocked it
+     * (SyncJob's per-entry auto-lock, untouched by this change).
      *
      * Returns the standard result shape with `contentType`/`sectionLabel` set, or a
      * non-fatal skip (success, skipped=true, warning) when the content_type is unmapped.
@@ -463,6 +544,7 @@ class ImportService extends Component
         $entryTypeHandle    = $route['entryType'];
         $contentFieldHandle = $route['contentField'];
         $headingFieldHandle = $route['headingField'] ?? null;
+        $blocksFieldHandle  = $route['blocksField'] ?? null;
 
         $section = Craft::$app->entries->getSectionByHandle($sectionHandle);
         if ($section === null) {
@@ -481,23 +563,44 @@ class ImportService extends Component
         $folderPath   = $config['assetFolder'] ?? 'contentiq';
         ContentIQImporter::$plugin->images->prepare($volumeHandle, $folderPath);
 
-        // Serialise the raw ProseMirror content to HTML for the content field.
-        $content     = $data['content'] ?? [];
-        $fieldValues = [];
+        // ContentIQ is transitioning collection children from a raw `content`
+        // ProseMirror document to structured `blocks[]` — the wire contract is
+        // either/or, never both (§7.6/§7.6.1 — rulings O2/O4).
+        $content   = $data['content'] ?? [];
+        $blocks    = $data['blocks'] ?? [];
+        $hasBlocks = !empty($blocks);
 
-        // Optionally lift the H1 (level-1 heading) into a dedicated heading field,
-        // stripping it from the body so it isn't rendered twice. Only when the
-        // route configures a 'headingField' and the content actually has an H1.
-        if ($headingFieldHandle !== null) {
-            $extracted = ContentIQImporter::$plugin->nodes->extractHeading($content, 1);
+        // §7.6.1 — the target Matrix field for this content_type's blocks[],
+        // needed both for the write below and for the guard-2 "was this
+        // previously non-empty" warning check further down.
+        $defaultMatrixHandle = $config['matrixField'] ?? 'contentBlocks';
+        $targetMatrixHandle  = $blocksFieldHandle ?? $defaultMatrixHandle;
 
-            if (($extracted['text'] ?? '') !== '') {
-                $fieldValues[$headingFieldHandle] = $extracted['text'];
-                $content = $extracted['doc'];
+        $fieldValues = $this->_buildCollectionChildContentFields(
+            $content,
+            $hasBlocks,
+            $contentFieldHandle,
+            $headingFieldHandle,
+        );
+
+        // When blocks[] is present and non-empty, run the same Matrix/hero/CTA
+        // machinery the page path uses. Absent or empty blocks[] leaves this
+        // entirely untouched (pre-§7.1 behaviour).
+        if ($hasBlocks) {
+            $blockFieldValues = $this->_buildBlockFieldValues($data, $dryRun, $result, $entryType->getFieldLayout());
+
+            // Route this content_type's blocks to its configured Matrix field
+            // (defaults to config['matrixField'] — see 'blocksField' in content_types).
+            if ($blocksFieldHandle !== null
+                && $blocksFieldHandle !== $defaultMatrixHandle
+                && array_key_exists($defaultMatrixHandle, $blockFieldValues)
+            ) {
+                $blockFieldValues[$blocksFieldHandle] = $blockFieldValues[$defaultMatrixHandle];
+                unset($blockFieldValues[$defaultMatrixHandle]);
             }
-        }
 
-        $fieldValues[$contentFieldHandle] = ContentIQImporter::$plugin->nodes->renderDocument($content);
+            $fieldValues = array_merge($fieldValues, $blockFieldValues);
+        }
 
         // SEO is only present for portal-on collections — set it only when supplied.
         if (!empty($data['seo'])) {
@@ -514,6 +617,39 @@ class ImportService extends Component
         if ($existing !== null) {
             $result['entryFound'] = true;
             $result['entryId']    = $existing->id;
+        }
+
+        // §7.6.1 guard 2 / §7.7 — warn (in both the CP dry-run preview and the
+        // real sync report — this check runs before the dry-run early return
+        // below) the first time this write is about to clear a previously
+        // non-empty contentField/headingField, or replace a previously
+        // non-empty Matrix with new element IDs. Read-only against $existing's
+        // CURRENT values; never silent, since an unlocked sync's write is
+        // irreversible in place (Craft revision history is the only recovery).
+        if ($hasBlocks && $existing !== null) {
+            $layout = $existing->getFieldLayout();
+
+            $contentWasNonEmpty = $layout?->getFieldByHandle($contentFieldHandle) !== null
+                && $this->_isFieldValueNonEmpty($existing->getFieldValue($contentFieldHandle));
+
+            $headingWasNonEmpty = $headingFieldHandle !== null
+                && $layout?->getFieldByHandle($headingFieldHandle) !== null
+                && $this->_isFieldValueNonEmpty($existing->getFieldValue($headingFieldHandle));
+
+            $existingBlockCount = 0;
+            if ($layout?->getFieldByHandle($targetMatrixHandle) !== null) {
+                $matrixValue = $existing->getFieldValue($targetMatrixHandle);
+                $existingBlockCount = method_exists($matrixValue, 'count') ? $matrixValue->count() : 0;
+            }
+
+            $result['warnings'] = array_merge($result['warnings'], $this->_buildBlockOwnershipWarnings(
+                $contentWasNonEmpty,
+                $headingWasNonEmpty,
+                $existingBlockCount,
+                $contentFieldHandle,
+                $headingFieldHandle,
+                $targetMatrixHandle,
+            ));
         }
 
         if ($dryRun) {
@@ -566,6 +702,130 @@ class ImportService extends Component
         $result['success'] = true;
 
         return $result;
+    }
+
+    /**
+     * §7.6/§7.6.1 (rulings O2/O4) — builds the contentField/headingField
+     * portion of a collection child's field values.
+     *
+     * Pure decision, deliberately separated from the Craft-touching parts of
+     * _importCollectionChild() so it's unit-testable without a Craft bootstrap
+     * (see tests/run-transforms.php):
+     *
+     *   - blocks present (O2/O4): the block(s) own the page. contentField and
+     *     headingField (when configured) are set to '' EXPLICITLY — not
+     *     omitted — so a prior content-only sync's stale prose/heading can't
+     *     linger and duplicate the block's own heading (two <h1>s).
+     *     _filterToValidFields() makes the write harmless where a handle is
+     *     absent from the target layout.
+     *   - blocks absent: unchanged pre-§7.1 behaviour — optionally lift the
+     *     first H1 out of the ProseMirror doc into headingField, then render
+     *     the (possibly H1-stripped) doc into contentField.
+     *
+     * @param array       $content             The document.content ProseMirror doc (or []).
+     * @param bool        $hasBlocks           Whether this collection child carries non-empty blocks[].
+     * @param string      $contentFieldHandle
+     * @param string|null $headingFieldHandle
+     * @return array<string, string>
+     */
+    private function _buildCollectionChildContentFields(
+        array $content,
+        bool $hasBlocks,
+        string $contentFieldHandle,
+        ?string $headingFieldHandle,
+    ): array {
+        if ($hasBlocks) {
+            $fieldValues = [$contentFieldHandle => ''];
+
+            if ($headingFieldHandle !== null) {
+                $fieldValues[$headingFieldHandle] = '';
+            }
+
+            return $fieldValues;
+        }
+
+        $fieldValues = [];
+
+        if ($headingFieldHandle !== null) {
+            $extracted = ContentIQImporter::$plugin->nodes->extractHeading($content, 1);
+
+            if (($extracted['text'] ?? '') !== '') {
+                $fieldValues[$headingFieldHandle] = $extracted['text'];
+                $content = $extracted['doc'];
+            }
+        }
+
+        $fieldValues[$contentFieldHandle] = ContentIQImporter::$plugin->nodes->renderDocument($content);
+
+        return $fieldValues;
+    }
+
+    /**
+     * §7.6.1 guard 2 / §7.7 — pure warning-message builder for the "this write
+     * is about to clear/replace previously non-empty content" checks.
+     *
+     * Kept separate from the Craft calls that fetch $existing's current field
+     * values (a couple of getFieldValue() calls in _importCollectionChild())
+     * so the actual "was this destructive" judgement is unit-testable without
+     * a Craft bootstrap (see tests/run-transforms.php).
+     *
+     * @param bool        $contentWasNonEmpty Whether contentField held content before this write.
+     * @param bool        $headingWasNonEmpty Whether headingField held content before this write.
+     * @param int         $existingBlockCount How many blocks the target Matrix field held before this write.
+     * @param string      $contentFieldHandle
+     * @param string|null $headingFieldHandle
+     * @param string      $matrixHandle
+     * @return string[]
+     */
+    private function _buildBlockOwnershipWarnings(
+        bool $contentWasNonEmpty,
+        bool $headingWasNonEmpty,
+        int $existingBlockCount,
+        string $contentFieldHandle,
+        ?string $headingFieldHandle,
+        string $matrixHandle,
+    ): array {
+        $warnings = [];
+
+        if ($contentWasNonEmpty) {
+            $warnings[] = "Blocks now own this page — clearing previously non-empty '{$contentFieldHandle}' field.";
+        }
+
+        if ($headingWasNonEmpty && $headingFieldHandle !== null) {
+            $warnings[] = "Blocks now own this page's heading — clearing previously non-empty '{$headingFieldHandle}' field.";
+        }
+
+        if ($existingBlockCount > 0) {
+            $warnings[] = "Content Blocks field '{$matrixHandle}' already holds {$existingBlockCount} block(s) not written by this importer "
+                . "— this sync will replace them wholesale with new element IDs.";
+        }
+
+        return $warnings;
+    }
+
+    /**
+     * Whether a fetched field value counts as "non-empty" for the guard-2
+     * warning checks above. Handles the shapes _importCollectionChild() reads
+     * off an existing entry: CKEditor field data (HtmlFieldData — stringifies
+     * to raw HTML), PlainText strings, and arrays (Assets/Matrix-ish values,
+     * though Matrix is counted separately via ->count()).
+     *
+     * Pure — no Craft dependency — unit-testable directly.
+     *
+     * @param mixed $value
+     * @return bool
+     */
+    private function _isFieldValueNonEmpty(mixed $value): bool
+    {
+        if ($value === null) {
+            return false;
+        }
+
+        if (is_array($value)) {
+            return !empty($value);
+        }
+
+        return trim(strip_tags((string)$value)) !== '';
     }
 
     /**
@@ -795,29 +1055,53 @@ class ImportService extends Component
     }
 
     /**
-     * Builds the `hero` ContentBlock field value from a ContentIQ hero block.
+     * Builds the hero field value(s) from a ContentIQ hero block, in whichever
+     * shape the destination entry type actually uses.
      *
-     * Both pages and homepage use the same craft\fields\ContentBlock field.
-     * Returns the ContentBlock shape wrapping the inner hero fields:
-     *   [
-     *     'enableHero' => true,             // sibling lightswitch on the entry type
-     *     'hero' => ['fields' => [
-     *       'heading'       => '<h1>…</h1>',  // CKEditor
-     *       'richText'      => '<h2>…</h2><p>…</p>',  // subheading + body
-     *       'desktopImage'  => [$assetId],   // Assets
-     *       'mobileImage'   => [$assetId],   // Assets (optional)
-     *       'actionButtons' => [...],        // Matrix of actionButton entries
-     *     ]],
-     *   ]
+     * §7.5 — two shapes are both live in production, on the same entry type
+     * name, at different sites:
      *
-     * The inner fields are built by _buildHeroInnerFields(). Returns null when
-     * no mappable inner fields are found.
+     *   ContentBlock shape (pages/homepage in the Craft Starter, and fish's
+     *   article): a single craft\fields\ContentBlock field (handle 'hero')
+     *   wrapping the inner fields, alongside a sibling 'enableHero' lightswitch:
+     *     [
+     *       'enableHero' => true,
+     *       'hero' => ['fields' => [
+     *         'heading'       => '<h1>…</h1>',          // CKEditor
+     *         'richText'      => '<h2>…</h2><p>…</p>',  // subheading + body
+     *         'desktopImage'  => [$assetId],            // Assets
+     *         'mobileImage'   => [$assetId],             // Assets (optional)
+     *         'actionButtons' => [...],                  // Matrix of actionButton entries
+     *       ]],
+     *     ]
      *
-     * @param array $heroBlock ContentIQ hero block (the full block object).
-     * @param bool  $dryRun
+     *   Flat shape (article/caseStudy/team in the Craft Starter, groves, and
+     *   lucia — verified against config/project/entryTypes/): the same fields
+     *   sit directly on the entry under their own handles, no wrapper field,
+     *   alongside their own 'enableHero' lightswitch:
+     *     [
+     *       'enableHero'      => true,
+     *       'heroTitle'       => '<h1>…</h1>',
+     *       'heroRichText'    => '<h2>…</h2><p>…</p>',
+     *       'heroDesktopImage'=> [$assetId],
+     *       'heroMobileImage' => [$assetId],
+     *       'heroActionButtons' => [...],
+     *     ]
+     *
+     * Which shape to emit is decided by _detectHeroShape() probing
+     * $targetFieldLayout — never assumed. The inner field VALUES are shape-
+     * agnostic and built once by _buildHeroInnerFields(); only the handles
+     * (and whether they're nested under 'hero') differ per shape.
+     *
+     * Returns null when no mappable inner fields are found.
+     *
+     * @param array            $heroBlock         ContentIQ hero block (the full block object).
+     * @param bool             $dryRun
+     * @param FieldLayout|null $targetFieldLayout The destination entry type's field layout.
+     *                                             Null falls back to the ContentBlock shape.
      * @return array<string, mixed>|null
      */
-    private function _buildHeroField(array $heroBlock, bool $dryRun): ?array
+    private function _buildHeroField(array $heroBlock, bool $dryRun, ?FieldLayout $targetFieldLayout = null): ?array
     {
         $innerFields = $this->_buildHeroInnerFields($heroBlock, $dryRun);
 
@@ -825,14 +1109,68 @@ class ImportService extends Component
             return null;
         }
 
+        if ($this->_detectHeroShape($targetFieldLayout) === 'flat') {
+            // Flat handles directly on the entry — 'heading' → 'heroTitle', etc.
+            $flatHandles = [
+                'heading'       => 'heroTitle',
+                'richText'      => 'heroRichText',
+                'desktopImage'  => 'heroDesktopImage',
+                'mobileImage'   => 'heroMobileImage',
+                'actionButtons' => 'heroActionButtons',
+            ];
+
+            $flatValues = ['enableHero' => true];
+
+            foreach ($flatHandles as $innerKey => $flatHandle) {
+                if (array_key_exists($innerKey, $innerFields)) {
+                    $flatValues[$flatHandle] = $innerFields[$innerKey];
+                }
+            }
+
+            return $flatValues;
+        }
+
         // hero is a ContentBlock field (handle override on heroContent).
-        // enableHero is a separate lightswitch on the pages entry type.
+        // enableHero is a separate lightswitch on the entry type.
         return [
             'enableHero' => true,
             'hero' => [
                 'fields' => $innerFields,
             ],
         ];
+    }
+
+    /**
+     * §7.5 shape probe — inspects the destination entry type's field layout to
+     * decide which hero shape to emit, rather than assuming either.
+     *
+     * - A field handled 'hero' that is actually a craft\fields\ContentBlock
+     *   instance → 'contentblock' shape.
+     * - Otherwise, a field handled 'heroTitle' present anywhere on the layout
+     *   → 'flat' shape (article/caseStudy/team).
+     * - Neither found (or no layout given, e.g. a caller that hasn't been
+     *   updated to pass one) → falls back to 'contentblock', matching this
+     *   method's pre-§7.5 hardcoded behaviour. _filterToValidFields() drops
+     *   the resulting handles harmlessly if the entry type truly has neither.
+     *
+     * @param FieldLayout|null $fieldLayout
+     * @return string 'contentblock'|'flat'
+     */
+    private function _detectHeroShape(?FieldLayout $fieldLayout): string
+    {
+        if ($fieldLayout === null) {
+            return 'contentblock';
+        }
+
+        if ($fieldLayout->getFieldByHandle('hero') instanceof ContentBlock) {
+            return 'contentblock';
+        }
+
+        if ($fieldLayout->getFieldByHandle('heroTitle') !== null) {
+            return 'flat';
+        }
+
+        return 'contentblock';
     }
 
     /**

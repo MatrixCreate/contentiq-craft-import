@@ -5,6 +5,7 @@ namespace matrixcreate\contentiqimporter\controllers;
 use Craft;
 use craft\db\Query;
 use craft\elements\Entry;
+use craft\fields\Matrix;
 use craft\fields\PlainText;
 use craft\helpers\App;
 use craft\helpers\Db;
@@ -202,12 +203,17 @@ class CpController extends Controller
             }
 
             $headingField = $str($row['headingField'] ?? '');
+            $blocksField  = $str($row['blocksField'] ?? '');
 
+            // blocksField is optional — unlike entryType/contentField above, a
+            // row with no blocks field configured is complete and valid; it
+            // just falls back to config['matrixField'] at import time.
             $mappings[(string)$slug] = [
                 'section'      => $section,
                 'entryType'    => $entryType,
                 'contentField' => $contentField,
                 'headingField' => $headingField !== '' ? $headingField : null,
+                'blocksField'  => $blocksField !== '' ? $blocksField : null,
             ];
         }
 
@@ -948,9 +954,10 @@ class CpController extends Controller
      * entry types, and each entry type's CKEditor and PlainText field handles.
      *
      * Embedded as JSON so the vanilla-JS dropdowns can cascade section → entry
-     * type → content field (CKEditor) / heading field (PlainText).
+     * type → content field (CKEditor) / heading field (PlainText) / blocks
+     * field (Matrix).
      *
-     * @return array<int, array{handle: string, name: string, entryTypes: array<int, array{handle: string, name: string, ckeditorFields: array<int, array{handle: string, name: string}>, plainTextFields: array<int, array{handle: string, name: string}>}>}>
+     * @return array<int, array{handle: string, name: string, entryTypes: array<int, array{handle: string, name: string, ckeditorFields: array<int, array{handle: string, name: string}>, plainTextFields: array<int, array{handle: string, name: string}>, matrixFields: array<int, array{handle: string, name: string}>}>}>
      */
     private function _buildSectionsData(): array
     {
@@ -962,6 +969,7 @@ class CpController extends Controller
             foreach ($section->getEntryTypes() as $entryType) {
                 $ckeditorFields  = [];
                 $plainTextFields = [];
+                $matrixFields    = [];
 
                 foreach ($entryType->getFieldLayout()->getCustomFields() as $field) {
                     // CKEditor is an optional dependency — reference it by its
@@ -970,6 +978,8 @@ class CpController extends Controller
                         $ckeditorFields[] = ['handle' => $field->handle, 'name' => $field->name];
                     } elseif ($field instanceof PlainText) {
                         $plainTextFields[] = ['handle' => $field->handle, 'name' => $field->name];
+                    } elseif ($field instanceof Matrix) {
+                        $matrixFields[] = ['handle' => $field->handle, 'name' => $field->name];
                     }
                 }
 
@@ -978,6 +988,7 @@ class CpController extends Controller
                     'name'            => $entryType->name,
                     'ckeditorFields'  => $ckeditorFields,
                     'plainTextFields' => $plainTextFields,
+                    'matrixFields'    => $matrixFields,
                 ];
             }
 

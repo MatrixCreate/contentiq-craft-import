@@ -34,12 +34,16 @@ class Settings extends Model
      * Collection slug → Craft routing map, edited in the CP Mappings screen.
      *
      * Keyed by ContentIQ collection slug. Each row has the shape:
-     *   ['section' => handle, 'entryType' => handle, 'contentField' => handle, 'headingField' => handle|null]
+     *   ['section' => handle, 'entryType' => handle, 'contentField' => handle,
+     *    'headingField' => handle|null, 'blocksField' => handle|null]
+     *
+     * blocksField is optional — when null/absent, a collection child's blocks[]
+     * (when present) writes to config['matrixField'] instead, same as pages.
      *
      * Merged between defaults.php and the config/contentiq.php `content_types`
      * override by ImportService::_getContentTypesMap() (defaults ← settings ← file).
      *
-     * @var array<string, array{section: string, entryType: string, contentField: string, headingField: ?string}>
+     * @var array<string, array{section: string, entryType: string, contentField: string, headingField: ?string, blocksField: ?string}>
      */
     public array $collectionMappings = [];
 
@@ -80,12 +84,14 @@ class Settings extends Model
             }
 
             $headingField = trim((string)($row['headingField'] ?? ''));
+            $blocksField  = trim((string)($row['blocksField'] ?? ''));
 
             $normalised[(string)$slug] = [
                 'section'      => $section,
                 'entryType'    => trim((string)($row['entryType'] ?? '')),
                 'contentField' => trim((string)($row['contentField'] ?? '')),
                 'headingField' => $headingField !== '' ? $headingField : null,
+                'blocksField'  => $blocksField !== '' ? $blocksField : null,
             ];
         }
 

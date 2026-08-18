@@ -1,0 +1,35 @@
+{
+    "document": {
+        "slug": "sustainable-fishing-practices",
+        "title": "Sustainable Fishing Practices",
+        "content_type": "case_studies",
+        "parent_slug": null
+    },
+    "blocks": [
+        {
+            "type": "usp",
+            "notes": "",
+            "fields": {
+                "heading": { "level": 2, "text": "Why it matters" },
+                "items": [
+                    "Reduces bycatch",
+                    "Protects reef habitats",
+                    "Supports local fisheries"
+                ]
+            }
+        },
+        {
+            "type": "text",
+            "notes": "",
+            "fields": {
+                "columns": "singleColumn",
+                "nodes": [
+                    {
+                        "type": "paragraph",
+                        "text": "Our approach combines survey data with on-the-ground partnerships."
+                    }
+                ]
+            }
+        }
+    ]
+}
