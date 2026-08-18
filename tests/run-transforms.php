@@ -202,6 +202,10 @@ foreach ($contentTypes as $slug => $row) {
 echo "\nMatrixBuilder — collection child blocks[] shape\n";
 
 require __DIR__ . '/fixtures/craft-stubs.php';
+// LinkHelper::hyperInertUrl() delegates scheme checking to UrlSafety, so it
+// must be loaded first — this harness require-s classes by hand rather than
+// autoloading (no Craft bootstrap here).
+require __DIR__ . '/../src/helpers/UrlSafety.php';
 require __DIR__ . '/../src/helpers/LinkHelper.php';
 require __DIR__ . '/../src/services/NodesRenderer.php';
 require __DIR__ . '/../src/services/MatrixBuilder.php';

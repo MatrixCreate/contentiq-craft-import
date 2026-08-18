@@ -2,6 +2,7 @@
 
 namespace matrixcreate\contentiqimporter\services;
 
+use matrixcreate\contentiqimporter\helpers\UrlSafety;
 use yii\base\Component;
 
 /**
@@ -522,9 +523,10 @@ class NodesRenderer extends Component
      */
     private function _wrapLink(array $mark, string $inner): string
     {
-        $href   = htmlspecialchars($mark['attrs']['href'] ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-        $target = $mark['attrs']['target'] ?? '';
-        $rel    = $mark['attrs']['rel'] ?? '';
+        $safeUrl = UrlSafety::safeHref((string)($mark['attrs']['href'] ?? ''));
+        $href    = htmlspecialchars($safeUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $target  = $mark['attrs']['target'] ?? '';
+        $rel     = $mark['attrs']['rel'] ?? '';
 
         $attrs = "href=\"{$href}\"";
         if ($target !== '' && $target !== null) {
@@ -549,12 +551,15 @@ class NodesRenderer extends Component
     private function _renderCtaButton(array $node): string
     {
         $label = htmlspecialchars($node['label'] ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-        $url   = htmlspecialchars($node['url'] ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $url   = htmlspecialchars(UrlSafety::safeHref((string)($node['url'] ?? '')), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 
         if ($label === '') {
             return '';
         }
 
-        return "<p><a href=\"{$url}\" class=\"btn btn-primary\">{$label}</a></p>";
+        // `not-prose` opts this button out of the rich-text prose styling. Unlike
+        // template-rendered buttons (button.twig adds not-prose), this <a> is
+        // embedded in CKEditor HTML where prose styles would otherwise restyle it.
+        return "<p><a href=\"{$url}\" class=\"btn btn-primary not-prose\">{$label}</a></p>";
     }
 }

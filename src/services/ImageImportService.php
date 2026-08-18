@@ -3,11 +3,14 @@
 namespace matrixcreate\contentiqimporter\services;
 
 use Craft;
+use craft\db\Query;
 use craft\elements\Asset;
 use craft\helpers\Assets;
+use craft\helpers\Db;
 use craft\models\Volume;
 use craft\models\VolumeFolder;
 use GuzzleHttp\RequestOptions;
+use matrixcreate\contentiqimporter\helpers\UrlSafety;
 use Throwable;
 use yii\base\Component;
 use yii\base\Exception;
@@ -15,9 +18,14 @@ use yii\base\Exception;
 /**
  * Handles downloading remote images and importing them as Craft assets.
  *
- * Idempotent: if an asset with the same filename already exists in the target
- * folder it is reused — the file is not downloaded again and a new asset is
- * not created. Running the import twice does NOT duplicate assets.
+ * Idempotent: if the image's key has already been mapped to a live Craft
+ * asset (contentiq_asset_syncs), that asset is reused — the key is the
+ * upstream asset's stable storage path and is globally unique, so this is
+ * collision-proof across pages/projects that happen to share a filename.
+ * When the key is unmapped, an asset with the same filename in the target
+ * folder is reused as a fallback (and the key mapping is recorded for next
+ * time). Otherwise the file is downloaded and a new asset created. Running
+ * the import twice does NOT duplicate assets.
  *
  * Failed downloads are non-fatal: the method returns null and logs a warning.
  * Callers should treat null as "leave field empty" and continue.
@@ -121,7 +129,8 @@ class ImageImportService extends Component
         }
 
         $url      = $imageField['url'];
-        $rawFilename = $this->_filenameFromKey($imageField['key'] ?? '') ?: $this->_filenameFromUrl($url);
+        $imageKey = (string)($imageField['key'] ?? '');
+        $rawFilename = $this->_filenameFromKey($imageKey) ?: $this->_filenameFromUrl($url);
         // Sanitize the same way Craft does on save — spaces become hyphens, etc.
         $filename = Assets::prepareAssetName($rawFilename);
 
@@ -139,7 +148,45 @@ class ImageImportService extends Component
             return $dryRun ? ['id' => null, 'filename' => $filename, 'reused' => false] : null;
         }
 
-        // Idempotency check — reuse if already imported.
+        // STEP A — key-first identity. The image key is the upstream asset's
+        // stable storage path ("{project_id}/{page_id}/{filename}") and is
+        // globally unique, unlike the bare filename used below — two images
+        // from different pages/projects can share a filename but never a
+        // key. A key already mapped to a still-live asset wins outright and
+        // the download is skipped entirely.
+        if ($imageKey !== '') {
+            $mappedElementId = (new Query())
+                ->select(['element_id'])
+                ->from('{{%contentiq_asset_syncs}}')
+                ->where(['image_key' => $imageKey])
+                ->scalar();
+
+            // Query::scalar() returns false (not null) when no row matches.
+            if ($mappedElementId !== false) {
+                $mapped = Asset::find()->id((int)$mappedElementId)->one();
+
+                if ($mapped !== null) {
+                    return ['id' => $mapped->id, 'filename' => $filename, 'reused' => true];
+                }
+
+                // Stale mapping — the mapped asset was hard-deleted or
+                // trashed (default Asset::find() excludes trashed, so null
+                // here means exactly that). Clear it so a fresh mapping can
+                // be recorded below; a dry run must not write, so it simply
+                // falls through to the filename fallback for this preview.
+                if (!$dryRun) {
+                    Craft::$app->getDb()->createCommand()
+                        ->delete('{{%contentiq_asset_syncs}}', ['image_key' => $imageKey])
+                        ->execute();
+                }
+            }
+        }
+
+        // STEP B — filename fallback (unchanged idempotency behaviour).
+        // Reuse if an asset with this filename already exists in the target
+        // folder. This is how a key gets adopted on the first post-upgrade
+        // sync: an asset created before contentiq_asset_syncs existed has no
+        // key mapping yet, so it's found here and the mapping recorded below.
         $existing = Asset::find()
             ->volumeId($this->_volume->id)
             ->folderId($this->_folder->id)
@@ -147,6 +194,10 @@ class ImageImportService extends Component
             ->one();
 
         if ($existing !== null) {
+            if (!$dryRun && $imageKey !== '') {
+                $this->_upsertAssetMap($imageKey, $existing->id);
+            }
+
             return ['id' => $existing->id, 'filename' => $filename, 'reused' => true];
         }
 
@@ -161,7 +212,13 @@ class ImageImportService extends Component
 
         $alt = isset($imageField['alt']) && $imageField['alt'] !== '' ? (string)$imageField['alt'] : null;
 
-        return $this->_download($url, $filename, $alt);
+        $result = $this->_download($url, $filename, $alt);
+
+        if ($result !== null && $imageKey !== '') {
+            $this->_upsertAssetMap($imageKey, $result['id']);
+        }
+
+        return $result;
     }
 
     /**
@@ -180,11 +237,23 @@ class ImageImportService extends Component
 
     /**
      * Deletes a file from the volume if it exists on the filesystem without a
-     * corresponding asset DB record (orphaned).
+     * corresponding asset DB record — LIVE OR TRASHED — for that filename
+     * (a genuine orphan).
      *
-     * This can happen when asset DB records are deleted manually (e.g. during
-     * testing) but the volume files are not removed. Craft's "file already exists"
-     * validation would otherwise block creating a new asset with the same name.
+     * This can happen when asset DB records are hard-deleted manually (e.g.
+     * during testing) but the volume files are not removed. Craft's "file
+     * already exists" validation would otherwise block creating a new asset
+     * with the same name.
+     *
+     * Trashed assets must be spared: Craft soft-deletes into a restorable
+     * trash, and the asset's physical file is what a restore brings back. If
+     * this only checked live (non-trashed) assets — Craft's default
+     * Asset::find() behaviour — a soft-deleted asset would look like "no DB
+     * record" here and its file would be permanently wiped, breaking the
+     * restore. Checking trashed rows too also spares an out-of-band editor
+     * upload that happens to share this filename but isn't findable via the
+     * volumeId/folderId/filename lookup for some other reason (e.g. it was
+     * itself just trashed) from being deleted underneath the editor.
      *
      * @param string $filename
      * @return void
@@ -192,6 +261,19 @@ class ImageImportService extends Component
     private function _deleteOrphanedFile(string $filename): void
     {
         try {
+            $hasAssetRecord = Asset::find()
+                ->volumeId($this->_volume->id)
+                ->folderId($this->_folder->id)
+                ->filename($filename)
+                ->trashed(null) // null = match both live and trashed rows.
+                ->exists();
+
+            if ($hasAssetRecord) {
+                // Not an orphan — a DB record (live or trashed) owns this
+                // file. Leave it alone.
+                return;
+            }
+
             $fs         = $this->_volume->getFs();
             $folderPath = $this->_folder->path ? rtrim($this->_folder->path, '/') . '/' : '';
             $volumePath = $folderPath . $filename;
@@ -203,6 +285,45 @@ class ImageImportService extends Component
         } catch (Throwable $e) {
             Craft::warning("Could not check/delete orphaned file '{$filename}': " . $e->getMessage(), __METHOD__);
         }
+    }
+
+    /**
+     * Upserts a contentiq_asset_syncs row (image key → element id).
+     *
+     * Called after every resolution path that ends in a resolved asset id —
+     * a filename-fallback reuse (STEP B) or a freshly downloaded asset — so
+     * the key becomes resolvable directly next time (STEP A). Not called for
+     * a STEP A key-based reuse, since that mapping is already correct.
+     *
+     * @param string $imageKey
+     * @param int    $elementId
+     * @return void
+     */
+    private function _upsertAssetMap(string $imageKey, int $elementId): void
+    {
+        $now = Db::prepareDateForDb(new \DateTime());
+        $db  = Craft::$app->getDb();
+
+        $exists = (new Query())
+            ->from('{{%contentiq_asset_syncs}}')
+            ->where(['image_key' => $imageKey])
+            ->exists();
+
+        if ($exists) {
+            $db->createCommand()->update(
+                '{{%contentiq_asset_syncs}}',
+                ['element_id' => $elementId, 'dateUpdated' => $now],
+                ['image_key' => $imageKey],
+            )->execute();
+            return;
+        }
+
+        $db->createCommand()->insert('{{%contentiq_asset_syncs}}', [
+            'image_key'   => $imageKey,
+            'element_id'  => $elementId,
+            'dateCreated' => $now,
+            'dateUpdated' => $now,
+        ])->execute();
     }
 
     /**
@@ -220,16 +341,45 @@ class ImageImportService extends Component
      */
     private function _download(string $url, string $filename, ?string $alt = null): ?array
     {
+        // SSRF guard — $url comes from attacker-controllable uploaded/synced
+        // JSON. Refuse anything that isn't a public http(s) host before making
+        // any request (cloud metadata endpoints, internal services, etc.).
+        if (!UrlSafety::isPublicHttpUrl($url)) {
+            Craft::warning("Refused to download image — not a public http(s) URL: $url", __METHOD__);
+
+            return null;
+        }
+
         $tempPath = Craft::$app->getPath()->getTempPath() . DIRECTORY_SEPARATOR . uniqid('contentiq_') . '_' . $filename;
 
         try {
-            Craft::createGuzzleClient()->request('GET', $url, [
-                RequestOptions::SINK    => $tempPath,
-                RequestOptions::TIMEOUT => 30,
+            $response = Craft::createGuzzleClient()->request('GET', $url, [
+                RequestOptions::SINK            => $tempPath,
+                RequestOptions::TIMEOUT         => 30,
+                // A public URL must not be able to 302 its way to an internal
+                // one — never follow redirects on this request.
+                RequestOptions::ALLOW_REDIRECTS => false,
             ]);
+
+            // With redirects disabled, a 3xx is not an image — reject it
+            // explicitly instead of importing whatever small body it sent.
+            if ($response->getStatusCode() >= 300) {
+                Craft::warning("Image download got HTTP {$response->getStatusCode()} (redirects are disabled): $url", __METHOD__);
+
+                return null;
+            }
 
             if (!is_file($tempPath) || filesize($tempPath) === 0) {
                 Craft::warning("Downloaded file is empty or missing: $url", __METHOD__);
+
+                return null;
+            }
+
+            // Sane upper bound so a misbehaving/malicious endpoint streaming an
+            // unbounded body doesn't get imported as an asset.
+            $maxBytes = 25 * 1024 * 1024;
+            if (filesize($tempPath) > $maxBytes) {
+                Craft::warning("Downloaded file exceeds the {$maxBytes}-byte limit: $url", __METHOD__);
 
                 return null;
             }

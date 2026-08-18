@@ -4,8 +4,12 @@ namespace matrixcreate\contentiqimporter\console\controllers;
 
 use Craft;
 use craft\console\Controller;
+use craft\db\Query;
 use craft\helpers\App;
 use craft\helpers\Console;
+use craft\helpers\Db;
+use craft\helpers\Json;
+use craft\helpers\StringHelper;
 use craft\elements\Entry;
 use matrixcreate\contentiqimporter\ContentIQImporter;
 use yii\console\ExitCode;
@@ -17,6 +21,7 @@ use yii\console\ExitCode;
  *   php craft contentiq-importer/import --file=export.json
  *   php craft contentiq-importer/import --file=export.json --dry-run
  *   php craft contentiq-importer/import --file=export.json --verbose
+ *   php craft contentiq-importer/import --file=export.json --force
  *
  * @author Matrix Create <hello@matrixcreate.com>
  * @since 1.0.0
@@ -47,11 +52,38 @@ class ImportController extends Controller
     public bool $verbose = false;
 
     /**
+     * @var bool Whether to bypass the entry-lock check. Defaults to false —
+     *           locked entries are skipped unless this is explicitly set, so a
+     *           CLI import can't silently clobber a locked entry.
+     */
+    public bool $force = false;
+
+    /**
      * Entry ID from the most recent _runSinglePage call (used for hierarchy).
      *
      * @var int|null
      */
     private ?int $_lastEntryId = null;
+
+    /**
+     * Deferred card ref sets from the most recent _runSinglePage call
+     * (collected for pass 2 resolution).
+     *
+     * @var array
+     */
+    private array $_lastCardRefs = [];
+
+    /**
+     * Per-page results accumulated across the current invocation (single
+     * page or batch) — same shape ImportService::importPage() returns.
+     * Written to a contentiq_import_runs record at the end of the run (see
+     * Fix D1 — console imports previously left no audit trail) via
+     * {@see self::_saveRunFromResults()}. Fresh for every process, so no
+     * explicit reset between invocations is needed.
+     *
+     * @var array
+     */
+    private array $_runResults = [];
 
     // Public Methods
     // =========================================================================
@@ -65,6 +97,7 @@ class ImportController extends Controller
         $options[] = 'file';
         $options[] = 'dryRun';
         $options[] = 'verbose';
+        $options[] = 'force';
 
         return $options;
     }
@@ -144,7 +177,23 @@ class ImportController extends Controller
         }
 
         // Single-page format has 'document' and 'blocks' at the top level.
-        return $this->_runSinglePage($data, $importService);
+        $exitCode = $this->_runSinglePage($data, $importService);
+
+        // PASS 2: resolve deferred card references (single page — DB lookups only).
+        if (!$this->dryRun && $this->_lastEntryId !== null && !empty($this->_lastCardRefs)) {
+            $cardWarnings = $importService->resolveCardReferences(
+                [$this->_lastEntryId => array_values($this->_lastCardRefs)],
+                [],
+            );
+            $this->_printCardRefWarnings($cardWarnings);
+            $this->_mergeCardWarnings($cardWarnings);
+        }
+
+        // Fix D1: record this console import in the audit trail, same as the
+        // other content-mutating entry points (upload/import, sync, widget).
+        $this->_saveRunFromResults(basename($file));
+
+        return $exitCode;
     }
 
     // Private Methods
@@ -163,6 +212,7 @@ class ImportController extends Controller
 
         $exitCode      = ExitCode::OK;
         $slugToEntryId = [];
+        $allCardRefs   = [];  // Deferred card ref sets keyed by entry ID, for pass 2
 
         // Resolve section for structure positioning.
         $config        = Craft::$app->config->getConfigFromFile('contentiq');
@@ -177,6 +227,17 @@ class ImportController extends Controller
 
             if ($result !== ExitCode::OK) {
                 $exitCode = ExitCode::UNSPECIFIED_ERROR;
+            }
+
+            // Collect the slug map and deferred card refs for pass 2.
+            if (!$this->dryRun && $this->_lastEntryId !== null) {
+                $slug = $pageData['document']['slug'] ?? '';
+                if ($slug !== '') {
+                    $slugToEntryId[$slug] = $this->_lastEntryId;
+                }
+                if (!empty($this->_lastCardRefs)) {
+                    $allCardRefs[$this->_lastEntryId] = array_values($this->_lastCardRefs);
+                }
             }
 
             // Handle hierarchy after import.
@@ -228,7 +289,138 @@ class ImportController extends Controller
             }
         }
 
+        // PASS 2: resolve deferred card references now the slug map is complete.
+        if (!$this->dryRun && !empty($allCardRefs)) {
+            $this->stdout("\nResolving card references…\n", Console::BOLD);
+            $cardWarnings = $importService->resolveCardReferences($allCardRefs, $slugToEntryId);
+            $this->_printCardRefWarnings($cardWarnings);
+            $this->_mergeCardWarnings($cardWarnings);
+        }
+
+        // Fix D1: record this console import in the audit trail, same as the
+        // other content-mutating entry points (upload/import, sync, widget).
+        $this->_saveRunFromResults(basename((string)$this->file));
+
         return $exitCode;
+    }
+
+    /**
+     * Prints pass-2 card reference warnings keyed by owner entry ID.
+     *
+     * @param array<int, string[]> $warningsByEntry
+     */
+    private function _printCardRefWarnings(array $warningsByEntry): void
+    {
+        foreach ($warningsByEntry as $entryId => $warnings) {
+            foreach ($warnings as $warning) {
+                $this->stdout("  Cards (entry {$entryId}): {$warning}\n", Console::FG_YELLOW);
+            }
+        }
+    }
+
+    /**
+     * Merges pass-2 card reference warnings into the matching $_runResults
+     * entry (by entryId) — same pattern CpController/SyncJob use — so a
+     * page's audit-trail row reflects pass-2 warnings too, not just pass 1.
+     *
+     * @param array<int, string[]> $warningsByEntry
+     * @return void
+     */
+    private function _mergeCardWarnings(array $warningsByEntry): void
+    {
+        foreach ($warningsByEntry as $entryId => $warnings) {
+            if (empty($warnings)) {
+                continue;
+            }
+
+            foreach ($this->_runResults as $i => $r) {
+                if (($r['entryId'] ?? null) === $entryId) {
+                    array_push($this->_runResults[$i]['warnings'], ...$warnings);
+                    break;
+                }
+            }
+        }
+    }
+
+    /**
+     * Writes a contentiq_import_runs record summarising the page results
+     * accumulated in $_runResults for this invocation (Fix D1 — console
+     * imports previously left no audit trail). A no-op in dry-run mode,
+     * since nothing was actually written to Craft.
+     *
+     * @param string $filename
+     * @return void
+     */
+    private function _saveRunFromResults(string $filename): void
+    {
+        if ($this->dryRun) {
+            return;
+        }
+
+        $hasErrors   = false;
+        $hasWarnings = false;
+        $imageCount  = 0;
+
+        foreach ($this->_runResults as $r) {
+            if (!($r['success'] ?? false)) {
+                $hasErrors = true;
+            }
+            if (!empty($r['warnings'] ?? [])) {
+                $hasWarnings = true;
+            }
+            $imageCount += count($r['images'] ?? []);
+        }
+
+        $status = $hasErrors ? 'errors' : ($hasWarnings ? 'warnings' : 'success');
+
+        $this->_saveRun(
+            filename:   $filename,
+            type:       'console',
+            pageCount:  count($this->_runResults),
+            imageCount: $imageCount,
+            status:     $status,
+            result:     $this->_runResults,
+        );
+    }
+
+    /**
+     * Saves an import run to the history table. Mirrors
+     * CpController::_saveRun() — kept as a separate copy here since console
+     * and web controllers don't share a common base.
+     *
+     * @param string $filename
+     * @param string $type
+     * @param int    $pageCount
+     * @param int    $imageCount
+     * @param string $status
+     * @param array  $result
+     * @return int The inserted row ID.
+     */
+    private function _saveRun(
+        string $filename,
+        string $type,
+        int $pageCount,
+        int $imageCount,
+        string $status,
+        array $result,
+    ): int {
+        $db  = Craft::$app->getDb();
+        $now = Db::prepareDateForDb(new \DateTime());
+
+        $db->createCommand()->insert('{{%contentiq_import_runs}}', [
+            'importedBy'  => Craft::$app->getUser()->getId(),
+            'filename'    => $filename,
+            'type'        => $type,
+            'pageCount'   => $pageCount,
+            'imageCount'  => $imageCount,
+            'status'      => $status,
+            'result'      => Json::encode($result),
+            'dateCreated' => $now,
+            'dateUpdated' => $now,
+            'uid'         => StringHelper::UUID(),
+        ])->execute();
+
+        return (int)$db->getLastInsertID();
     }
 
     /**
@@ -240,10 +432,61 @@ class ImportController extends Controller
      */
     private function _runSinglePage(array $data, $importService): int
     {
+        // Enforce entry locks unless --force. Missing sync row for an existing
+        // entry is treated as locked (same default as the Sync UI / SyncJob) —
+        // a hand-built entry colliding with a synced slug/section is never
+        // silently overwritten by a CLI import.
+        if (!$this->force) {
+            $existingEntry = $importService->findExistingEntry($data);
+
+            if ($existingEntry !== null) {
+                $syncRow = (new Query())
+                    ->select(['locked'])
+                    ->from('{{%contentiq_entry_syncs}}')
+                    ->where(['element_id' => $existingEntry->id])
+                    ->one();
+
+                // craft\db\Query::one() returns null when no row matches.
+                $isLocked = $syncRow === null ? true : (bool)$syncRow['locked'];
+
+                if ($isLocked) {
+                    $slug = $data['document']['slug'] ?? '';
+
+                    $this->stdout("Page: {$slug}\n", Console::BOLD);
+                    $this->stdout("  Skipped — entry is locked. Use --force to override.\n", Console::FG_YELLOW);
+
+                    $this->_lastEntryId  = $existingEntry->id;
+                    $this->_lastCardRefs = [];
+
+                    // Fix D1: record the skip in the run's audit trail, same as
+                    // the locked-skip branches in CpController/SyncJob.
+                    $this->_runResults[] = [
+                        'success'       => true,
+                        'slug'          => $slug,
+                        'title'         => $data['document']['title'] ?? $slug,
+                        'entryId'       => $existingEntry->id,
+                        'entryFound'    => true,
+                        'seoFieldCount' => 0,
+                        'blocks'        => [],
+                        'images'        => [],
+                        'warnings'      => ['Skipped — entry is locked.'],
+                        'error'         => null,
+                    ];
+
+                    return ExitCode::OK;
+                }
+            }
+        }
+
         $result = $importService->importPage($data, $this->dryRun, $this->verbose);
 
-        // Store entry ID for hierarchy resolution in _runBatch.
-        $this->_lastEntryId = $result['entryId'] ?? null;
+        // Fix D1: accumulate this page's result for the run's audit trail —
+        // importPage() already returns the exact shape used everywhere else.
+        $this->_runResults[] = $result;
+
+        // Store entry ID and deferred card refs for _runBatch / pass 2.
+        $this->_lastEntryId  = $result['entryId'] ?? null;
+        $this->_lastCardRefs = $result['cardRefs'] ?? [];
 
         $prefix = $this->dryRun ? '[DRY RUN] ' : '';
 

@@ -68,25 +68,42 @@ class MatrixBuilder extends Component
     /**
      * Builds the Matrix field data array and the block report from a ContentIQ blocks array.
      *
-     * @param array[] $blocks       ContentIQ `blocks` array from the JSON.
-     * @param bool    $dryRun       If true, skips image downloads.
-     * @param string  $hostPageSlug The slug of the page being imported (for children mode parent==host detection).
+     * DIFF-AWARE top-level identity (preserveBlockIdentity config flag, gated by the
+     * caller — see ImportService::importPage()): when $existingBlockMap carries an
+     * entry for a TOP-LEVEL, non-grouped block's stable `id`, that block's Matrix key
+     * is emitted as the existing nested element id (an int) instead of 'new{N}', so
+     * Craft UPDATES the existing nested entry in place rather than deleting and
+     * recreating it (see CLAUDE.md "Saving nested Matrix data": integer keys are
+     * treated as existing entry IDs). Grouped blocks and inner/nested blocks always
+     * use 'new{N}' — see _resolveTopLevelKey() and the grouped branch below. When
+     * $existingBlockMap is empty (the default), every key is 'new{N}' exactly as it
+     * was before this feature existed — behaviour is byte-identical.
+     *
+     * @param array[] $blocks            ContentIQ `blocks` array from the JSON.
+     * @param bool    $dryRun            If true, skips image downloads.
+     * @param string  $hostPageSlug      The slug of the page being imported (for children mode parent==host detection).
+     * @param array<string, int> $existingBlockMap Payload block `id` => existing nested element id for
+     *                                   this owner entry (from contentiq_block_syncs). Empty unless the
+     *                                   preserveBlockIdentity config flag is on AND the owner entry
+     *                                   already exists — see ImportService::importPage().
      * @return array{
      *   matrixData: array<string, array>,
      *   blockReport: array<int, array{type: string, fields: string[], skipped: bool}>,
      *   imageReport: array<int, array{filename: string, reused: bool}>,
      *   cardRefs: array<int, array{blockIndex: int, mode: string, refs?: array, parent?: array}>,
-     *   warnings: string[]
+     *   warnings: string[],
+     *   blockKeyConsumption: array<string|int, string[]>
      * }
      */
-    public function build(array $blocks, bool $dryRun = false, string $hostPageSlug = ''): array
+    public function build(array $blocks, bool $dryRun = false, string $hostPageSlug = '', array $existingBlockMap = []): array
     {
-        $matrixData     = [];
-        $blockReport    = [];
-        $imageReport    = [];
-        $cardRefs       = [];  // Deferred card references (in-memory, never persisted to Craft)
-        $counter        = 0;
-        $this->_warnings = [];
+        $matrixData          = [];
+        $blockReport         = [];
+        $imageReport         = [];
+        $cardRefs            = [];  // Deferred card references (in-memory, never persisted to Craft)
+        $blockKeyConsumption = [];  // Emitted top-level key => payload block id(s) it represents
+        $counter             = 0;
+        $this->_warnings     = [];
 
         // Pre-process: group consecutive blocks that use 'grouped' mode.
         $processedBlocks = $this->_groupConsecutiveBlocks($blocks);
@@ -97,12 +114,16 @@ class MatrixBuilder extends Component
             // CTA blocks are handled by ImportService after MatrixBuilder runs.
             // We emit them as placeholders in matrixData so positioning is preserved.
             if ($type === 'call_to_action') {
-                $key = 'new' . (++$counter);
+                $counter++;
+                $blockId = isset($item['id']) && $item['id'] !== '' ? (string)$item['id'] : null;
+                [$key, $consumedBlockIds] = $this->_resolveTopLevelKey($blockId, $existingBlockMap, $counter, $matrixData);
+
                 $matrixData[$key] = [
                     'type'   => 'callToAction',
                     'fields' => [],
                     '_cta'   => true,
                 ];
+                $blockKeyConsumption[$key] = $consumedBlockIds;
                 $blockReport[] = ['type' => $type, 'fields' => ['chooseCallToAction'], 'skipped' => false];
                 continue;
             }
@@ -153,8 +174,27 @@ class MatrixBuilder extends Component
                 $allFields['contentiqNotes'] = $notes;
             }
 
-            $key              = 'new' . (++$counter);
-            $matrixData[$key] = ['type' => $mapping['outerType'], 'fields' => $allFields];
+            $counter++;
+
+            if (isset($item['_groupedBlocks'])) {
+                // Grouped outer entries (e.g. consecutive text_and_media) always
+                // recreate: identity would have to be keyed on the group as a
+                // whole, and the grouping shape (which blocks merged together)
+                // can change between syncs — an ambiguous case where a wrong-id
+                // reuse would corrupt an unrelated block. A recreate here is safe
+                // (today's behaviour); see CLAUDE.md's "Text & Media grouping".
+                $key              = 'new' . $counter;
+                $consumedBlockIds = array_values(array_filter(array_map(
+                    static fn(array $b): ?string => isset($b['id']) && $b['id'] !== '' ? (string)$b['id'] : null,
+                    $item['_groupedBlocks'],
+                )));
+            } else {
+                $blockId = isset($item['id']) && $item['id'] !== '' ? (string)$item['id'] : null;
+                [$key, $consumedBlockIds] = $this->_resolveTopLevelKey($blockId, $existingBlockMap, $counter, $matrixData);
+            }
+
+            $matrixData[$key]          = ['type' => $mapping['outerType'], 'fields' => $allFields];
+            $blockKeyConsumption[$key] = $consumedBlockIds;
 
             $innerCount = isset($item['_groupedBlocks']) ? count($item['_groupedBlocks']) : 1;
             $blockReport[] = [
@@ -166,16 +206,74 @@ class MatrixBuilder extends Component
         }
 
         return [
-            'matrixData'  => $matrixData,
-            'blockReport' => $blockReport,
-            'imageReport' => $imageReport,
-            'cardRefs'    => $cardRefs,  // Deferred card refs (passed to ImportService, then SyncJob)
-            'warnings'    => $this->_warnings,
+            'matrixData'          => $matrixData,
+            'blockReport'         => $blockReport,
+            'imageReport'         => $imageReport,
+            'cardRefs'            => $cardRefs,  // Deferred card refs (passed to ImportService, then SyncJob)
+            'warnings'            => $this->_warnings,
+            'blockKeyConsumption' => $blockKeyConsumption,  // Emitted key => payload block id(s) — see ImportService::_recordBlockSyncMap()
         ];
     }
 
     // Private Methods
     // =========================================================================
+
+    /**
+     * Resolves the Matrix key for a TOP-LEVEL, non-grouped block.
+     *
+     * When the block carries a stable payload `id` that has a live mapping in
+     * $existingBlockMap (i.e. preserveBlockIdentity is on and this owner has a
+     * recorded nested element for that block id), returns that element id as
+     * the key so Craft UPDATES the existing nested entry in place. Otherwise —
+     * feature off, no stable id, no mapping row, or a defensive guard trips —
+     * falls back to the standard 'new{counter}' recreate key (today's
+     * behaviour).
+     *
+     * Defensive guards (never trust the map blindly — a wrong-id reuse is
+     * corruption, a recreate is merely a missed optimisation):
+     *   - the mapped value must be a genuine positive int;
+     *   - the resulting key must not already be in use by another block this
+     *     build() call (would mean two payload block ids mapped to the same
+     *     nested element — a bookkeeping error upstream).
+     * Both fall back to 'new{counter}' and log a warning.
+     *
+     * RESIDUAL RISK (documented, not checked here): this does NOT verify the
+     * mapped element is still the same Craft entry TYPE as this block would
+     * produce (e.g. the block's type changed at the same position between
+     * syncs). MatrixBuilder has no cheap way to check a live element's type
+     * without an extra Craft query per top-level block — flagged as a
+     * live-validation risk; see CLAUDE.md's preserveBlockIdentity section.
+     *
+     * @param string|null               $blockId          The block's stable payload id, or null if absent.
+     * @param array<string, int>        $existingBlockMap block_id => nested element id, for this owner.
+     * @param int                       $counter          Current 'new' counter value (already incremented for this item).
+     * @param array<string|int, array>  $matrixData       Matrix data assembled so far this build() call (key-collision guard).
+     * @return array{0: string|int, 1: string[]} [key, consumedBlockIds]
+     */
+    private function _resolveTopLevelKey(?string $blockId, array $existingBlockMap, int $counter, array $matrixData): array
+    {
+        $fallback = ['new' . $counter, $blockId !== null ? [$blockId] : []];
+
+        if ($blockId === null || !isset($existingBlockMap[$blockId])) {
+            return $fallback;
+        }
+
+        $mappedId = $existingBlockMap[$blockId];
+
+        if (!is_int($mappedId) || $mappedId <= 0) {
+            Craft::warning("ContentIQ: block id '{$blockId}' has a non-positive-int mapped element id — falling back to recreate.", __METHOD__);
+
+            return $fallback;
+        }
+
+        if (array_key_exists($mappedId, $matrixData)) {
+            Craft::warning("ContentIQ: block id '{$blockId}' maps to element {$mappedId}, already used by another block this sync — falling back to recreate.", __METHOD__);
+
+            return $fallback;
+        }
+
+        return [$mappedId, [$blockId]];
+    }
 
     /**
      * Groups consecutive blocks that use 'grouped' mode into a single entry.
@@ -1288,10 +1386,126 @@ class MatrixBuilder extends Component
                     'slug' => $parentSlug ?? '',
                     'id' => $parentId,
                 ];
+                // Retain the raw intro nodes (in memory only, like all deferred
+                // refs) so pass 2 can build manual fallback cards from the
+                // block's own prose if the parent slug never resolves.
+                $cardRefs['intro'] = $sourceFields['intro'] ?? [];
             }
         }
 
         return [$additionalFields, $cardRefs];
+    }
+
+    /**
+     * Builds manual fallback card rows from a children-mode block's intro nodes.
+     *
+     * Children mode exports no card items — only {mode, intro, parent} — but the
+     * intro sweep carries everything in the marked range, including the per-card
+     * headings and ctaButtons from the source prose. When pass 2 cannot resolve
+     * the parent slug (page not exported yet), this parses that prose back into
+     * cards so the block renders real manual cards instead of nothing.
+     *
+     * The card pattern rule mirrors detected mode in ContentiQ's serialisers
+     * (Cards.ts / ProseMirrorBlockBuilder): the card heading level is the
+     * most prominent (lowest-numbered) level >= 2 appearing 2+ times. Nodes
+     * before the first card heading are the true intro; each card heading
+     * starts an item whose paragraphs/lists become the body and whose
+     * ctaButton becomes the button (last wins, as in detected mode).
+     *
+     * Items are built through the standard cards innerMatrix mapping so the
+     * fallback uses the same field handlers as detected-mode cards
+     * (heading → cardTitle, body → cardText, button → actionButtonLabel).
+     * No repeating pattern ⇒ cardCount 0, and the caller keeps the block as-is.
+     *
+     * @param array $introNodes ContentNode[] retained in the deferred ref.
+     * @return array{introHtml: string, cardRows: array<string, array>, cardCount: int}
+     */
+    public function buildChildrenFallbackCards(array $introNodes): array
+    {
+        $none = ['introHtml' => '', 'cardRows' => [], 'cardCount' => 0];
+
+        $innerConfig = $this->_mapping['cards']['innerMatrix'] ?? null;
+        if ($innerConfig === null || empty($introNodes)) {
+            return $none;
+        }
+
+        // Pre-scan: count qualifying heading levels to find the card pattern.
+        $levelCounts = [];
+        foreach ($introNodes as $node) {
+            if (($node['type'] ?? '') === 'heading'
+                && (int)($node['level'] ?? 0) >= 2
+                && trim((string)($node['text'] ?? '')) !== ''
+            ) {
+                $level = (int)$node['level'];
+                $levelCounts[$level] = ($levelCounts[$level] ?? 0) + 1;
+            }
+        }
+
+        $cardLevels = array_keys(array_filter($levelCounts, fn(int $count): bool => $count >= 2));
+        sort($cardLevels);
+        $cardHeadingLevel = $cardLevels[0] ?? null;
+
+        if ($cardHeadingLevel === null) {
+            return $none;
+        }
+
+        // Split: true intro before the first card heading, then one item per
+        // card heading, shaped exactly like a detected-mode card item.
+        $trueIntro = [];
+        $items     = [];
+        $current   = null;
+
+        foreach ($introNodes as $node) {
+            $type = $node['type'] ?? '';
+            $isCardHeading = $type === 'heading'
+                && (int)($node['level'] ?? 0) === $cardHeadingLevel
+                && trim((string)($node['text'] ?? '')) !== '';
+
+            if ($isCardHeading) {
+                if ($current !== null) {
+                    $items[] = $current;
+                }
+                $current = [
+                    'heading' => array_diff_key($node, ['type' => true]),
+                    'body'    => [],
+                    'button'  => null,
+                    'image'   => null,
+                ];
+            } elseif ($current === null) {
+                $trueIntro[] = $node;
+            } elseif ($type === 'ctaButton') {
+                $current['button'] = [
+                    'label' => (string)($node['label'] ?? ''),
+                    'url'   => (string)($node['url'] ?? ''),
+                ];
+            } else {
+                $current['body'][] = $node;
+            }
+        }
+
+        if ($current !== null) {
+            $items[] = $current;
+        }
+
+        // Build rows through the standard mapping. Intro nodes carry no images,
+        // so dryRun=true is safe and guarantees no download side effects.
+        $imageReport = [];
+        $cardRows    = [];
+        $counter     = 0;
+
+        foreach ($items as $item) {
+            [$innerFields] = $this->_buildSingleInnerEntry($innerConfig, $item, $imageReport, true);
+            $cardRows['new' . (++$counter)] = [
+                'type'   => $innerConfig['innerType'],
+                'fields' => $innerFields,
+            ];
+        }
+
+        return [
+            'introHtml' => ContentIQImporter::$plugin->nodes->render($trueIntro),
+            'cardRows'  => $cardRows,
+            'cardCount' => count($cardRows),
+        ];
     }
 
     /**

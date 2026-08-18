@@ -11,8 +11,10 @@ use craft\web\UrlManager;
 use craft\base\Element;
 use craft\base\Model;
 use craft\db\Query;
+use craft\events\RegisterUserPermissionsEvent;
 use craft\helpers\Html;
 use craft\helpers\UrlHelper;
+use craft\services\UserPermissions;
 use matrixcreate\contentiqimporter\models\Settings;
 use matrixcreate\contentiqimporter\services\ContentIQApiService;
 use matrixcreate\contentiqimporter\services\GlobalsImportService;
@@ -66,7 +68,7 @@ class ContentIQImporter extends Plugin
     /**
      * @var string
      */
-    public string $schemaVersion = '1.1.0';
+    public string $schemaVersion = '1.2.0';
 
     // Public Methods
     // =========================================================================
@@ -91,6 +93,7 @@ class ContentIQImporter extends Plugin
 
         $this->_registerCpRoutes();
         $this->_registerEntrySidebar();
+        $this->_registerPermissions();
 
         Craft::info(
             Craft::t('contentiq-importer', '{name} plugin loaded', ['name' => $this->name]),
@@ -161,6 +164,31 @@ class ContentIQImporter extends Plugin
                 $event->rules['contentiq-importer/widget-sync']             = 'contentiq-importer/cp/widget-sync';
                 $event->rules['contentiq-importer/clear-notes']           = 'contentiq-importer/cp/clear-notes';
                 $event->rules['contentiq-importer/toggle-lock']           = 'contentiq-importer/cp/toggle-lock';
+            },
+        );
+    }
+
+    /**
+     * Registers the CP user permission gating every mutating ContentIQ action
+     * (uploads, imports, syncs, lock toggles). Only actionMappings/
+     * actionSaveMappings stay admin-only — those write project config.
+     *
+     * @return void
+     */
+    private function _registerPermissions(): void
+    {
+        Event::on(
+            UserPermissions::class,
+            UserPermissions::EVENT_REGISTER_PERMISSIONS,
+            static function (RegisterUserPermissionsEvent $event) {
+                $event->permissions[] = [
+                    'heading' => 'ContentiQ Importer',
+                    'permissions' => [
+                        'contentiq-importer:sync' => [
+                            'label' => Craft::t('contentiq-importer', 'Run ContentiQ sync and imports'),
+                        ],
+                    ],
+                ];
             },
         );
     }

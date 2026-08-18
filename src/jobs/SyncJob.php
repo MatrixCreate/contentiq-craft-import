@@ -4,13 +4,12 @@ namespace matrixcreate\contentiqimporter\jobs;
 
 use Craft;
 use craft\db\Query;
-use craft\elements\Entry;
+use craft\helpers\Db;
 use craft\helpers\Json;
 use craft\helpers\StringHelper;
 use craft\i18n\Translation;
 use craft\queue\BaseJob;
 use matrixcreate\contentiqimporter\ContentIQImporter;
-use Throwable;
 
 /**
  * Queue job that runs a full ContentIQ API sync.
@@ -32,6 +31,29 @@ class SyncJob extends BaseJob
     public int $runId;
 
     /**
+     * Entry IDs to unlock for this run (checked = will sync). Every other
+     * synced entry is (re)locked at the start of the run. Set by the
+     * controller when it pushes this job — see
+     * CpController::actionRunSync(). `null` means "leave lock state
+     * untouched" (mirrors the controller's previous `is_array($unlockIds)`
+     * guard: a malformed/missing selection touches nothing, rather than
+     * locking every entry).
+     *
+     * @var int[]|null
+     */
+    public ?array $unlockIds = null;
+
+    /**
+     * Whether the user consented to importing globals for this run (the
+     * Sync screen's globals checkbox). Applied as the inverse into the
+     * single-row contentiq_globals_sync.locked column at the start of the
+     * run — see CpController::actionRunSync().
+     *
+     * @var bool
+     */
+    public bool $unlockGlobals = false;
+
+    /**
      * @inheritdoc
      */
     public function execute($queue): void
@@ -40,418 +62,420 @@ class SyncJob extends BaseJob
         // the project root — match the CLI behaviour.
         chdir(Craft::getAlias('@webroot'));
 
-        $plugin = ContentIQImporter::$plugin;
+        // Wrap the whole run: any uncaught throw from here on (pass 2 card
+        // reference resolution, globals import, the auto-lock loop, a DB
+        // hiccup, …) must still leave the run row in a terminal state —
+        // otherwise the status poller spins on 'pending' forever (see
+        // CpController::actionSyncStatus()'s staleness fallback for the
+        // belt-and-braces case). _failRun() sets a terminal 'errors' status
+        // and relocks globals; rethrowing afterwards still lets Craft's
+        // queue record the job itself as failed.
+        try {
+            // Apply lock/unlock state and globals consent for this run here —
+            // moved from the controller (which previously wrote these at HTTP
+            // request time, before the job was even queued) so a worker that
+            // never picks up the job, or dies before this point, leaves every
+            // lock/consent untouched instead of leaking an unlock/consent
+            // across a run that never actually executed (see Fix B1). Applied
+            // before pass 1 below so its per-page lock CHECK reads the
+            // intended state.
+            $this->_applyLockState($this->unlockIds);
+            $this->_setGlobalsLock(!$this->unlockGlobals);
 
-        // 1. Fetch export from API.
-        $apiResult = $plugin->api->fetchExport();
+            $plugin = ContentIQImporter::$plugin;
 
-        if (!$apiResult['success']) {
-            $this->_failRun($apiResult['error'] ?? 'API request failed.');
-            return;
-        }
+            // 1. Fetch export from API.
+            $apiResult = $plugin->api->fetchExport();
 
-        $data = $apiResult['data'];
-
-        // 2. Determine pages array.
-        $isBatch = isset($data['pages']) && is_array($data['pages']);
-        $pages   = $isBatch ? $data['pages'] : [$data];
-        $total   = count($pages);
-
-        // 3. PASS 1: Import all pages and build slug → entry ID map.
-        $importService = $plugin->imports;
-        $pageResults   = [];
-        $totalImages   = 0;
-        $hasErrors     = false;
-        $hasWarnings   = false;
-
-        // Resolve section for structure positioning.
-        $config        = Craft::$app->config->getConfigFromFile('contentiq');
-        $sectionHandle = $config['section'] ?? 'pages';
-        $section       = Craft::$app->entries->getSectionByHandle($sectionHandle);
-        $structureId   = $section?->structureId;
-        $structures    = Craft::$app->getStructures();
-
-        // Build slug → entry ID map for hierarchy and card ref resolution.
-        $slugToEntryId = [];
-        $allCardRefs   = [];  // Collected from all pages for pass 2
-
-        foreach ($pages as $i => $pageData) {
-            $this->setProgress($queue, $i / $total, "Importing page " . ($i + 1) . " of {$total}");
-
-            // Collection children route to their configured section, not Pages.
-            $contentType   = $pageData['document']['content_type'] ?? null;
-            $route         = $importService->getContentTypeRoute($contentType);
-            $lookupSection = $route['section'] ?? $sectionHandle;
-
-            // Skip locked entries — look them up in their actual (routed) section.
-            $pageSlug = $pageData['document']['slug'] ?? '';
-            $existingEntry = \craft\elements\Entry::find()
-                ->section($lookupSection)
-                ->slug($pageSlug)
-                ->status(null)
-                ->one();
-
-            if ($existingEntry !== null) {
-                $syncRow = (new Query())
-                    ->select(['locked', 'notes'])
-                    ->from('{{%contentiq_entry_syncs}}')
-                    ->where(['element_id' => $existingEntry->id])
-                    ->one();
-
-                $isLocked = (bool)($syncRow['locked'] ?? false);
-
-                if ($isLocked) {
-                    // Nothing is written this run for a locked entry — 'blocks'
-                    // genuinely stays empty (no MatrixBuilder run happened here
-                    // to report on). blockNotes, however, has a real stored value
-                    // from the last successful sync (contentiq_entry_syncs.notes)
-                    // — surface it instead of a hardcoded '' so the report
-                    // doesn't imply the entry has no content.
-                    $pageResults[] = [
-                        'success' => true,
-                        'slug' => $pageSlug,
-                        'entryId' => $existingEntry->id,
-                        'entryFound' => true,
-                        'title' => $pageData['document']['title'] ?? $pageSlug,
-                        'depth' => $pageData['document']['depth'] ?? 0,
-                        'parentSlug' => $pageData['document']['parent_slug'] ?? null,
-                        'blocks' => [],
-                        'images' => [],
-                        'blockNotes' => (string)($syncRow['notes'] ?? ''),
-                        'seoFieldCount' => 0,
-                        'warnings' => ['Skipped — entry is locked.'],
-                        'error' => null,
-                        'contentType' => $contentType,
-                        'sectionLabel' => $contentType !== null
-                            ? (Craft::$app->entries->getSectionByHandle($lookupSection)?->name ?? $contentType)
-                            : null,
-                    ];
-
-                    if ($pageSlug !== '') {
-                        $slugToEntryId[$pageSlug] = $existingEntry->id;
-                    }
-                    continue;
-                }
+            if (!$apiResult['success']) {
+                $this->_failRun($apiResult['error'] ?? 'API request failed.');
+                return;
             }
 
-            $result = $importService->importPage($pageData, dryRun: false);
+            $data = $apiResult['data'];
 
-            // Handle hierarchy: always re-apply parent and position on every run.
-            $parentSlug = $pageData['document']['parent_slug'] ?? null;
-            $entryId    = $result['entryId'] ?? null;
-            $slug       = $result['slug'] ?? '';
-            $isHomepage = (bool)($pageData['document']['is_homepage'] ?? false);
+            // 2. Validate the decoded export is an object before touching it — a
+            //    non-array/scalar body (null, "ok", a bare number) decodes
+            //    successfully (json_last_error() sees no error) but would otherwise
+            //    reach importPage() as a scalar and throw a TypeError outside the
+            //    per-page catch, killing the whole run.
+            if (!is_array($data)) {
+                $this->_failRun('Malformed export: expected an object.');
+                return;
+            }
 
-            // Collection children are routed to their own section and have no Craft
-            // parent (their collection parent is excluded from export) — skip the
-            // Pages structure positioning / parent resolution for them entirely.
-            if ($contentType === null && $entryId !== null && $structureId !== null && !$isHomepage) {
-                $entry = \craft\elements\Entry::find()->id($entryId)->status(null)->one();
+            // 3. Determine pages array. In batch mode, any element that isn't
+            //    itself an object is malformed — skip it (rather than passing a
+            //    scalar to importPage()) and warn instead of silently dropping it.
+            $isBatch          = isset($data['pages']) && is_array($data['pages']);
+            $skippedMalformed = 0;
 
-                if ($entry !== null) {
-                    try {
-                        if ($parentSlug !== null && $parentSlug !== '') {
-                            // Try current-batch map first, then fall back to a Craft query
-                            // so re-imports correctly place children under existing parents.
-                            $parentId = $slugToEntryId[$parentSlug] ?? null;
+            if ($isBatch) {
+                $pages = [];
 
-                            if ($parentId === null) {
-                                $parentEntry = \craft\elements\Entry::find()
-                                    ->section($sectionHandle)
-                                    ->slug($parentSlug)
-                                    ->status(null)
-                                    ->one();
-                                $parentId = $parentEntry?->id;
-                            }
+                foreach ($data['pages'] as $pageData) {
+                    if (is_array($pageData)) {
+                        $pages[] = $pageData;
+                    } else {
+                        $skippedMalformed++;
+                    }
+                }
+            } else {
+                // Single-page envelope — $data itself is the page, already
+                // confirmed to be an array above.
+                $pages = [$data];
+            }
 
-                            if ($parentId !== null) {
-                                $structures->append($structureId, $entry, $parentId);
+            $total = count($pages);
+
+            // 4. PASS 1: Import all pages and build slug → entry ID map.
+            $importService = $plugin->imports;
+            $pageResults   = [];
+            $totalImages   = 0;
+            $hasErrors     = false;
+            $hasWarnings   = false;
+
+            // Resolve section for structure positioning.
+            $config        = Craft::$app->config->getConfigFromFile('contentiq');
+            $sectionHandle = $config['section'] ?? 'pages';
+            $section       = Craft::$app->entries->getSectionByHandle($sectionHandle);
+            $structureId   = $section?->structureId;
+            $structures    = Craft::$app->getStructures();
+
+            // Build slug → entry ID map for hierarchy and card ref resolution.
+            $slugToEntryId = [];
+            $allCardRefs   = [];  // Collected from all pages for pass 2
+
+            // Surface any malformed batch entries filtered out in step 3 above as
+            // a visible warning row, rather than silently dropping them.
+            if ($skippedMalformed > 0) {
+                $hasWarnings   = true;
+                $pageResults[] = [
+                    'success' => true,
+                    'slug' => '',
+                    'entryId' => null,
+                    'entryFound' => false,
+                    'title' => 'Malformed export entries',
+                    'depth' => 0,
+                    'parentSlug' => null,
+                    'blocks' => [],
+                    'images' => [],
+                    'blockNotes' => '',
+                    'seoFieldCount' => 0,
+                    'warnings' => ["{$skippedMalformed} page(s) in the export were malformed (not an object) and were skipped."],
+                    'error' => null,
+                    'contentType' => null,
+                    'sectionLabel' => null,
+                ];
+            }
+
+            foreach ($pages as $i => $pageData) {
+                $this->setProgress($queue, $i / $total, "Importing page " . ($i + 1) . " of {$total}");
+
+                // Collection children route to their configured section, not Pages.
+                $contentType   = $pageData['document']['content_type'] ?? null;
+                $route         = $importService->getContentTypeRoute($contentType);
+                $lookupSection = $route['section'] ?? $sectionHandle;
+
+                // Skip locked entries. Resolution goes through the same shared
+                // resolver ImportService uses internally (findExistingEntry), so the
+                // lock check and the import it's gating always agree on which entry
+                // a page maps to — the previous inline section+slug lookup here
+                // never matched the homepage Single, so a locked homepage's lock
+                // was never found and it got silently overwritten on every sync.
+                $pageSlug      = $pageData['document']['slug'] ?? '';
+                $existingEntry = $importService->findExistingEntry($pageData);
+
+                // 3c. Duplicate leaf slug within this same export — the second
+                // occurrence would otherwise silently overwrite the first in
+                // $slugToEntryId below (poisoning hierarchy/card-ref resolution)
+                // with no visible trace. Surfaced as a warning only; import
+                // behaviour (last one wins) is unchanged. A blank slug (legitimate
+                // for a homepage page) is never flagged.
+                $isDuplicateSlug = $pageSlug !== '' && isset($slugToEntryId[$pageSlug]);
+
+                if ($existingEntry !== null) {
+                    // A missing sync row means this entry has never been through a
+                    // ContentIQ sync — treat it as locked (same default the Sync UI
+                    // uses: `$lockedMap[$entry->id] ?? true`), so a hand-built entry
+                    // that collides with a synced slug/section is never silently
+                    // overwritten just because it has no row yet.
+                    $syncRow = (new Query())
+                        ->select(['locked', 'notes'])
+                        ->from('{{%contentiq_entry_syncs}}')
+                        ->where(['element_id' => $existingEntry->id])
+                        ->one();
+
+                    // craft\db\Query::one() returns null when no row matches.
+                    $isLocked = $syncRow === null ? true : (bool)$syncRow['locked'];
+
+                    if ($isLocked) {
+                        $lockedWarnings = ['Skipped — entry is locked.'];
+
+                        if ($isDuplicateSlug) {
+                            $lockedWarnings[] = "Duplicate slug '{$pageSlug}' — a page earlier in this export already used this slug; hierarchy and card-reference resolution may point at the wrong entry.";
+                        }
+
+                        $pageResults[] = [
+                            'success' => true,
+                            'slug' => $pageSlug,
+                            'entryId' => $existingEntry->id,
+                            'entryFound' => true,
+                            'title' => $pageData['document']['title'] ?? $pageSlug,
+                            'depth' => $pageData['document']['depth'] ?? 0,
+                            'parentSlug' => $pageData['document']['parent_slug'] ?? null,
+                            'blocks' => [],
+                            'images' => [],
+                            // Nothing is written this run for a locked entry, so
+                            // 'blocks' stays genuinely empty. blockNotes, though,
+                            // has a real stored value from the last successful sync
+                            // (contentiq_entry_syncs.notes) — surface it rather than
+                            // a hardcoded '' so the report doesn't imply the entry
+                            // has no content. `??` is null-safe even though $syncRow
+                            // may be null (the default-to-locked branch above).
+                            'blockNotes' => (string)($syncRow['notes'] ?? ''),
+                            'seoFieldCount' => 0,
+                            'warnings' => $lockedWarnings,
+                            'error' => null,
+                            'contentType' => $contentType,
+                            'sectionLabel' => $contentType !== null
+                                ? (Craft::$app->entries->getSectionByHandle($lookupSection)?->name ?? $contentType)
+                                : null,
+                            // Tells the auto-lock step (below) to leave this entry's
+                            // sync row untouched — it was skipped, not synced.
+                            'skippedLocked' => true,
+                        ];
+
+                        if ($pageSlug !== '') {
+                            $slugToEntryId[$pageSlug] = $existingEntry->id;
+                        }
+                        continue;
+                    }
+                }
+
+                $result = $importService->importPage($pageData, dryRun: false);
+
+                // Handle hierarchy: always re-apply parent and position on every run.
+                $parentSlug = $pageData['document']['parent_slug'] ?? null;
+                $entryId    = $result['entryId'] ?? null;
+                $slug       = $result['slug'] ?? '';
+                $isHomepage = (bool)($pageData['document']['is_homepage'] ?? false);
+
+                // Collection children are routed to their own section and have no Craft
+                // parent (their collection parent is excluded from export) — skip the
+                // Pages structure positioning / parent resolution for them entirely.
+                if ($contentType === null && $entryId !== null && $structureId !== null && !$isHomepage) {
+                    $entry = \craft\elements\Entry::find()->id($entryId)->status(null)->one();
+
+                    if ($entry !== null) {
+                        try {
+                            if ($parentSlug !== null && $parentSlug !== '') {
+                                // Try current-batch map first, then fall back to a Craft query
+                                // so re-imports correctly place children under existing parents.
+                                $parentId = $slugToEntryId[$parentSlug] ?? null;
+
+                                if ($parentId === null) {
+                                    $parentEntry = \craft\elements\Entry::find()
+                                        ->section($sectionHandle)
+                                        ->slug($parentSlug)
+                                        ->status(null)
+                                        ->one();
+                                    $parentId = $parentEntry?->id;
+                                }
+
+                                if ($parentId !== null) {
+                                    $structures->append($structureId, $entry, $parentId);
+                                } else {
+                                    $structures->appendToRoot($structureId, $entry);
+                                    $result['warnings'][] = "Parent slug '{$parentSlug}' not found — entry saved at root level.";
+                                }
                             } else {
                                 $structures->appendToRoot($structureId, $entry);
-                                $result['warnings'][] = "Parent slug '{$parentSlug}' not found — entry saved at root level.";
                             }
-                        } else {
-                            $structures->appendToRoot($structureId, $entry);
+                        } catch (\Throwable $e) {
+                            $result['warnings'][] = 'Could not update structure position: ' . $e->getMessage();
                         }
-                    } catch (\Throwable $e) {
-                        $result['warnings'][] = 'Could not update structure position: ' . $e->getMessage();
+                    }
+                }
+
+                // 3c. Surface the duplicate-slug warning computed above (see
+                // $isDuplicateSlug) on this page's own result row.
+                if ($isDuplicateSlug) {
+                    $result['warnings'][] = "Duplicate slug '{$pageSlug}' — a page earlier in this export already used this slug; hierarchy and card-reference resolution may point at the wrong entry.";
+                }
+
+                // Track slug → entry ID for card ref lookups in pass 2.
+                if ($entryId !== null && $slug !== '') {
+                    $slugToEntryId[$slug] = $entryId;
+                }
+
+                // Collect deferred card ref sets from this page for pass 2 resolution.
+                // Kept as a plain LIST of ref sets — each already carries its blockIndex,
+                // so a page with several Cards blocks resolves each independently.
+                if ($entryId !== null && !empty($result['cardRefs'])) {
+                    $allCardRefs[$entryId] = array_values($result['cardRefs']);
+                }
+
+                // Attach hierarchy metadata for the report template.
+                $result['title']      = $pageData['document']['title'] ?? $slug;
+                $result['depth']      = $pageData['document']['depth'] ?? 0;
+                $result['parentSlug'] = $pageData['document']['parent_slug'] ?? null;
+
+                // Thread the stable ContentIQ page id through to the auto-lock
+                // step below, which persists it into contentiq_entry_syncs so
+                // findExistingEntry() can resolve this page by id next sync,
+                // even if its slug changes.
+                $result['contentiqPageId'] = isset($pageData['document']['id'])
+                    ? (int)$pageData['document']['id']
+                    : null;
+
+                $pageResults[] = $result;
+                $totalImages  += count($result['images'] ?? []);
+
+                if (!$result['success']) {
+                    $hasErrors = true;
+                }
+                if (!empty($result['warnings'])) {
+                    $hasWarnings = true;
+                }
+            }
+
+            $this->setProgress($queue, 1);
+
+            // 5. PASS 2: Resolve deferred card references via the shared resolver.
+            //    Warnings land on the owning page's result row and count toward the
+            //    run status (previously pass-2 warnings never flipped $hasWarnings).
+            $cardWarnings = $importService->resolveCardReferences($allCardRefs, $slugToEntryId);
+
+            foreach ($cardWarnings as $entryId => $warnings) {
+                if (empty($warnings)) {
+                    continue;
+                }
+
+                $hasWarnings = true;
+
+                foreach ($pageResults as $i => $r) {
+                    if (($r['entryId'] ?? null) === $entryId) {
+                        array_push($pageResults[$i]['warnings'], ...$warnings);
+                        break;
                     }
                 }
             }
 
-            // Track slug → entry ID for card ref lookups in pass 2.
-            if ($entryId !== null && $slug !== '') {
-                $slugToEntryId[$slug] = $entryId;
+            // 6. Import globals (envelope may carry a `globals` key). URL-prefix drift
+            //    is advisory and runs read-only regardless of the lock; the write
+            //    path only runs when the user has consented (row unlocked this run).
+            //    The pages path above is completely untouched by any of this.
+            $globalsReport = null;
+
+            if (isset($data['globals']) && is_array($data['globals'])) {
+                $globals = $data['globals'];
+                $drift   = $plugin->globals->checkUrlPrefixDrift($globals['collections'] ?? []);
+
+                if ($this->_globalsLocked()) {
+                    $globalsReport = [
+                        'locked'  => true,
+                        'skipped' => 'Skipped — globals are locked.',
+                        'drift'   => $drift,
+                    ];
+                } else {
+                    $globalsReport          = $plugin->globals->import($globals, dryRun: false);
+                    $globalsReport['drift'] = $drift;
+                    $totalImages           += $globalsReport['imageCount'] ?? 0;
+
+                    // Relock and stamp on success.
+                    $this->_relockGlobals();
+                }
+
+                if (!empty($drift)
+                    || !empty($globalsReport['warnings'] ?? [])
+                    || !empty($globalsReport['fieldNotes'] ?? [])) {
+                    $hasWarnings = true;
+                }
             }
 
-            // Collect deferred card ref sets from this page for pass 2 resolution.
-            // Kept as a plain LIST of ref sets — each already carries its blockIndex,
-            // so a page with several Cards blocks resolves each independently.
-            if ($entryId !== null && !empty($result['cardRefs'])) {
-                $allCardRefs[$entryId] = array_values($result['cardRefs']);
-            }
-
-            // Attach hierarchy metadata for the report template.
-            $result['title']      = $pageData['document']['title'] ?? $slug;
-            $result['depth']      = $pageData['document']['depth'] ?? 0;
-            $result['parentSlug'] = $pageData['document']['parent_slug'] ?? null;
-
-            $pageResults[] = $result;
-            $totalImages  += count($result['images'] ?? []);
-
-            if (!$result['success']) {
-                $hasErrors = true;
-            }
-            if (!empty($result['warnings'])) {
-                $hasWarnings = true;
-            }
-        }
-
-        $this->setProgress($queue, 1);
-
-        // 4. PASS 2: Resolve deferred card references.
-        // Note: dryRun applies to pass 1 only (skips image downloads). Pass 2 always
-        // resolves and reports, but only writes if not dry-run.
-        $this->_resolveCardReferencesPass2($pageResults, $allCardRefs, $slugToEntryId, false);
-
-        // 5. Import globals (envelope may carry a `globals` key). URL-prefix drift
-        //    is advisory and runs read-only regardless of the lock; the write
-        //    path only runs when the user has consented (row unlocked this run).
-        //    The pages path above is completely untouched by any of this.
-        $globalsReport = null;
-
-        if (isset($data['globals']) && is_array($data['globals'])) {
-            $globals = $data['globals'];
-            $drift   = $plugin->globals->checkUrlPrefixDrift($globals['collections'] ?? []);
-
-            if ($this->_globalsLocked()) {
-                $globalsReport = [
-                    'locked'  => true,
-                    'skipped' => 'Skipped — globals are locked.',
-                    'drift'   => $drift,
-                ];
+            // 7. Determine overall status.
+            if ($hasErrors) {
+                $status = 'errors';
+            } elseif ($hasWarnings) {
+                $status = 'warnings';
             } else {
-                $globalsReport          = $plugin->globals->import($globals, dryRun: false);
-                $globalsReport['drift'] = $drift;
-                $totalImages           += $globalsReport['imageCount'] ?? 0;
-
-                // Relock and stamp on success.
-                $this->_relockGlobals();
+                $status = 'success';
             }
 
-            if (!empty($drift)
-                || !empty($globalsReport['warnings'] ?? [])
-                || !empty($globalsReport['fieldNotes'] ?? [])) {
-                $hasWarnings = true;
-            }
-        }
+            // 8. Update the pre-created run record. The result is a shape-tagged
+            //    object ({pages, globals}); old runs remain flat arrays.
+            Craft::$app->getDb()->createCommand()->update(
+                '{{%contentiq_import_runs}}',
+                [
+                    'pageCount'   => count($pageResults),
+                    'imageCount'  => $totalImages,
+                    'status'      => $status,
+                    'result'      => Json::encode(['pages' => $pageResults, 'globals' => $globalsReport]),
+                    'dateUpdated' => Db::prepareDateForDb(new \DateTime()),
+                ],
+                ['id' => $this->runId],
+            )->execute();
 
-        // 6. Determine overall status.
-        if ($hasErrors) {
-            $status = 'errors';
-        } elseif ($hasWarnings) {
-            $status = 'warnings';
-        } else {
-            $status = 'success';
-        }
+            // 9. Auto-lock all successfully synced entries.
+            // After every sync, imported entries are locked so subsequent syncs
+            // won't overwrite them unless the user explicitly unlocks them.
+            $db  = Craft::$app->getDb();
+            $now = Db::prepareDateForDb(new \DateTime());
 
-        // 7. Update the pre-created run record. The result is a shape-tagged
-        //    object ({pages, globals}); old runs remain flat arrays.
-        Craft::$app->getDb()->createCommand()->update(
-            '{{%contentiq_import_runs}}',
-            [
-                'pageCount'   => count($pageResults),
-                'imageCount'  => $totalImages,
-                'status'      => $status,
-                'result'      => Json::encode(['pages' => $pageResults, 'globals' => $globalsReport]),
-                'dateUpdated' => (new \DateTime())->format('Y-m-d H:i:s'),
-            ],
-            ['id' => $this->runId],
-        )->execute();
+            foreach ($pageResults as $result) {
+                if (!($result['success'] ?? false) || !($result['entryId'] ?? null)) {
+                    continue;
+                }
 
-        // 8. Auto-lock all successfully synced entries.
-        // After every sync, imported entries are locked so subsequent syncs
-        // won't overwrite them unless the user explicitly unlocks them.
-        $db  = Craft::$app->getDb();
-        $now = (new \DateTime())->format('Y-m-d H:i:s');
+                // Skipped-locked entries were never touched — leave their existing
+                // row alone (locked stays 1, synced_at/notes stay whatever they
+                // were) so the audit trail still shows "skipped" instead of being
+                // overwritten to look like a fresh sync.
+                if (!empty($result['skippedLocked'])) {
+                    continue;
+                }
 
-        foreach ($pageResults as $result) {
-            if (!($result['success'] ?? false) || !($result['entryId'] ?? null)) {
-                continue;
-            }
+                $entryId = $result['entryId'];
 
-            $entryId = $result['entryId'];
+                $exists = (new Query())
+                    ->from('{{%contentiq_entry_syncs}}')
+                    ->where(['element_id' => $entryId])
+                    ->exists();
 
-            $exists = (new Query())
-                ->from('{{%contentiq_entry_syncs}}')
-                ->where(['element_id' => $entryId])
-                ->exists();
-
-            if ($exists) {
-                $db->createCommand()->update('{{%contentiq_entry_syncs}}', [
+                // Record the ContentIQ page id → element_id mapping (when the
+                // page carried one) so findExistingEntry() can resolve this
+                // entry by id on the next sync even if its slug changes.
+                $syncData = [
                     'locked'    => true,
                     'synced_at' => $now,
                     'notes'     => $result['blockNotes'] ?? '',
-                ], ['element_id' => $entryId])->execute();
-            } else {
-                $db->createCommand()->insert('{{%contentiq_entry_syncs}}', [
-                    'element_id' => $entryId,
-                    'locked'     => true,
-                    'synced_at'  => $now,
-                    'notes'      => $result['blockNotes'] ?? '',
-                ])->execute();
-            }
-        }
-    }
+                ];
 
-    /**
-     * PASS 2: Resolve deferred card references in entryCards blocks.
-     *
-     * After all pages are imported (so the slug→entry ID map is complete), each
-     * deferred ref set recorded by MatrixBuilder is applied to its block:
-     *   - pages (2+ refs): populate the block's `entries` relation in order.
-     *   - pages (single ref, D6): write one manual `card` row with the `entry`
-     *     relation + useEntryCardDetails, so Craft's single-entry auto-expansion
-     *     never fires (pages mode is literal).
-     *   - children (arbitrary parent): `entries` = [parent] — the template's
-     *     single-entry expansion renders the parent's children.
-     *   - children (parent == host page): nothing deferred (useChildPages set
-     *     in pass 1).
-     *
-     * Blocks are located by blockIndex — the 0-based position among the matrix
-     * blocks MatrixBuilder emitted, which matches the saved contentBlocks order.
-     * Nested matrix blocks are elements, so each modified block is saved
-     * directly; the owner entry is never re-saved. Unresolvable slugs degrade
-     * to a warning on the page result.
-     *
-     * @param array $pageResults   Page result array, updated with resolution warnings.
-     * @param array $allCardRefs   Deferred ref sets keyed by entryId; each value is a LIST
-     *                             of {blockIndex, mode, refs?|parent?, singlePageMode?}.
-     * @param array $slugToEntryId In-batch slug→entry ID map from pass 1.
-     * @param bool  $dryRun        If true, resolve and warn but write nothing.
-     * @return void
-     */
-    private function _resolveCardReferencesPass2(array &$pageResults, array $allCardRefs, array $slugToEntryId, bool $dryRun): void
-    {
-        $config        = Craft::$app->config->getConfigFromFile('contentiq');
-        $sectionHandle = $config['section'] ?? 'pages';
-
-        // Resolve a page slug to an entry ID: in-batch map first, then DB fallback.
-        $resolve = function (string $slug) use ($slugToEntryId, $sectionHandle): ?int {
-            if (isset($slugToEntryId[$slug])) {
-                return $slugToEntryId[$slug];
-            }
-
-            return Entry::find()
-                ->section($sectionHandle)
-                ->slug($slug)
-                ->status(null)
-                ->one()?->id;
-        };
-
-        foreach ($allCardRefs as $entryId => $refSets) {
-            // Locate this entry's page result so warnings land on the right row.
-            $resultIdx = null;
-            foreach ($pageResults as $i => $r) {
-                if (($r['entryId'] ?? null) === $entryId) {
-                    $resultIdx = $i;
-                    break;
-                }
-            }
-
-            if ($resultIdx === null) {
-                continue;
-            }
-
-            $entry = Entry::find()->id($entryId)->status(null)->one();
-            if (!$entry) {
-                continue;
-            }
-
-            // Ordered nested blocks — positions match MatrixBuilder's emitted order.
-            $blocks = $entry->getFieldValue('contentBlocks')->status(null)->all();
-
-            foreach ($refSets as $refSet) {
-                $blockIndex = $refSet['blockIndex'] ?? null;
-                $block      = $blockIndex !== null ? ($blocks[$blockIndex] ?? null) : null;
-
-                if (!$block || $block->getType()->handle !== 'entryCards') {
-                    $pageResults[$resultIdx]['warnings'][] = 'Cards block at position '
-                        . var_export($blockIndex, true) . ' not found — card references skipped.';
-                    continue;
+                if (!empty($result['contentiqPageId'])) {
+                    $syncData['contentiq_page_id'] = $result['contentiqPageId'];
                 }
 
-                $mode  = $refSet['mode'] ?? '';
-                $dirty = false;
-
-                if ($mode === 'pages' && !empty($refSet['singlePageMode'])) {
-                    // D6: one literal page — a single manual card row rendering
-                    // from the referenced entry's own card fields.
-                    $slug       = $refSet['refs'][0]['slug'] ?? '';
-                    $resolvedId = $slug !== '' ? $resolve($slug) : null;
-
-                    if ($resolvedId !== null) {
-                        $block->setFieldValue('entryCards', [
-                            'new1' => [
-                                'type'   => 'card',
-                                'fields' => [
-                                    'entry'               => [$resolvedId],
-                                    'useEntryCardDetails' => true,
-                                ],
-                            ],
-                        ]);
-                        $dirty = true;
-                    } else {
-                        $pageResults[$resultIdx]['warnings'][] = "Card reference slug '{$slug}' not found — card left empty.";
-                    }
-                } elseif ($mode === 'pages') {
-                    $entryIds = [];
-
-                    foreach ($refSet['refs'] ?? [] as $ref) {
-                        $slug = $ref['slug'] ?? '';
-                        if ($slug === '') {
-                            continue;
-                        }
-
-                        $resolvedId = $resolve($slug);
-                        if ($resolvedId !== null) {
-                            $entryIds[] = $resolvedId;
-                        } else {
-                            $pageResults[$resultIdx]['warnings'][] = "Card reference slug '{$slug}' not found — card skipped.";
-                        }
-                    }
-
-                    $block->setFieldValue('entries', $entryIds);
-                    $dirty = true;
-                } elseif ($mode === 'children') {
-                    $slug = $refSet['parent']['slug'] ?? '';
-                    if ($slug === '') {
-                        // Host-page children — useChildPages was set in pass 1.
-                        continue;
-                    }
-
-                    $parentEntryId = $resolve($slug);
-                    if ($parentEntryId !== null) {
-                        $block->setFieldValue('entries', [$parentEntryId]);
-                        $dirty = true;
-                    } else {
-                        $pageResults[$resultIdx]['warnings'][] = "Children parent slug '{$slug}' not found — children cards not populated.";
-                    }
-                }
-
-                if ($dirty && !$dryRun) {
-                    try {
-                        // Nested matrix blocks are elements — saving the block
-                        // persists its field changes; the owner needs no re-save.
-                        if (!Craft::$app->elements->saveElement($block)) {
-                            $pageResults[$resultIdx]['warnings'][] = 'Could not save card references: '
-                                . implode('; ', $block->getFirstErrors());
-                        }
-                    } catch (Throwable $e) {
-                        $pageResults[$resultIdx]['warnings'][] = 'Could not save card references: ' . $e->getMessage();
-                    }
+                if ($exists) {
+                    $db->createCommand()->update(
+                        '{{%contentiq_entry_syncs}}',
+                        $syncData,
+                        ['element_id' => $entryId],
+                    )->execute();
+                } else {
+                    $db->createCommand()->insert(
+                        '{{%contentiq_entry_syncs}}',
+                        array_merge(['element_id' => $entryId], $syncData),
+                    )->execute();
                 }
             }
+        } catch (\Throwable $e) {
+            Craft::error(
+                'ContentIQImporter sync job exception: ' . $e->getMessage() . "\n" . $e->getTraceAsString(),
+                __METHOD__,
+            );
+            $this->_failRun('Unexpected error: ' . $e->getMessage());
+            throw $e;
         }
     }
 
@@ -461,6 +485,72 @@ class SyncJob extends BaseJob
     protected function defaultDescription(): ?string
     {
         return Translation::prep('contentiq-importer', 'Syncing content from ContentiQ');
+    }
+
+    /**
+     * Applies the lock/unlock selection from the Sync screen — locks every
+     * synced entry, then unlocks only the given IDs. `null` is a no-op (see
+     * the $unlockIds property docblock).
+     *
+     * Moved here from CpController::actionRunSync() (Fix B1) — same exact
+     * semantics, just applied when the job actually runs instead of when the
+     * controller pushes it.
+     *
+     * @param int[]|null $unlockIds
+     * @return void
+     */
+    private function _applyLockState(?array $unlockIds): void
+    {
+        if ($unlockIds === null) {
+            return;
+        }
+
+        $db = Craft::$app->getDb();
+
+        // Lock everything first, then unlock only the selected entries. An
+        // empty $unlockIds (the user selected none) still runs this block —
+        // it locks every synced entry and simply has nothing to unlock, so
+        // "select none" actually means "sync nothing" instead of leaving
+        // previously-unlocked rows unlocked.
+        $db->createCommand()
+            ->update('{{%contentiq_entry_syncs}}', ['locked' => true])
+            ->execute();
+
+        if (!empty($unlockIds)) {
+            $db->createCommand()
+                ->update(
+                    '{{%contentiq_entry_syncs}}',
+                    ['locked' => false],
+                    ['element_id' => $unlockIds],
+                )
+                ->execute();
+        }
+    }
+
+    /**
+     * Sets the single globals-sync lock row, creating it if absent.
+     *
+     * Moved here from CpController::_setGlobalsLock() (Fix B1) — identical
+     * behaviour, just applied when the job actually runs.
+     *
+     * @param bool $locked
+     * @return void
+     */
+    private function _setGlobalsLock(bool $locked): void
+    {
+        $db     = Craft::$app->getDb();
+        $exists = (new Query())->from('{{%contentiq_globals_sync}}')->exists();
+
+        if ($exists) {
+            $db->createCommand()
+                ->update('{{%contentiq_globals_sync}}', ['locked' => $locked])
+                ->execute();
+            return;
+        }
+
+        $db->createCommand()
+            ->insert('{{%contentiq_globals_sync}}', ['locked' => $locked])
+            ->execute();
     }
 
     /**
@@ -476,6 +566,9 @@ class SyncJob extends BaseJob
             ->from('{{%contentiq_globals_sync}}')
             ->one();
 
+        // craft\db\Query::one() returns null when no row matches. A missing
+        // row means globals have never been consented to — treat as locked
+        // (the safe default the globals model documents).
         if ($row === null) {
             return true;
         }
@@ -492,7 +585,7 @@ class SyncJob extends BaseJob
     private function _relockGlobals(): void
     {
         $db  = Craft::$app->getDb();
-        $now = (new \DateTime())->format('Y-m-d H:i:s');
+        $now = Db::prepareDateForDb(new \DateTime());
 
         $exists = (new Query())->from('{{%contentiq_globals_sync}}')->exists();
 
@@ -520,7 +613,7 @@ class SyncJob extends BaseJob
             [
                 'status'      => 'errors',
                 'result'      => Json::encode([['success' => false, 'slug' => '', 'error' => $error, 'warnings' => []]]),
-                'dateUpdated' => (new \DateTime())->format('Y-m-d H:i:s'),
+                'dateUpdated' => Db::prepareDateForDb(new \DateTime()),
             ],
             ['id' => $this->runId],
         )->execute();

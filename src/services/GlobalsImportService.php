@@ -136,12 +136,26 @@ class GlobalsImportService extends Component
             'imagesReused' => 0,
         ];
 
+        // The four writes below (offices upserts/deletes + the three global-set
+        // saves) are wrapped in a single DB transaction so a partial failure
+        // rolls back instead of leaving globals half-written. Only started for
+        // a real run — a dry run performs no writes, so there's nothing to
+        // transact. Image downloads happen inline inside these methods (as
+        // part of building each field's value ahead of its save); pulling them
+        // out to sit fully outside the transaction would need a larger
+        // refactor, so — per the same tradeoff made for image I/O elsewhere —
+        // they're left inside here rather than adding that risk.
+        $transaction = $dryRun ? null : Craft::$app->getDb()->beginTransaction();
+
         try {
             $this->_importOffices($globals, $dryRun, $report);
             $this->_writeCompanyInfo($globals, $dryRun, $report);
             $this->_writeGlobalContent($globals, $dryRun, $report);
             $this->_writeSiteConfig($globals, $dryRun, $report);
+
+            $transaction?->commit();
         } catch (Throwable $e) {
+            $transaction?->rollBack();
             Craft::error('ContentIQ globals import failed: ' . $e->getMessage() . "\n" . $e->getTraceAsString(), __METHOD__);
             $report['warnings'][] = 'Globals import error: ' . $e->getMessage();
         } finally {
@@ -258,10 +272,14 @@ class GlobalsImportService extends Component
      */
     private function _importOffices(array $globals, bool $dryRun, array &$report): void
     {
-        // Only an explicit `offices` array may drive upserts/deletion. An absent
-        // key (partial envelope) must never be read as "delete every office".
-        if (!array_key_exists('offices', $globals)) {
-            $report['warnings'][] = 'Globals payload has no `offices` key — offices pipeline skipped (no upsert, deletion, or relation write).';
+        // Only an explicit, well-formed `offices` array may drive upserts/
+        // deletion. An absent key (partial envelope) or a present-but-malformed
+        // value (e.g. `"offices": null`) must never be read as "delete every
+        // office" — both fall through to the same no-op skip below.
+        if (!array_key_exists('offices', $globals) || !is_array($globals['offices'])) {
+            $report['warnings'][] = array_key_exists('offices', $globals)
+                ? 'Globals payload `offices` is present but not an array — offices pipeline skipped (no upsert, deletion, or relation write).'
+                : 'Globals payload has no `offices` key — offices pipeline skipped (no upsert, deletion, or relation write).';
 
             return;
         }
@@ -716,7 +734,7 @@ class GlobalsImportService extends Component
         }
 
         $config   = $this->_globalsConfig();
-        $branding = $globals['branding'] ?? [];
+        $branding = is_array($globals['branding'] ?? null) ? $globals['branding'] : [];
 
         // Branding assets import into the flat brandAssets volume. Dry-run
         // resolves read-only — no folder record is created, no throw on a
@@ -730,8 +748,18 @@ class GlobalsImportService extends Component
         }
 
         $values = [];
+
+        // Each logo/favicon sub-key is written only when present in the wire
+        // `branding` object (an entirely absent `branding` key behaves the
+        // same, since $branding is then []) — an absent sub-key leaves the
+        // existing asset untouched. A present (even null) sub-key is a real
+        // edit and rebuilds that field, clearing it when there's no usable asset.
         foreach (['main_logo' => 'mainLogo', 'footer_logo' => 'footerLogo', 'email_logo' => 'emailLogo', 'favicon' => 'favicon'] as $wireKey => $handle) {
-            $asset = $branding[$wireKey] ?? null;
+            if (!array_key_exists($wireKey, $branding)) {
+                continue;
+            }
+
+            $asset = $branding[$wireKey];
             $id    = $this->_countImage($images->importFromField(is_array($asset) ? $asset : null, $dryRun), $report);
             $values[$handle] = $id !== null ? [$id] : [];
         }
@@ -745,27 +773,34 @@ class GlobalsImportService extends Component
             ));
         }
 
-        // socialNetworks — rebuilt wholesale. Inner row fields are filtered
-        // against the inner entry type's own layout; a missing type skips the
-        // whole matrix (rather than throwing on normalize).
-        $social = $this->_matrixRows(
-            $globals['social_networks'] ?? [],
-            'socialNetwork',
-            function (array $social): array {
-                $fields = ['theUrl' => $this->_linkValue($social['url'] ?? null)];
-                $icon   = $this->_socialIcon($social['url'] ?? null);
+        // socialNetworks — rebuilt wholesale, but only when the payload
+        // actually carries a `social_networks` key. An absent key leaves the
+        // existing Matrix untouched; a present-but-empty array is a real
+        // "clear all" edit. Inner row fields are filtered against the inner
+        // entry type's own layout; a missing type skips the whole matrix
+        // (rather than throwing on normalize).
+        if (array_key_exists('social_networks', $globals)) {
+            $socialWire = is_array($globals['social_networks']) ? $globals['social_networks'] : [];
 
-                if ($icon !== null) {
-                    $fields['socialNetworkIcon'] = $icon;
-                }
+            $social = $this->_matrixRows(
+                $socialWire,
+                'socialNetwork',
+                function (array $social): array {
+                    $fields = ['theUrl' => $this->_linkValue($social['url'] ?? null)];
+                    $icon   = $this->_socialIcon($social['url'] ?? null);
 
-                return $fields;
-            },
-            $report,
-        );
+                    if ($icon !== null) {
+                        $fields['socialNetworkIcon'] = $icon;
+                    }
 
-        if ($social !== null) {
-            $values['socialNetworks'] = $social;
+                    return $fields;
+                },
+                $report,
+            );
+
+            if ($social !== null) {
+                $values['socialNetworks'] = $social;
+            }
         }
 
         $filtered = $this->_filterToLayout($values, $set->getFieldLayout(), 'companyInfo', $report);
@@ -813,23 +848,31 @@ class GlobalsImportService extends Component
         }
 
         $values = [];
-        $trust  = $this->_matrixRows(
-            $globals['trust_signals'] ?? [],
-            'trustSignal',
-            function (array $signal) use ($images, $dryRun, &$report): array {
-                $logo = $signal['logo'] ?? null;
-                $id   = $this->_countImage($images->importFromField(is_array($logo) ? $logo : null, $dryRun), $report);
 
-                return [
-                    'logo'   => $id !== null ? [$id] : [],
-                    'theUrl' => $this->_linkValue($signal['url'] ?? null),
-                ];
-            },
-            $report,
-        );
+        // trustSignals — rebuilt wholesale, but only when the payload actually
+        // carries a `trust_signals` key. An absent key leaves the existing
+        // Matrix untouched; a present-but-empty array is a real "clear all" edit.
+        if (array_key_exists('trust_signals', $globals)) {
+            $trustWire = is_array($globals['trust_signals']) ? $globals['trust_signals'] : [];
 
-        if ($trust !== null) {
-            $values['trustSignals'] = $trust;
+            $trust = $this->_matrixRows(
+                $trustWire,
+                'trustSignal',
+                function (array $signal) use ($images, $dryRun, &$report): array {
+                    $logo = $signal['logo'] ?? null;
+                    $id   = $this->_countImage($images->importFromField(is_array($logo) ? $logo : null, $dryRun), $report);
+
+                    return [
+                        'logo'   => $id !== null ? [$id] : [],
+                        'theUrl' => $this->_linkValue($signal['url'] ?? null),
+                    ];
+                },
+                $report,
+            );
+
+            if ($trust !== null) {
+                $values['trustSignals'] = $trust;
+            }
         }
 
         $filtered = $this->_filterToLayout($values, $set->getFieldLayout(), 'globalContent', $report);
@@ -851,7 +894,10 @@ class GlobalsImportService extends Component
 
     /**
      * Writes the siteConfig global set: head/body scripts and the analytics id.
-     * Null wire values clear the field.
+     * Each sub-key is written only when present in the wire `scripts` object
+     * (an entirely absent `scripts` key behaves the same, since $scripts is
+     * then []) — an absent sub-key leaves the existing script/id untouched. A
+     * present (including null) wire value is a real edit and clears the field.
      *
      * @param array $globals
      * @param bool  $dryRun
@@ -867,12 +913,16 @@ class GlobalsImportService extends Component
             return;
         }
 
-        $scripts = $globals['scripts'] ?? [];
-        $values  = [
-            'headScripts'      => (string)($scripts['head'] ?? ''),
-            'bodyScripts'      => (string)($scripts['body'] ?? ''),
-            'googleAnalyticsId' => (string)($scripts['google_analytics_id'] ?? ''),
-        ];
+        $scripts = is_array($globals['scripts'] ?? null) ? $globals['scripts'] : [];
+        $values  = [];
+
+        foreach (['head' => 'headScripts', 'body' => 'bodyScripts', 'google_analytics_id' => 'googleAnalyticsId'] as $wireKey => $handle) {
+            if (!array_key_exists($wireKey, $scripts)) {
+                continue;
+            }
+
+            $values[$handle] = (string)$scripts[$wireKey];
+        }
 
         $filtered = $this->_filterToLayout($values, $set->getFieldLayout(), 'siteConfig', $report);
 

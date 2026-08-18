@@ -16,6 +16,7 @@ use craft\helpers\StringHelper;
 use GuzzleHttp\Exception\GuzzleException;
 use GuzzleHttp\RequestOptions;
 use matrixcreate\contentiqimporter\ContentIQImporter;
+use matrixcreate\contentiqimporter\helpers\TempFileSafety;
 use matrixcreate\contentiqimporter\jobs\SyncJob;
 use yii\web\BadRequestHttpException;
 use yii\web\Response;
@@ -266,6 +267,8 @@ class CpController extends Controller
      */
     public function actionUpload(): Response
     {
+        $this->requirePermission('contentiq-importer:sync');
+
         return $this->renderTemplate('contentiq-importer/_cp/upload');
     }
 
@@ -278,6 +281,7 @@ class CpController extends Controller
     public function actionPreview(): Response
     {
         $this->requirePostRequest();
+        $this->requirePermission('contentiq-importer:sync');
 
         $uploadedFile = UploadedFile::getInstanceByName('jsonFile');
 
@@ -372,9 +376,22 @@ class CpController extends Controller
     public function actionRunImport(): Response
     {
         $this->requirePostRequest();
+        $this->requirePermission('contentiq-importer:sync');
 
-        $tempFilename = Craft::$app->getRequest()->getRequiredBodyParam('tempFilename');
-        $tempPath     = Craft::$app->getPath()->getTempPath() . DIRECTORY_SEPARATOR . $tempFilename;
+        // Sanitize before building a filesystem path — the raw POST value is
+        // untrusted and a '../' would otherwise allow arbitrary file read/delete
+        // via getTempPath() below (see the @unlink() further down).
+        $tempFilename = TempFileSafety::sanitize(
+            (string)Craft::$app->getRequest()->getRequiredBodyParam('tempFilename'),
+        );
+
+        if ($tempFilename === null) {
+            Craft::$app->getSession()->setError('Import file expired. Please upload again.');
+
+            return $this->redirect('contentiq-importer/upload');
+        }
+
+        $tempPath = Craft::$app->getPath()->getTempPath() . DIRECTORY_SEPARATOR . $tempFilename;
 
         if (!is_file($tempPath)) {
             Craft::$app->getSession()->setError('Import file expired. Please upload again.');
@@ -402,6 +419,7 @@ class CpController extends Controller
         $hasErrors     = false;
         $hasWarnings   = false;
         $slugToEntryId = [];
+        $allCardRefs   = [];  // Deferred card ref sets keyed by entry ID, for pass 2
 
         // Resolve section for structure positioning.
         $config        = Craft::$app->config->getConfigFromFile('contentiq');
@@ -411,6 +429,52 @@ class CpController extends Controller
         $structures    = Craft::$app->getStructures();
 
         foreach ($pages as $pageData) {
+            // Enforce entry locks server-side — the upload path previously
+            // called importPage() with no lock check at all, so a locked entry
+            // could be silently overwritten by re-uploading the same file. A
+            // missing sync row for an existing entry is treated as locked (same
+            // default as the Sync UI / SyncJob).
+            $existingEntry = $importService->findExistingEntry($pageData);
+
+            if ($existingEntry !== null) {
+                $syncRow = (new Query())
+                    ->select(['locked'])
+                    ->from('{{%contentiq_entry_syncs}}')
+                    ->where(['element_id' => $existingEntry->id])
+                    ->one();
+
+                // craft\db\Query::one() returns null when no row matches.
+                $isLocked = $syncRow === null ? true : (bool)$syncRow['locked'];
+
+                if ($isLocked) {
+                    $lockedSlug = $pageData['document']['slug'] ?? '';
+
+                    $pageResults[] = [
+                        'success'       => true,
+                        'slug'          => $lockedSlug,
+                        'title'         => $pageData['document']['title'] ?? $lockedSlug,
+                        'entryId'       => $existingEntry->id,
+                        'entryFound'    => true,
+                        'seoFieldCount' => 0,
+                        'blocks'        => [],
+                        'images'        => [],
+                        'blockNotes'    => '',
+                        'warnings'      => ['Skipped — entry is locked.'],
+                        'error'         => null,
+                        'skipped'       => false,
+                        'contentType'   => $pageData['document']['content_type'] ?? null,
+                        'sectionLabel'  => null,
+                    ];
+                    $hasWarnings = true;
+
+                    if ($lockedSlug !== '') {
+                        $slugToEntryId[$lockedSlug] = $existingEntry->id;
+                    }
+
+                    continue;
+                }
+            }
+
             $result = $importService->importPage($pageData, dryRun: false);
 
             $slug       = $result['slug'] ?? '';
@@ -420,6 +484,11 @@ class CpController extends Controller
 
             if ($entryId !== null && $slug !== '') {
                 $slugToEntryId[$slug] = $entryId;
+            }
+
+            // Collect deferred card ref sets from this page for pass 2 resolution.
+            if ($entryId !== null && !empty($result['cardRefs'])) {
+                $allCardRefs[$entryId] = array_values($result['cardRefs']);
             }
 
             if ($entryId !== null && $structureId !== null && !$isHomepage) {
@@ -464,6 +533,24 @@ class CpController extends Controller
             }
             if (!empty($result['warnings'])) {
                 $hasWarnings = true;
+            }
+        }
+
+        // PASS 2: resolve deferred card references now the slug map is complete.
+        $cardWarnings = $importService->resolveCardReferences($allCardRefs, $slugToEntryId);
+
+        foreach ($cardWarnings as $entryId => $warnings) {
+            if (empty($warnings)) {
+                continue;
+            }
+
+            $hasWarnings = true;
+
+            foreach ($pageResults as $i => $r) {
+                if (($r['entryId'] ?? null) === $entryId) {
+                    array_push($pageResults[$i]['warnings'], ...$warnings);
+                    break;
+                }
             }
         }
 
@@ -637,6 +724,7 @@ class CpController extends Controller
             ->select(['locked'])
             ->from('{{%contentiq_globals_sync}}')
             ->one();
+        // craft\db\Query::one() returns null when no row matches.
         $globalsLocked = $globalsRow === null ? true : (bool)$globalsRow['locked'];
 
         $globalsOfficeCount = (int)(new Query())
@@ -667,6 +755,7 @@ class CpController extends Controller
     {
         $this->requirePostRequest();
         $this->requireAcceptsJson();
+        $this->requirePermission('contentiq-importer:sync');
 
         $settings = ContentIQImporter::$plugin->getSettings();
 
@@ -677,32 +766,33 @@ class CpController extends Controller
             ]);
         }
 
-        // Apply lock/unlock state from the pre-sync tree view.
-        // The browser sends the list of entry IDs the user has unlocked.
-        $request   = Craft::$app->getRequest();
-        $unlockIds = Json::decodeIfJson($request->getBodyParam('unlockIds', '[]'));
-
-        if (is_array($unlockIds) && !empty($unlockIds)) {
-            $db = Craft::$app->getDb();
-
-            // Lock everything first, then unlock only the selected entries.
-            $db->createCommand()
-                ->update('{{%contentiq_entry_syncs}}', ['locked' => true])
-                ->execute();
-
-            $db->createCommand()
-                ->update(
-                    '{{%contentiq_entry_syncs}}',
-                    ['locked' => false],
-                    ['element_id' => $unlockIds],
-                )
-                ->execute();
+        // Fix C: refuse a second concurrent sync — two near-simultaneous runs
+        // would otherwise each rewrite contentiq_entry_syncs lock state and
+        // clobber each other's selections.
+        if ($this->_hasInFlightSync()) {
+            return $this->asJson([
+                'success' => false,
+                'error'   => 'A sync is already in progress — wait for it to finish.',
+            ]);
         }
 
-        // Persist the globals consent for this run (checkbox = unlock). The
-        // SyncJob relocks after a successful globals import.
+        // Capture the lock/unlock selection from the pre-sync tree view and
+        // the globals consent checkbox here, but DEFER actually writing them
+        // until SyncJob::execute() runs (Fix B1) — writing them now, before
+        // the job is even queued, would leak an unlock/consent if the worker
+        // never picks up the job, or dies before running it. `null` preserves
+        // the previous write's guard (`is_array($unlockIds)`): a missing or
+        // malformed selection leaves lock state untouched instead of locking
+        // everything.
+        $request      = Craft::$app->getRequest();
+        $unlockIdsRaw = Json::decodeIfJson($request->getBodyParam('unlockIds', '[]'));
+        $unlockIds    = is_array($unlockIdsRaw) ? $unlockIdsRaw : null;
+
+        // The globals consent checkbox (checked = unlock for this run only).
+        // SyncJob persists the inverse into contentiq_globals_sync.locked at
+        // the start of the run, then relocks after a successful globals
+        // import — or on any failure, see SyncJob::_failRun().
         $unlockGlobals = (bool)$request->getBodyParam('unlockGlobals', false);
-        $this->_setGlobalsLock(!$unlockGlobals);
 
         // Create a pending run record so the frontend has a run ID to poll.
         $runId = $this->_saveRun(
@@ -716,7 +806,9 @@ class CpController extends Controller
 
         // Push the queue job.
         Craft::$app->getQueue()->push(new SyncJob([
-            'runId' => $runId,
+            'runId'         => $runId,
+            'unlockIds'     => $unlockIds,
+            'unlockGlobals' => $unlockGlobals,
         ]));
 
         return $this->asJson([
@@ -739,11 +831,32 @@ class CpController extends Controller
 
         $runId = Craft::$app->getRequest()->getRequiredQueryParam('runId');
 
-        $status = (new Query())
-            ->select(['status'])
+        $run = (new Query())
+            ->select(['status', 'dateCreated', 'dateUpdated'])
             ->from('{{%contentiq_import_runs}}')
             ->where(['id' => $runId])
-            ->scalar();
+            ->one();
+
+        if ($run === null) {
+            return $this->asJson(['status' => 'unknown']);
+        }
+
+        $status = $run['status'];
+
+        // Fix A2: a run that's been 'pending' too long almost always means the
+        // queue worker never picked up the job (or the process died before
+        // SyncJob's own try/catch — Fix A1 — could mark it failed), so the
+        // poller would otherwise spin on 'pending' forever. A false-positive
+        // stale flag only ever surfaces an error message, so this is
+        // deliberately generous: a long threshold, plus a best-effort check
+        // that no queued/reserved SyncJob explains the delay.
+        if ($status === 'pending'
+            && $this->_isStale($run['dateUpdated'] ?: $run['dateCreated'])
+            && !$this->_hasActiveSyncJob()
+        ) {
+            $this->_markRunErrored((int)$runId, 'Sync did not complete — the queue worker may not be running.');
+            $status = 'errors';
+        }
 
         return $this->asJson([
             'status' => $status ?: 'unknown',
@@ -791,6 +904,7 @@ class CpController extends Controller
     {
         $this->requirePostRequest();
         $this->requireAcceptsJson();
+        $this->requirePermission('contentiq-importer:sync');
 
         $request   = Craft::$app->getRequest();
         $elementId = (int)$request->getRequiredBodyParam('elementId');
@@ -798,6 +912,27 @@ class CpController extends Controller
 
         if (!$elementId || $slug === '') {
             return $this->asJson(['success' => false, 'error' => 'elementId and slug are required.']);
+        }
+
+        // Enforce the lock server-side. The sidebar Sync button is disabled
+        // client-side when locked, but that's advisory only — a stale page or a
+        // direct request to this endpoint could still reach here. The widget
+        // targets a specific, already-saved entry (elementId), so the lock is
+        // checked against that entry directly rather than re-resolving it from
+        // the fetched page data. A missing sync row is treated as locked (same
+        // default as the Sync UI / SyncJob).
+        $lockRow = (new Query())
+            ->select(['locked'])
+            ->from('{{%contentiq_entry_syncs}}')
+            ->where(['element_id' => $elementId])
+            ->one();
+
+        // craft\db\Query::one() returns null when no row matches.
+        if ($lockRow === null || (bool)$lockRow['locked']) {
+            return $this->asJson([
+                'success' => false,
+                'error'   => 'Entry is locked — unlock before syncing.',
+            ]);
         }
 
         // Look up entry title for user-facing messages.
@@ -852,10 +987,34 @@ class CpController extends Controller
         $result = ContentIQImporter::$plugin->imports->importPage($data, dryRun: false);
 
         if (!$result['success']) {
+            // Fix D1: importPage() above may have attempted to write content —
+            // record it in the audit trail the same as every other entry point,
+            // rather than leaving this a content mutation with no history row.
+            $this->_saveRun(
+                filename:   $slug,
+                type:       'widget',
+                pageCount:  0,
+                imageCount: 0,
+                status:     'errors',
+                result:     [$result],
+            );
+
             return $this->asJson([
                 'success' => false,
                 'error'   => $result['error'] ?? 'Import failed.',
             ]);
+        }
+
+        // PASS 2: resolve deferred card references (single page — DB lookups only).
+        if (!empty($result['cardRefs']) && ($result['entryId'] ?? null) !== null) {
+            $cardWarnings = ContentIQImporter::$plugin->imports->resolveCardReferences(
+                [$result['entryId'] => array_values($result['cardRefs'])],
+                [],
+            );
+
+            foreach ($cardWarnings[$result['entryId']] ?? [] as $warning) {
+                Craft::warning("Widget sync card refs ({$slug}): {$warning}", __METHOD__);
+            }
         }
 
         // Upsert the sync timestamp and notes.
@@ -870,6 +1029,15 @@ class CpController extends Controller
 
         $syncData = ['synced_at' => $now, 'notes' => $notes, 'locked' => true];
 
+        // Record the ContentIQ page id → element_id mapping (when the fetched
+        // page carried one) so findExistingEntry() can resolve this entry by
+        // id on the next sync even if its slug changes.
+        $pageId = isset($data['document']['id']) ? (int)$data['document']['id'] : null;
+
+        if ($pageId !== null) {
+            $syncData['contentiq_page_id'] = $pageId;
+        }
+
         if ($exists) {
             $db->createCommand()
                 ->update('{{%contentiq_entry_syncs}}', $syncData, ['element_id' => $elementId])
@@ -881,6 +1049,17 @@ class CpController extends Controller
         }
 
         $syncedAt = Craft::$app->getFormatter()->asDatetime($now, 'short');
+
+        // Fix D1: record this widget sync in the audit trail, same as every
+        // other content-mutating entry point (upload/import, sync, console).
+        $this->_saveRun(
+            filename:   $slug,
+            type:       'widget',
+            pageCount:  1,
+            imageCount: count($result['images'] ?? []),
+            status:     !empty($result['warnings']) ? 'warnings' : 'success',
+            result:     [$result],
+        );
 
         return $this->asJson(['success' => true, 'syncedAt' => $syncedAt, 'notes' => $notes]);
     }
@@ -897,6 +1076,7 @@ class CpController extends Controller
     {
         $this->requirePostRequest();
         $this->requireAcceptsJson();
+        $this->requirePermission('contentiq-importer:sync');
 
         $request   = Craft::$app->getRequest();
         $elementId = (int)$request->getRequiredBodyParam('elementId');
@@ -918,7 +1098,7 @@ class CpController extends Controller
                 ->insert('{{%contentiq_entry_syncs}}', [
                     'element_id' => $elementId,
                     'locked'     => $locked,
-                    'synced_at'  => (new \DateTime())->format('Y-m-d H:i:s'),
+                    'synced_at'  => Db::prepareDateForDb(new \DateTime()),
                 ])
                 ->execute();
         }
@@ -936,6 +1116,7 @@ class CpController extends Controller
     {
         $this->requirePostRequest();
         $this->requireAcceptsJson();
+        $this->requirePermission('contentiq-importer:sync');
 
         $elementId = (int)Craft::$app->getRequest()->getRequiredBodyParam('elementId');
 
@@ -1003,26 +1184,130 @@ class CpController extends Controller
     }
 
     /**
-     * Sets the single globals-sync lock row, creating it if absent.
+     * How long a run may sit in 'pending' before it's treated as abandoned
+     * rather than genuinely in flight — e.g. a queue worker that isn't
+     * running, or one that died before Fix A1's try/catch in SyncJob could
+     * mark it failed. Shared by the status poller (Fix A2) and the
+     * concurrency guard (Fix C). A false-positive stale flag only ever
+     * surfaces an error message or briefly blocks a re-click, so this is
+     * deliberately generous.
      *
-     * @param bool $locked
+     * @var int
+     */
+    private const STALE_SYNC_SECONDS = 600;
+
+    /**
+     * Whether a UTC timestamp (as stored by this plugin — see Fix D2) is
+     * older than {@see self::STALE_SYNC_SECONDS}.
+     *
+     * @param string|null $timestamp
+     * @return bool
+     */
+    private function _isStale(?string $timestamp): bool
+    {
+        if ($timestamp === null || $timestamp === '') {
+            return false;
+        }
+
+        try {
+            $updated = new \DateTime($timestamp, new \DateTimeZone('UTC'));
+        } catch (\Throwable $e) {
+            return false;
+        }
+
+        $ageSeconds = (new \DateTime('now', new \DateTimeZone('UTC')))->getTimestamp() - $updated->getTimestamp();
+
+        return $ageSeconds >= self::STALE_SYNC_SECONDS;
+    }
+
+    /**
+     * Best-effort check for a queued/reserved SyncJob row, used as an extra
+     * confidence signal before Fix A2 flips a stale 'pending' run to
+     * 'errors'. Only the default DB-backed queue driver is cheaply
+     * queryable this way — any other driver (Redis, SQS, …), or any query
+     * failure (e.g. a `LIKE` on a binary column some DB engines reject), is
+     * treated as "can't tell" and falls through to `false`, so this is
+     * never a hard requirement, only a booster.
+     *
+     * @return bool
+     */
+    private function _hasActiveSyncJob(): bool
+    {
+        if (!Craft::$app->getQueue() instanceof \craft\queue\Queue) {
+            return false;
+        }
+
+        try {
+            return (new Query())
+                ->from('{{%queue}}')
+                ->where(['fail' => false])
+                ->andWhere(['like', 'job', SyncJob::class])
+                ->exists();
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Whether a sync is already in flight — a non-stale 'pending' row in
+     * contentiq_import_runs. Used by actionRunSync() (Fix C) to refuse a
+     * second concurrent sync. Deliberately relies on the run row alone
+     * (not {@see self::_hasActiveSyncJob()}) — a false positive here just
+     * makes the user wait and retry, whereas a false negative would let two
+     * syncs clobber each other's lock selections, which is the bug this
+     * guards against.
+     *
+     * @return bool
+     */
+    private function _hasInFlightSync(): bool
+    {
+        $pending = (new Query())
+            ->select(['dateCreated', 'dateUpdated'])
+            ->from('{{%contentiq_import_runs}}')
+            ->where(['status' => 'pending', 'type' => 'sync'])
+            ->orderBy(['dateCreated' => SORT_DESC])
+            ->one();
+
+        if ($pending === null) {
+            return false;
+        }
+
+        return !$this->_isStale($pending['dateUpdated'] ?: $pending['dateCreated']);
+    }
+
+    /**
+     * Marks a run 'errors' with a given message — used by the status
+     * poller's staleness fallback (Fix A2). Mirrors SyncJob::_failRun()'s
+     * result shape and globals-relock safety net: a worker killed mid-run
+     * (rather than a clean throw, which SyncJob's own try/catch — Fix A1 —
+     * already handles) could have left globals consent unlocked.
+     *
+     * @param int    $runId
+     * @param string $message
      * @return void
      */
-    private function _setGlobalsLock(bool $locked): void
+    private function _markRunErrored(int $runId, string $message): void
     {
-        $db     = Craft::$app->getDb();
+        $db = Craft::$app->getDb();
+
+        $db->createCommand()->update(
+            '{{%contentiq_import_runs}}',
+            [
+                'status'      => 'errors',
+                'result'      => Json::encode([['success' => false, 'slug' => '', 'error' => $message, 'warnings' => []]]),
+                'dateUpdated' => Db::prepareDateForDb(new \DateTime()),
+            ],
+            ['id' => $runId],
+        )->execute();
+
+        // Only touch an existing row — same guard as SyncJob::_failRun().
         $exists = (new Query())->from('{{%contentiq_globals_sync}}')->exists();
 
         if ($exists) {
             $db->createCommand()
-                ->update('{{%contentiq_globals_sync}}', ['locked' => $locked])
+                ->update('{{%contentiq_globals_sync}}', ['locked' => true])
                 ->execute();
-            return;
         }
-
-        $db->createCommand()
-            ->insert('{{%contentiq_globals_sync}}', ['locked' => $locked])
-            ->execute();
     }
 
     /**
@@ -1054,8 +1339,8 @@ class CpController extends Controller
             'imageCount'  => $imageCount,
             'status'      => $status,
             'result'      => Json::encode($result),
-            'dateCreated' => (new \DateTime())->format('Y-m-d H:i:s'),
-            'dateUpdated' => (new \DateTime())->format('Y-m-d H:i:s'),
+            'dateCreated' => Db::prepareDateForDb(new \DateTime()),
+            'dateUpdated' => Db::prepareDateForDb(new \DateTime()),
             'uid'         => \craft\helpers\StringHelper::UUID(),
         ])->execute();
 
