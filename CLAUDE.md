@@ -235,7 +235,7 @@ Critical requirements:
 
 | ContentIQ type | What happens |
 |---|---|
-| `hero` | ContentBlock field `hero` on page entry: `heading`, `richText` (subheading + body), `desktopImage`, `mobileImage`, `actionButtons`. Sets `enableHero = true`. |
+| `hero` | ContentBlock field `hero` on page entry: `heading`, `richText` (subheading + body), `desktopImage`, `mobileImage`, `actionButtons`, `heroStyle` (`textImage`/`textOnly`, defaults to `textImage`). Sets `enableHero = true`. |
 | `call_to_action` | Creates `callToActionEntry` in `callsToAction` section, relates via `chooseCallToAction` |
 | `table` | Skipped (no block type in Craft Starter) |
 
@@ -542,6 +542,7 @@ Both pages and homepage use a `craft\fields\ContentBlock` field (`heroContent`, 
                     ]],
                 ]],
             ],
+            'heroStyle' => 'textImage', // 'textImage' | 'textOnly', see below
         ],
     ],
 ]
@@ -550,6 +551,7 @@ Both pages and homepage use a `craft\fields\ContentBlock` field (`heroContent`, 
 - `subheading` (optional `{level, text}`) rendered as `<hN>` prepended to body in `richText`
 - `mobile_image` (optional `{key, url, alt}`) imported to `mobileImage` asset field
 - `buttons` array imported to `actionButtons` Matrix with Hyper link data including `linkClass`
+- `hero_style` (`fields.hero_style` in the payload) whitelist-validated to `textImage`/`textOnly`; missing key or any other value defaults to `textImage`. Always set explicitly when the hero block has other content (whole-page-replace sync model — an explicit default beats relying on Craft's field default). ContentBlock shape only — the flat/legacy hero shape (article/caseStudy/team) has no `heroStyle` handle and never receives this key. Guarded against older starter-based sites whose `heroContent` ContentBlock predates the field: `_buildHeroField()` resolves the `hero` ContentBlock field's own nested field layout and only writes `heroStyle` when that layout actually has it (or is unknown), skipping it otherwise — setting an unrecognised handle inside a ContentBlock's nested `fields` throws `yii\base\UnknownPropertyException`, which Craft's own `ContentBlock::_createContentBlockFromSerializedData()` save path does **not** catch (it only catches `InvalidFieldException`).
 
 ---
 

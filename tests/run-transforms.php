@@ -359,6 +359,67 @@ check(
 );
 check('flat shape: no nested hero key written', false, array_key_exists('hero', $flatHero));
 check('flat shape: heroMobileImage absent (no mobile_image on the block)', false, array_key_exists('heroMobileImage', $flatHero));
+check('flat shape: no heroStyle key written (out of scope for flat sites)', false, array_key_exists('heroStyle', $flatHero));
+
+// -----------------------------------------------------------------------------
+echo "\nImportService — heroStyle mapping (ContentBlock shape only)\n";
+
+// Destination layout that DOES have heroStyle on the 'hero' ContentBlock's own
+// nested field layout (current Craft Starter shape).
+$heroInnerLayoutWithStyle = new \craft\models\FieldLayout(['heroStyle' => new class {}]);
+$contentBlockLayoutWithStyle = new \craft\models\FieldLayout([
+    'hero' => new \craft\fields\ContentBlock($heroInnerLayoutWithStyle),
+]);
+
+// Destination layout WITHOUT heroStyle — simulates an older starter-based site
+// that predates the field. getFieldLayout() still returns a real (empty)
+// FieldLayout here, same as live Craft always does — the missing piece is the
+// heroStyle handle on it, not the layout object itself.
+$heroInnerLayoutNoStyle = new \craft\models\FieldLayout([]);
+$contentBlockLayoutNoStyle = new \craft\models\FieldLayout([
+    'hero' => new \craft\fields\ContentBlock($heroInnerLayoutNoStyle),
+]);
+
+$heroBlockTextOnly = $heroBlock;
+$heroBlockTextOnly['fields']['hero_style'] = 'textOnly';
+
+$heroBlockNoKey = $heroBlock; // no 'hero_style' key at all — older ContentIQ instances
+
+$heroBlockGarbage = $heroBlock;
+$heroBlockGarbage['fields']['hero_style'] = 'bananas';
+
+check(
+    "hero_style: 'textOnly' maps to heroStyle => 'textOnly'",
+    'textOnly',
+    callPrivate($importService, '_buildHeroField', [$heroBlockTextOnly, false, $contentBlockLayoutWithStyle])['hero']['fields']['heroStyle'] ?? null,
+);
+check(
+    'missing hero_style key defaults heroStyle to textImage',
+    'textImage',
+    callPrivate($importService, '_buildHeroField', [$heroBlockNoKey, false, $contentBlockLayoutWithStyle])['hero']['fields']['heroStyle'] ?? null,
+);
+check(
+    "garbage hero_style value ('bananas') falls back to textImage",
+    'textImage',
+    callPrivate($importService, '_buildHeroField', [$heroBlockGarbage, false, $contentBlockLayoutWithStyle])['hero']['fields']['heroStyle'] ?? null,
+);
+check(
+    'no field layout given (null) still defaults heroStyle to textImage — assume present',
+    'textImage',
+    callPrivate($importService, '_buildHeroField', [$heroBlockNoKey, false, null])['hero']['fields']['heroStyle'] ?? null,
+);
+
+$heroOnOldSite = callPrivate($importService, '_buildHeroField', [$heroBlockTextOnly, false, $contentBlockLayoutNoStyle]);
+check(
+    'compatibility guard: heroStyle omitted entirely when destination layout lacks the field (no crash)',
+    false,
+    array_key_exists('heroStyle', $heroOnOldSite['hero']['fields'] ?? []),
+);
+check(
+    'compatibility guard: other hero fields are unaffected',
+    '<h1>Welcome</h1>',
+    $heroOnOldSite['hero']['fields']['heading'] ?? null,
+);
 
 // -----------------------------------------------------------------------------
 echo "\nImportService — collection-child legacy-field clearing (§7.6/§7.6.1, rulings O2/O4)\n";

@@ -41,10 +41,21 @@ namespace craft\fields {
     /**
      * Stand-in for craft\fields\ContentBlock. ImportService::_detectHeroShape()
      * (§7.5 hero shape probe) only needs this to be a distinguishable class for
-     * an `instanceof` check — no behaviour required.
+     * an `instanceof` check. _buildHeroField()'s heroStyle compatibility guard
+     * also calls getFieldLayout() to reach the field's own nested field layout
+     * — this stub carries that layout so tests can construct exactly the "has
+     * heroStyle" / "predates heroStyle" shapes they want to probe.
      */
     class ContentBlock
     {
+        public function __construct(private ?\craft\models\FieldLayout $fieldLayout = null)
+        {
+        }
+
+        public function getFieldLayout(): ?\craft\models\FieldLayout
+        {
+            return $this->fieldLayout;
+        }
     }
 }
 

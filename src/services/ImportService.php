@@ -1268,6 +1268,7 @@ class ImportService extends Component
      *         'desktopImage'  => [$assetId],            // Assets
      *         'mobileImage'   => [$assetId],             // Assets (optional)
      *         'actionButtons' => [...],                  // Matrix of actionButton entries
+     *         'heroStyle'     => 'textImage',            // Dropdown: textImage|textOnly
      *       ]],
      *     ]
      *
@@ -1284,6 +1285,9 @@ class ImportService extends Component
      *       'heroActionButtons' => [...],
      *     ]
      *
+     *   heroStyle is ContentBlock-shape only (§7.5 flat sites predate the field and
+     *   have no flat 'heroStyle' handle) — see _buildHeroInnerFields().
+     *
      * Which shape to emit is decided by _detectHeroShape() probing
      * $targetFieldLayout — never assumed. The inner field VALUES are shape-
      * agnostic and built once by _buildHeroInnerFields(); only the handles
@@ -1299,7 +1303,16 @@ class ImportService extends Component
      */
     private function _buildHeroField(array $heroBlock, bool $dryRun, ?FieldLayout $targetFieldLayout = null): ?array
     {
-        $innerFields = $this->_buildHeroInnerFields($heroBlock, $dryRun);
+        // The 'hero' ContentBlock field has its own (nested) field layout, distinct
+        // from $targetFieldLayout (the page/homepage entry type's layout). heroStyle
+        // lives on that nested layout, so it's resolved here and passed down —
+        // see _buildHeroInnerFields()'s $heroInnerLayout param for why.
+        $heroContentBlockField = $targetFieldLayout?->getFieldByHandle('hero');
+        $heroInnerLayout = $heroContentBlockField instanceof ContentBlock
+            ? $heroContentBlockField->getFieldLayout()
+            : null;
+
+        $innerFields = $this->_buildHeroInnerFields($heroBlock, $dryRun, $heroInnerLayout);
 
         if (empty($innerFields)) {
             return null;
@@ -1345,12 +1358,26 @@ class ImportService extends Component
      *   richText     → CKEditor (subheading + body)
      *   desktopImage → Assets
      *   actionButtons → Matrix of actionButton entries
+     *   heroStyle    → Dropdown (textImage/textOnly)
      *
-     * @param array $heroBlock Raw hero block from the JSON.
-     * @param bool  $dryRun
+     * heroStyle is only added when $heroInnerLayout is null (caller couldn't resolve
+     * the 'hero' ContentBlock field's own nested layout, e.g. flat-shape sites — see
+     * _buildHeroField()) or that layout actually has the field. Older starter-based
+     * sites predating heroStyle don't have it anywhere in their project config, and
+     * setting an unrecognised handle on the nested ContentBlock element throws
+     * yii\base\UnknownPropertyException, which Craft's own save path does NOT catch
+     * (craft\fields\ContentBlock::_createContentBlockFromSerializedData() only
+     * catches InvalidFieldException) — so this guard is load-bearing, not defensive
+     * dead code.
+     *
+     * @param array            $heroBlock      Raw hero block from the JSON.
+     * @param bool             $dryRun
+     * @param FieldLayout|null $heroInnerLayout The 'hero' ContentBlock field's own
+     *                                          (nested) field layout. Null skips the
+     *                                          heroStyle guard (assume present).
      * @return array Inner fields array (empty if nothing to set).
      */
-    private function _buildHeroInnerFields(array $heroBlock, bool $dryRun): array
+    private function _buildHeroInnerFields(array $heroBlock, bool $dryRun, ?FieldLayout $heroInnerLayout = null): array
     {
         $fields      = $heroBlock['fields'] ?? [];
         $innerFields = [];
@@ -1444,6 +1471,22 @@ class ImportService extends Component
             if (!empty($actionButtonsData)) {
                 $innerFields['actionButtons'] = $actionButtonsData;
             }
+        }
+
+        // heroStyle — whitelist-validated Dropdown. Set explicitly whenever the hero
+        // block carries other real content (whole-page-replace sync model — an
+        // explicit default beats relying on Craft's own field default), unless the
+        // destination layout is known and doesn't have the field. Skipped for a
+        // genuinely empty hero block so _buildHeroField()'s empty($innerFields)
+        // check still treats it as "nothing to set" (untouched), as before.
+        if (
+            !empty($innerFields) &&
+            ($heroInnerLayout === null || $heroInnerLayout->getFieldByHandle('heroStyle') !== null)
+        ) {
+            $heroStyle = $fields['hero_style'] ?? null;
+            $innerFields['heroStyle'] = in_array($heroStyle, ['textImage', 'textOnly'], true)
+                ? $heroStyle
+                : 'textImage';
         }
 
         return $innerFields;
