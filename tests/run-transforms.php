@@ -528,6 +528,88 @@ $allThreeWarnings = callPrivate($importService, '_buildBlockOwnershipWarnings', 
 check('all three previously non-empty → three warnings', 3, count($allThreeWarnings));
 
 // -----------------------------------------------------------------------------
+// NodesRenderer — blockquote support (Gap 1: flat nodes[] shape; Gap 2: raw
+// ProseMirror content shape). NodesRenderer/UrlSafety are already required
+// above for the MatrixBuilder section.
+// -----------------------------------------------------------------------------
+echo "\nNodesRenderer — blockquote\n";
+
+$nodesRenderer = new \matrixcreate\contentiqimporter\services\NodesRenderer();
+
+// Gap 1: flat node (nodes[] blocks path) — text only, no content array.
+check(
+    'flat blockquote: text only',
+    '<blockquote><p>Just a quote.</p></blockquote>',
+    $nodesRenderer->render([
+        ['type' => 'blockquote', 'text' => 'Just a quote.'],
+    ]),
+);
+
+// Gap 1: flat node with content carrying a hardBreak and a mark.
+check(
+    'flat blockquote: content with hardBreak + mark',
+    '<blockquote><p><strong>First line.</strong><br>Second line.</p></blockquote>',
+    $nodesRenderer->render([
+        [
+            'type'    => 'blockquote',
+            'text'    => "First line.\nSecond line.",
+            'content' => [
+                ['type' => 'text', 'text' => 'First line.', 'marks' => [['type' => 'bold']]],
+                ['type' => 'hardBreak'],
+                ['type' => 'text', 'text' => 'Second line.'],
+            ],
+        ],
+    ]),
+);
+
+// Gap 1: empty flat node → nothing rendered.
+check(
+    'flat blockquote: empty → empty string',
+    '',
+    $nodesRenderer->render([
+        ['type' => 'blockquote', 'text' => ''],
+    ]),
+);
+
+// Gap 2: raw ProseMirror content path — nested blockquote wrapping one paragraph.
+check(
+    'nested blockquote: one paragraph',
+    '<blockquote><p>Quoted line.</p></blockquote>',
+    $nodesRenderer->renderDocument([
+        [
+            'type'    => 'blockquote',
+            'content' => [
+                ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Quoted line.']]],
+            ],
+        ],
+    ]),
+);
+
+// Gap 2: nested blockquote wrapping two paragraphs — each keeps its own <p>.
+check(
+    'nested blockquote: two paragraphs',
+    '<blockquote><p>First para.</p><p>Second para.</p></blockquote>',
+    $nodesRenderer->renderDocument([
+        [
+            'type'    => 'blockquote',
+            'content' => [
+                ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'First para.']]],
+                ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Second para.']]],
+            ],
+        ],
+    ]),
+);
+
+// Gap 2: empty nested blockquote → nothing rendered.
+check(
+    'nested blockquote: empty → empty string',
+    '',
+    $nodesRenderer->renderDocument([
+        ['type' => 'blockquote', 'content' => []],
+    ]),
+);
+
+// -----------------------------------------------------------------------------
 // Summary.
 // -----------------------------------------------------------------------------
 echo "\n" . ($failures === 0 ? "OK" : "FAILED") . ": {$passes} passed, {$failures} failed\n";

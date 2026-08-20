@@ -270,11 +270,14 @@ Critical requirements:
 |---|---|
 | `heading` | `<h1>`–`<h6>` (clamped) |
 | `paragraph` | `<p>` |
+| `blockquote` | `<blockquote><p>…</p></blockquote>` (flat node, `_renderNode` path — prefers `content` like `paragraph`, falls back to `text`; empty → `''`) |
 | `list` | `<ul>` or `<ol>` (based on `ordered` flag) |
 | `ordered_list` | `<ol>` (legacy alias) |
 | `unordered_list` | `<ul>` (legacy alias) |
 | `faq_items` | `<details><summary>question</summary><p>answer</p></details>` |
 | `ctaButton` | `<p><a href="url">label</a></p>` (URL always empty from ContentIQ — editors set it in CMS) |
+
+`_renderDocNode` (the raw ProseMirror `content` path, used for collection children) additionally supports `blockquote` as the NESTED ProseMirror shape (`{type:'blockquote', content:[...]}`, block children not inline text) — it wraps `<blockquote>` around each child block rendered through the same recursion, so nested `<p>`/`<ul>` etc. keep their own markup. Empty → `''`. This is a separate arm from the `paragraph`/`heading`/`list` handling above — the two rendering paths take genuinely different input shapes for the same node type name and are not shared.
 
 ---
 

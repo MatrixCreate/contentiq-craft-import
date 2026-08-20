@@ -11,6 +11,7 @@ use yii\base\Component;
  * Supported node types:
  *   - heading (level 1–4) → <h1>–<h4>
  *   - paragraph           → <p>
+ *   - blockquote          → <blockquote><p>…</p></blockquote>
  *   - list                → <ul> or <ol> (based on 'ordered' flag)
  *   - ordered_list        → <ol><li> (legacy alias)
  *   - unordered_list      → <ul><li> (legacy alias)
@@ -70,8 +71,8 @@ class NodesRenderer extends Component
      * this consumes the raw `pages.content` ProseMirror AST carried by collection
      * children: a doc node (or bare content array) of block nodes. Handles the
      * node/mark types ContentIQ produces: paragraph, heading (h1–h6 via attrs.level),
-     * bulletList, orderedList, listItem, hardBreak, horizontalRule, and the inline
-     * marks bold/italic/link (reusing the shared inline renderer).
+     * blockquote, bulletList, orderedList, listItem, hardBreak, horizontalRule, and
+     * the inline marks bold/italic/link (reusing the shared inline renderer).
      *
      * @param array|null $doc Raw ProseMirror doc ({type:'doc', content:[...]}) or its content array.
      * @return string
@@ -200,6 +201,7 @@ class NodesRenderer extends Component
         return match ($type) {
             'heading'        => $this->_renderHeading($node),
             'paragraph'      => $this->_renderParagraph($node),
+            'blockquote'     => $this->_renderBlockquote($node),
             'list'           => $this->_renderList($node, !empty($node['ordered']) ? 'ol' : 'ul'),
             'ordered_list'   => $this->_renderList($node, 'ol'),
             'unordered_list' => $this->_renderList($node, 'ul'),
@@ -225,6 +227,7 @@ class NodesRenderer extends Component
         return match ($type) {
             'heading'        => $this->_renderDocHeading($node),
             'paragraph'      => '<p>' . $this->_renderInlineContent($node['content'] ?? []) . '</p>',
+            'blockquote'     => $this->_renderDocBlockquote($node),
             'bulletList'     => $this->_renderDocList($node, 'ul'),
             'orderedList'    => $this->_renderDocList($node, 'ol'),
             'listItem'       => '<li>' . $this->_renderListItem($node) . '</li>',
@@ -246,6 +249,30 @@ class NodesRenderer extends Component
         $level = max(1, min(6, $level));
 
         return "<h{$level}>" . $this->_renderInlineContent($node['content'] ?? []) . "</h{$level}>";
+    }
+
+    /**
+     * Renders a raw ProseMirror blockquote node to <blockquote>.
+     *
+     * A blockquote wraps one or more block children (paragraphs, lists, etc.).
+     * Each child is rendered through the block-node renderer so nested markup
+     * (e.g. a list inside the quote) keeps its own tags. Returns an empty string
+     * when the blockquote produces no inner content.
+     *
+     * @param array $node
+     * @return string
+     */
+    private function _renderDocBlockquote(array $node): string
+    {
+        $inner = '';
+
+        foreach ($node['content'] ?? [] as $child) {
+            if (is_array($child)) {
+                $inner .= $this->_renderDocNode($child);
+            }
+        }
+
+        return $inner === '' ? '' : "<blockquote>{$inner}</blockquote>";
     }
 
     /**
@@ -330,6 +357,30 @@ class NodesRenderer extends Component
             : htmlspecialchars($node['text'] ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 
         return "<p>{$inner}</p>";
+    }
+
+    /**
+     * Renders a blockquote node to <blockquote><p>…</p></blockquote>.
+     *
+     * Uses inline content (with marks) when present, otherwise falls back to plain
+     * text — same idiom as _renderParagraph(). CKEditor's Block Quote feature
+     * expects a paragraph inside the blockquote, not bare inline content. Returns
+     * an empty string for an empty blockquote so nothing is rendered.
+     *
+     * @param array $node
+     * @return string
+     */
+    private function _renderBlockquote(array $node): string
+    {
+        $inner = isset($node['content']) && is_array($node['content'])
+            ? $this->_renderInlineContent($node['content'])
+            : htmlspecialchars($node['text'] ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+
+        if ($inner === '') {
+            return '';
+        }
+
+        return "<blockquote><p>{$inner}</p></blockquote>";
     }
 
     /**

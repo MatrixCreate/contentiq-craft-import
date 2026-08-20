@@ -375,6 +375,7 @@ Converts ContentiQ nodes arrays to HTML strings. No Craft dependencies — fully
 | Node type | Output |
 |---|---|
 | `paragraph` | `<p>...</p>` |
+| `blockquote` | `<blockquote><p>...</p></blockquote>` |
 | `heading` | `<h1>`–`<h6>` |
 | `list` / `ordered_list` / `unordered_list` | `<ol>` or `<ul>` |
 | `faq_items` | `<details><summary>Q</summary><p>A</p></details>` |

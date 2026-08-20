@@ -1,5 +1,15 @@
 # ContentIQ Importer — Progress
 
+## Blockquote node type support (2026-08-20)
+
+`NodesRenderer` no longer silently drops `blockquote` nodes — both rich-text consumption paths now render them (previously both `match` statements fell through to `default => ''`).
+
+- **`_renderNode()` (flat `nodes[]` blocks path)** — new `'blockquote'` arm calling `_renderBlockquote()`. Mirrors `_renderParagraph()`'s idiom exactly: prefers inline `content` (marks, hardBreaks) via `_renderInlineContent()`, falls back to `htmlspecialchars($node['text'])`. Emits `<blockquote><p>…</p></blockquote>` — CKEditor's Block Quote feature expects a paragraph inside the blockquote. Empty blockquote → `''`.
+- **`_renderDocNode()` (raw ProseMirror `content` path, collection children)** — new `'blockquote'` arm calling `_renderDocBlockquote()`. Here the shape is the NESTED ProseMirror form (`{type:'blockquote', content:[block nodes]}`, not flat text) — wraps `<blockquote>` around each child block rendered through the existing `_renderDocNode` recursion, so nested paragraphs/lists inside the quote keep their own markup. Empty → `''`.
+- The two paths take genuinely different input shapes for the same node-type name and are handled separately, same as `paragraph` already is in each.
+- `CLAUDE.md` and `PLUGIN-SPEC.md`'s NodesRenderer node-type tables updated with the new rows.
+- Test coverage added to `tests/run-transforms.php`: flat text-only, flat with `content` (hardBreak + mark), flat empty, nested single paragraph, nested two paragraphs, nested empty.
+
 ## Custom block — multi-image support (2026-05-22)
 
 The Custom block mapping has been updated to match ContentiQ's new multi-image export shape.
