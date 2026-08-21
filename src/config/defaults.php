@@ -94,6 +94,11 @@ return [
             'outerField' => 'textBlocks',
             'innerType'  => 'textBlock',
             'mode'       => 'text_columns',
+            // The first column goes on the outer entry itself; only a second
+            // column (twoColumns split at the first heading) becomes an inner
+            // block. Dropped automatically on sites whose 'text' entry type
+            // predates the field — see MatrixBuilder's text_columns branch.
+            'firstColumnField' => 'richText',
             'fields'     => [
                 'nodes' => ['richText', 'nodes'],
             ],

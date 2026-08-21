@@ -267,6 +267,97 @@ check(
 check('blockReport has one row per block, none skipped', [false, false], array_column($built['blockReport'], 'skipped'));
 
 // -----------------------------------------------------------------------------
+// MatrixBuilder — text block column routing.
+//
+// The Craft Starter's `text` entry type now carries the first column's Rich
+// Text itself; `textBlocks` holds at most one further column. Older forks have
+// no such field on the outer entry type, and writing to it there would lose the
+// column without a trace (Craft's Matrix save path catches
+// InvalidFieldException and moves on), so MatrixBuilder probes the layout and
+// falls back to the pre-split shape. Both shapes are asserted here through the
+// entryTypeFieldProbe seam — the standalone runner has no Craft app to ask.
+// -----------------------------------------------------------------------------
+echo "\nMatrixBuilder — text block column routing\n";
+
+/**
+ * Builds one `text` block against a given layout shape.
+ */
+$buildTextBlock = static function(array $fields, bool $outerHasRichText): array {
+    $builder = new \matrixcreate\contentiqimporter\services\MatrixBuilder();
+    $builder->prepare(['blockOverrides' => []]);
+    $builder->entryTypeFieldProbe = static fn(string $entryType, string $handle): bool => $outerHasRichText
+        && $entryType === 'text'
+        && $handle === 'richText';
+
+    return $builder->build([['type' => 'text', 'fields' => $fields]]);
+};
+
+$heading = ['type' => 'heading', 'level' => 2, 'text' => 'Our Approach'];
+$para1   = ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'First column body.']]];
+$para2   = ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Second column body.']]];
+
+// Single column, current layout — everything lands on the outer entry.
+$single = $buildTextBlock(['columns' => 'singleColumn', 'nodes' => [$heading, $para1]], true);
+
+check(
+    'singleColumn: outer richText holds the whole column',
+    '<h2>Our Approach</h2><p>First column body.</p>',
+    $single['matrixData']['new1']['fields']['richText'] ?? null,
+);
+check(
+    'singleColumn: textBlocks emitted empty (clears stale inner blocks)',
+    [],
+    $single['matrixData']['new1']['fields']['textBlocks'] ?? null,
+);
+check('singleColumn: no layout warning', [], $single['warnings']);
+
+// Two columns, current layout — split at the first heading, second half nested.
+$two = $buildTextBlock(['columns' => 'twoColumns', 'nodes' => [$heading, $para1, $para2]], true);
+
+check(
+    'twoColumns: outer richText holds the first column',
+    '<h2>Our Approach</h2>',
+    $two['matrixData']['new1']['fields']['richText'] ?? null,
+);
+check(
+    'twoColumns: one inner block holds the second column',
+    ['new1'],
+    array_keys($two['matrixData']['new1']['fields']['textBlocks'] ?? []),
+);
+check(
+    'twoColumns: inner richText holds everything after the heading',
+    '<p>First column body.</p><p>Second column body.</p>',
+    $two['matrixData']['new1']['fields']['textBlocks']['new1']['fields']['richText'] ?? null,
+);
+
+// Two columns, pre-split layout — both columns stay in the inner Matrix.
+$legacy = $buildTextBlock(['columns' => 'twoColumns', 'nodes' => [$heading, $para1, $para2]], false);
+
+check(
+    'legacy layout: nothing written to the outer richText',
+    null,
+    $legacy['matrixData']['new1']['fields']['richText'] ?? null,
+);
+check(
+    'legacy layout: both columns stay as inner blocks',
+    ['new1', 'new2'],
+    array_keys($legacy['matrixData']['new1']['fields']['textBlocks'] ?? []),
+);
+check(
+    'legacy layout: first inner block is the heading column',
+    '<h2>Our Approach</h2>',
+    $legacy['matrixData']['new1']['fields']['textBlocks']['new1']['fields']['richText'] ?? null,
+);
+check('legacy layout: warns once about the pre-split layout', 1, count($legacy['warnings']));
+check(
+    'legacy layout: warning names the entry type and field',
+    true,
+    isset($legacy['warnings'][0])
+        && str_contains($legacy['warnings'][0], "'text'")
+        && str_contains($legacy['warnings'][0], "'richText'"),
+);
+
+// -----------------------------------------------------------------------------
 // ImportService — §7.5 hero shape probe; §7.6/§7.6.1 legacy-field clearing
 // (rulings O2/O4) and its guard-2 "was this previously non-empty" warnings.
 //

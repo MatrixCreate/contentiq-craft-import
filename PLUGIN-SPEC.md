@@ -257,7 +257,7 @@ ImportService::importPage()
 | `single` | One inner entry, fields pulled from block root |
 | `repeated` | One inner entry per item in `sourceKey` array (e.g. cards, FAQ items) |
 | `grouped` | Consecutive same-type blocks collapse into one outer entry with multiple inner entries |
-| `text_columns` | Splits at first heading for two-column text layouts |
+| `text_columns` | Splits at first heading for two-column text layouts. The first column goes to the outer entry's `firstColumnField` (`richText`) and only the remainder becomes an inner entry — unless the outer entry type has no such field, in which case every column stays in the inner Matrix (pre-split layout) and the page gets a warning. |
 
 ### Field handlers
 
@@ -284,7 +284,7 @@ ImportService::importPage()
 
 | ContentIQ type | Outer entry type | Inner Matrix field | Inner entry type | Mode |
 |---|---|---|---|---|
-| `text` | `text` | `textBlocks` | `textBlock` | text_columns |
+| `text` | `text` | `textBlocks` (second column only) | `textBlock` | text_columns |
 | `text_and_media` | `textAndMedia` | `textAndMediaBlocks` | `textAndMediaBlock` | grouped |
 | `faq` | `faq` | `accordionItems` | `accordionItem` | repeated |
 | `cards` | `entryCards` | `entryCards` | `card` | repeated |

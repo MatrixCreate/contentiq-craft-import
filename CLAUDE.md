@@ -222,7 +222,7 @@ Critical requirements:
 
 | ContentIQ type | Outer entry type | Inner Matrix | Inner type | Mode | Outer fields |
 |---|---|---|---|---|---|
-| `text` | `text` | `textBlocks` | `textBlock` | single | — |
+| `text` | `text` | `textBlocks` (second column only) | `textBlock` | text_columns | `columnLayout`, `richText` (first column — see below) |
 | `text_and_media` | `textAndMedia` | `textAndMediaBlocks` | `textAndMediaBlock` | grouped | `blockLayout` |
 | `faq` | `faq` | `accordionItems` | `accordionItem` | repeated | `richText`, `extraRichText`, `actionButtons` (via `faqNodes`) |
 | `cards` | `entryCards` | `entryCards` | `card` | repeated | `richText` (intro) |
@@ -278,6 +278,29 @@ Critical requirements:
 | `ctaButton` | `<p><a href="url">label</a></p>` (URL always empty from ContentIQ — editors set it in CMS) |
 
 `_renderDocNode` (the raw ProseMirror `content` path, used for collection children) additionally supports `blockquote` as the NESTED ProseMirror shape (`{type:'blockquote', content:[...]}`, block children not inline text) — it wraps `<blockquote>` around each child block rendered through the same recursion, so nested `<p>`/`<ul>` etc. keep their own markup. Empty → `''`. This is a separate arm from the `paragraph`/`heading`/`list` handling above — the two rendering paths take genuinely different input shapes for the same node type name and are not shared.
+
+---
+
+## Text block columns
+
+The Craft Starter's `text` entry type carries the first column's Rich Text **itself** (`richText` on the outer entry); `textBlocks` holds at most one *further* column (`maxEntries: 1`). Before that change every column was an inner `textBlock`, min 1 / max 2.
+
+`text_columns` mode therefore routes as:
+
+| ContentIQ block | Outer `richText` | `textBlocks` |
+|---|---|---|
+| `singleColumn` | all nodes | *(empty)* |
+| `twoColumns`, heading found | nodes up to and including the first heading | one inner block with the remainder |
+| `twoColumns`, no heading | all nodes | *(empty)* |
+
+Two things are load-bearing:
+
+- **The empty `textBlocks` array is emitted deliberately.** `['textBlocks' => []]` is what makes Craft delete inner blocks a previous import left behind. Omitting the key would leave a stale block that renders as a phantom second column.
+- **The outer field is probed before it's written to** (`MatrixBuilder::_entryTypeHasField()`, memoized). Starter forks that predate the split have no `richText` on the `text` entry type, and setting an unrecognised handle inside Matrix data is swallowed by Craft — `Matrix::_createEntriesFromSerializedData()` catches `InvalidFieldException` — so the column would vanish with no error. When the probe comes back negative the importer falls back to the pre-split shape (both columns as inner blocks) and raises one page warning naming the entry type and field. Same guard shape as the hero `heroStyle` compatibility check.
+
+`firstColumnField` in the mapping is what turns lifting on. Drop that key (per-project `blockOverrides`) and the block reverts to the pre-split behaviour with no warning.
+
+Existing Craft content still has the old shape until the starter's `m260821_113000_lift_text_block_rich_text` content migration is run — it moves the first inner block's Rich Text (and any CKEditor chips it owns) up onto the outer block, then soft-deletes it.
 
 ---
 

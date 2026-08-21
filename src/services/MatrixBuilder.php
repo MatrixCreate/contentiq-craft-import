@@ -24,6 +24,20 @@ use yii\base\Component;
  */
 class MatrixBuilder extends Component
 {
+    // Public Properties
+    // =========================================================================
+
+    /**
+     * Overrides the live entry-type field-layout probe used by
+     * {@see _entryTypeHasField()}.
+     *
+     * Signature: `fn(string $entryTypeHandle, string $fieldHandle): bool`. Only
+     * set by the standalone test runner, which has no Craft application to ask.
+     *
+     * @var callable|null
+     */
+    public $entryTypeFieldProbe = null;
+
     // Private Properties
     // =========================================================================
 
@@ -33,6 +47,13 @@ class MatrixBuilder extends Component
      * @var array<string, array>|null
      */
     private ?array $_mapping = null;
+
+    /**
+     * Memoized {@see _entryTypeHasField()} answers, keyed `entryType:fieldHandle`.
+     *
+     * @var array<string, bool>
+     */
+    private array $_entryTypeFields = [];
 
     /**
      * User-facing warnings raised while building the current blocks array.
@@ -217,6 +238,58 @@ class MatrixBuilder extends Component
 
     // Private Methods
     // =========================================================================
+
+    /**
+     * Returns whether an entry type's field layout contains the given field.
+     *
+     * Used to probe layout shape before writing a handle that older starter
+     * forks don't have. A failed lookup counts as "not there" — the caller
+     * always has a legacy path to fall back to, and warns when it takes it.
+     *
+     * @param string $entryTypeHandle Handle of the entry type to inspect.
+     * @param string $fieldHandle     Handle of the field being probed for.
+     * @return bool
+     */
+    private function _entryTypeHasField(string $entryTypeHandle, string $fieldHandle): bool
+    {
+        $cacheKey = "{$entryTypeHandle}:{$fieldHandle}";
+
+        if (isset($this->_entryTypeFields[$cacheKey])) {
+            return $this->_entryTypeFields[$cacheKey];
+        }
+
+        if ($this->entryTypeFieldProbe !== null) {
+            return $this->_entryTypeFields[$cacheKey] = (bool)($this->entryTypeFieldProbe)($entryTypeHandle, $fieldHandle);
+        }
+
+        try {
+            $entryType = Craft::$app->getEntries()->getEntryTypeByHandle($entryTypeHandle);
+            $hasField  = $entryType?->getFieldLayout()?->getFieldByHandle($fieldHandle) !== null;
+        } catch (\Throwable $e) {
+            Craft::warning("ContentIQ could not inspect the '{$entryTypeHandle}' field layout: {$e->getMessage()}", __METHOD__);
+            $hasField = false;
+        }
+
+        return $this->_entryTypeFields[$cacheKey] = $hasField;
+    }
+
+    /**
+     * Records a user-facing warning unless the same one is already recorded.
+     *
+     * Layout-shape warnings would otherwise repeat once per block of that type.
+     *
+     * @param string $warning
+     * @return void
+     */
+    private function _warnOnce(string $warning): void
+    {
+        if (in_array($warning, $this->_warnings, true)) {
+            return;
+        }
+
+        Craft::warning($warning, __METHOD__);
+        $this->_warnings[] = $warning;
+    }
 
     /**
      * Resolves the Matrix key for a TOP-LEVEL, non-grouped block.
@@ -507,60 +580,87 @@ class MatrixBuilder extends Component
             $columns = $sourceFields['columns'] ?? 'singleColumn';
             $nodes   = $sourceFields['nodes'] ?? [];
 
-            // Find the first heading node to determine the split point.
-            $headingIndex = -1;
+            // Split the nodes into columns: everything up to and including the
+            // first heading is the left column, whatever follows is the right
+            // one. singleColumn (or twoColumns with no heading) stays as one.
+            $columnNodes = [$nodes];
+
             if ($columns === 'twoColumns') {
+                $headingIndex = -1;
                 foreach ($nodes as $i => $node) {
                     if (($node['type'] ?? '') === 'heading') {
                         $headingIndex = $i;
                         break;
                     }
                 }
+
+                if ($headingIndex !== -1) {
+                    $secondNodes = array_values(array_slice($nodes, $headingIndex + 1));
+                    $columnNodes = [array_values(array_slice($nodes, 0, $headingIndex + 1))];
+
+                    if (!empty($secondNodes)) {
+                        $columnNodes[] = $secondNodes;
+                    }
+                }
             }
 
-            if ($columns === 'twoColumns' && $headingIndex !== -1) {
-                // Left column: nodes up to and including the first heading.
-                $firstNodes  = array_values(array_slice($nodes, 0, $headingIndex + 1));
-                $secondNodes = array_values(array_slice($nodes, $headingIndex + 1));
+            // Current Starter layout: the first column lives on the outer entry's
+            // own Rich Text field and the inner Matrix holds at most one further
+            // column. Sites predating that change have no such field on the outer
+            // entry type, and writing to it would lose the column silently —
+            // Craft's Matrix save path swallows unknown nested handles
+            // (Matrix::_createEntriesFromSerializedData() catches
+            // InvalidFieldException) — so probe the layout before relying on it.
+            $firstColumnField = $innerConfig['firstColumnField'] ?? null;
+            $nodesMapping     = $innerConfig['fields']['nodes'] ?? null;
+            $liftFirstColumn  = $firstColumnField !== null
+                && $nodesMapping !== null
+                && $this->_entryTypeHasField($mapping['outerType'], $firstColumnField);
 
-                [$innerFields1, $innerReportedFields] = $this->_buildSingleInnerEntry(
-                    $innerConfig,
-                    array_merge($sourceFields, ['nodes' => $firstNodes]),
+            if ($firstColumnField !== null && !$liftFirstColumn) {
+                $this->_warnOnce(sprintf(
+                    "Text blocks: '%s' has no '%s' field, so every column was written to the '%s' Matrix (pre-split layout). Pull the current Craft Starter's Text block config to get the new layout.",
+                    $mapping['outerType'],
+                    $firstColumnField,
+                    $outerField,
+                ));
+            }
+
+            if ($liftFirstColumn) {
+                $resolved = $this->_resolveFieldByHandler(
+                    $nodesMapping[1],
+                    $firstColumnField,
+                    array_shift($columnNodes),
                     $imageReport,
                     $dryRun,
                 );
-                $innerEntries['new1'] = [
-                    'type'   => $innerConfig['innerType'],
-                    'fields' => $innerFields1,
-                ];
 
-                if (!empty($secondNodes)) {
-                    [$innerFields2] = $this->_buildSingleInnerEntry(
-                        $innerConfig,
-                        array_merge($sourceFields, ['nodes' => $secondNodes]),
-                        $imageReport,
-                        $dryRun,
-                    );
-                    $innerEntries['new2'] = [
-                        'type'   => $innerConfig['innerType'],
-                        'fields' => $innerFields2,
-                    ];
+                foreach ($resolved as $handle => $fieldValue) {
+                    $outerFields[$handle] = $fieldValue;
+                    $reportedFields[]     = $handle;
                 }
+            }
 
-                $reportedFields = array_merge($reportedFields, $innerReportedFields);
-            } else {
-                // singleColumn or twoColumns with no heading — one inner entry.
+            // Whatever's left becomes inner entries. An empty list is meaningful:
+            // it clears any inner blocks a previous import left behind.
+            $innerCounter = 0;
+
+            foreach ($columnNodes as $columnSlice) {
                 [$innerFields, $innerReportedFields] = $this->_buildSingleInnerEntry(
                     $innerConfig,
-                    $sourceFields,
+                    array_merge($sourceFields, ['nodes' => $columnSlice]),
                     $imageReport,
                     $dryRun,
                 );
-                $innerEntries['new1'] = [
+
+                $innerEntries['new' . (++$innerCounter)] = [
                     'type'   => $innerConfig['innerType'],
                     'fields' => $innerFields,
                 ];
-                $reportedFields = array_merge($reportedFields, $innerReportedFields);
+
+                if ($innerCounter === 1) {
+                    $reportedFields = array_merge($reportedFields, $innerReportedFields);
+                }
             }
         } else {
             $sourceKey   = $innerConfig['sourceKey'] ?? '';
