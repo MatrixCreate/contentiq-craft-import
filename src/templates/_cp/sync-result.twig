@@ -19,6 +19,7 @@
         {% if page %}
             {% set indent = depth * 24 %}
             {% set isLocked = 'Skipped — entry is locked.' in (page.warnings ?? []) %}
+            {% set isDeselected = 'Skipped — deselected.' in (page.warnings ?? []) %}
             <tr>
                 <td style="padding-left:{{ 12 + indent }}px;">
                     {% if depth > 0 %}
@@ -28,9 +29,12 @@
                     {% if page.sectionLabel ?? null %}
                         <span class="light" style="margin-left:6px;">— {{ page.sectionLabel }}</span>
                     {% endif %}
-                    {% set otherWarnings = (page.warnings ?? [])|filter(w => w != 'Skipped — entry is locked.') %}
+                    {% set otherWarnings = (page.warnings ?? [])|filter(w => w != 'Skipped — entry is locked.' and w != 'Skipped — deselected.') %}
                     {% if isLocked %}
                         <span class="light" style="margin-left:6px;">— Skipped (locked)</span>
+                    {% endif %}
+                    {% if isDeselected %}
+                        <span class="light" style="margin-left:6px;">— Skipped (deselected)</span>
                     {% endif %}
                     {% if page.error ?? null %}
                         <span style="color:var(--error-color); margin-left:6px;">— {{ page.error }}</span>
@@ -43,6 +47,8 @@
                 <td>
                     {% if 'Skipped — entry is locked.' in (page.warnings ?? []) %}
                         <span class="status disabled"></span> Locked
+                    {% elseif 'Skipped — deselected.' in (page.warnings ?? []) %}
+                        <span class="status disabled"></span> Deselected
                     {% elseif page.skipped ?? false %}
                         <span class="status disabled"></span> Skipped
                     {% elseif page.success ?? false %}
@@ -102,6 +108,12 @@
         </div>
     {% endif %}
 
+    {% if (run.result.ackWarning ?? null) %}
+        <div class="pane" style="background:var(--yellow-050); border:1px solid var(--yellow-300); margin-bottom:24px; padding:12px 16px; border-radius:8px; font-size:13px;">
+            {{ run.result.ackWarning }}
+        </div>
+    {% endif %}
+
     {# Summary line.
        'updated' = entries actually written/saved to Craft, 'skipped' = locked or
        any other skip reason, 'total' = pages found in the API response. Locked
@@ -126,7 +138,8 @@
         {% set totalWarnings = totalWarnings + (page.warnings ?? [])|length %}
 
         {% set isLocked = 'Skipped — entry is locked.' in (page.warnings ?? []) %}
-        {% set isSkipped = (page.skipped ?? false) or isLocked %}
+        {% set isDeselected = 'Skipped — deselected.' in (page.warnings ?? []) %}
+        {% set isSkipped = (page.skipped ?? false) or isLocked or isDeselected %}
         {% if isSkipped %}
             {% set skippedCount = skippedCount + 1 %}
         {% elseif page.success ?? false %}

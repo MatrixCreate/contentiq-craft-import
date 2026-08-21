@@ -54,6 +54,24 @@ class SyncJob extends BaseJob
     public bool $unlockGlobals = false;
 
     /**
+     * ContentIQ page ids (document.id) for "New" (never-imported) rows the
+     * user unchecked on the Sync screen — these are skipped this run rather
+     * than imported. Unlike $unlockIds (an existing entry's lock row), a New
+     * row has no lock row to toggle, so exclusion is expressed by page id
+     * instead. Only takes effect when the page still doesn't exist in Craft
+     * at execute time (checked via ImportService::findExistingEntry(), the
+     * same resolver the lock-check path above uses) — an id that raced to
+     * become an existing entry between page-load and this run must still be
+     * updated normally, never silently skipped. Set by the controller — see
+     * CpController::actionRunSync(). An empty array (the default) excludes
+     * nothing — a missing/malformed selection degrades to "import
+     * everything", never to "skip by default".
+     *
+     * @var int[]
+     */
+    public array $excludeNewIds = [];
+
+    /**
      * @inheritdoc
      */
     public function execute($queue): void
@@ -253,6 +271,58 @@ class SyncJob extends BaseJob
                     }
                 }
 
+                // Skip pages the user deselected on the Sync screen's "New"
+                // rows. Only applies when the page genuinely doesn't exist yet
+                // ($existingEntry === null, resolved via the same
+                // findExistingEntry() call above) — an id that raced to
+                // become an existing entry between page-load and this run
+                // must still go through the normal import/lock path, never
+                // be silently skipped as if it were still new.
+                $contentiqPageId = isset($pageData['document']['id']) ? (int)$pageData['document']['id'] : null;
+                $isDeselectedNew = $existingEntry === null
+                    && $contentiqPageId !== null
+                    && in_array($contentiqPageId, $this->excludeNewIds, true);
+
+                if ($isDeselectedNew) {
+                    $deselectedWarnings = ['Skipped — deselected.'];
+
+                    if ($isDuplicateSlug) {
+                        $deselectedWarnings[] = "Duplicate slug '{$pageSlug}' — a page earlier in this export already used this slug; hierarchy and card-reference resolution may point at the wrong entry.";
+                    }
+
+                    $pageResults[] = [
+                        'success' => true,
+                        'slug' => $pageSlug,
+                        'entryId' => null,
+                        'entryFound' => false,
+                        'title' => $pageData['document']['title'] ?? $pageSlug,
+                        'depth' => $pageData['document']['depth'] ?? 0,
+                        'parentSlug' => $pageData['document']['parent_slug'] ?? null,
+                        'blocks' => [],
+                        'images' => [],
+                        'blockNotes' => '',
+                        'seoFieldCount' => 0,
+                        'warnings' => $deselectedWarnings,
+                        'error' => null,
+                        'contentType' => $contentType,
+                        'sectionLabel' => $contentType !== null
+                            ? (Craft::$app->entries->getSectionByHandle($lookupSection)?->name ?? $contentType)
+                            : null,
+                        // Tells the ack step and auto-lock step (below) this
+                        // page was never written — no entry was created, so
+                        // there's nothing to acknowledge or lock.
+                        'skippedDeselected' => true,
+                    ];
+
+                    // Deliberately NOT added to $slugToEntryId — this page was
+                    // never created, so there's no entry id to record. Any
+                    // child of this page falls through to the existing
+                    // "parent slug not found" warning path below and imports
+                    // at root level; the next sync (once the parent is no
+                    // longer deselected) self-heals the hierarchy.
+                    continue;
+                }
+
                 $result = $importService->importPage($pageData, dryRun: false);
 
                 // Handle hierarchy: always re-apply parent and position on every run.
@@ -362,6 +432,40 @@ class SyncJob extends BaseJob
                 }
             }
 
+            // 5b. Acknowledge pages that were genuinely imported this run — the
+            //     ContentiQ export GETs are now read-only, so this is the CMS's
+            //     explicit signal that a page was actually written, letting
+            //     ContentiQ retire its own pending-import state. Locked/skipped
+            //     entries (skippedLocked, or ImportService's own non-fatal
+            //     'skipped' for e.g. an unmapped content_type) never reach this
+            //     list — nothing was written for them. Best-effort: a failure
+            //     here is surfaced as a run warning, never fails the sync.
+            $ackPageIds = [];
+
+            foreach ($pageResults as $result) {
+                if (($result['success'] ?? false)
+                    && empty($result['skippedLocked'])
+                    && empty($result['skippedDeselected'])
+                    && empty($result['skipped'])
+                    && ($result['entryId'] ?? null) !== null
+                    && !empty($result['contentiqPageId'])
+                ) {
+                    $ackPageIds[] = $result['contentiqPageId'];
+                }
+            }
+
+            $ackWarning = null;
+
+            if (!empty($ackPageIds)) {
+                $ackResult = $plugin->api->ackPages($ackPageIds);
+
+                if (!$ackResult['success']) {
+                    $ackWarning = 'Could not acknowledge imported pages with ContentiQ: ' . ($ackResult['error'] ?? 'unknown error');
+                    $hasWarnings = true;
+                    Craft::warning("ContentIQImporter: sync ack call failed — {$ackWarning}", __METHOD__);
+                }
+            }
+
             // 6. Import globals (envelope may carry a `globals` key). URL-prefix drift
             //    is advisory and runs read-only regardless of the lock; the write
             //    path only runs when the user has consented (row unlocked this run).
@@ -404,14 +508,14 @@ class SyncJob extends BaseJob
             }
 
             // 8. Update the pre-created run record. The result is a shape-tagged
-            //    object ({pages, globals}); old runs remain flat arrays.
+            //    object ({pages, globals, ackWarning}); old runs remain flat arrays.
             Craft::$app->getDb()->createCommand()->update(
                 '{{%contentiq_import_runs}}',
                 [
                     'pageCount'   => count($pageResults),
                     'imageCount'  => $totalImages,
                     'status'      => $status,
-                    'result'      => Json::encode(['pages' => $pageResults, 'globals' => $globalsReport]),
+                    'result'      => Json::encode(['pages' => $pageResults, 'globals' => $globalsReport, 'ackWarning' => $ackWarning]),
                     'dateUpdated' => Db::prepareDateForDb(new \DateTime()),
                 ],
                 ['id' => $this->runId],

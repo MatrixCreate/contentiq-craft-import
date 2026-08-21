@@ -12,13 +12,15 @@
         {% set page = slugToPage[slug] ?? null %}
         {% if page %}
             {% set indent = depth * 24 %}
-            <tr data-element-id="{{ page.elementId }}" data-depth="{{ depth }}">
+            {% set isNew = page.isNew ?? false %}
+            <tr data-element-id="{{ page.elementId }}" data-depth="{{ depth }}" data-is-new="{{ isNew ? '1' : '0' }}">
                 <td style="padding-left:{{ 12 + indent }}px; white-space:nowrap;">
                     <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
                         <input type="checkbox"
                                class="contentiq-sync-cb"
-                               data-element-id="{{ page.elementId }}"
-                               {{ not page.locked ? 'checked' : '' }}>
+                               {% if page.elementId ?? null %}data-element-id="{{ page.elementId }}"{% endif %}
+                               {% if isNew and (page.contentiqPageId ?? null) %}data-contentiq-page-id="{{ page.contentiqPageId }}"{% endif %}
+                               {{ (isNew or not page.locked) ? 'checked' : '' }}>
                         <strong>{{ page.title ?? page.slug }}</strong>
                         {% if page.isHomepage ?? false %}
                             <span class="light" style="font-size:12px;">(Homepage)</span>
@@ -27,7 +29,9 @@
                 </td>
                 <td><code style="font-size:12px;">{{ page.slug ?? '?' }}</code></td>
                 <td class="contentiq-status-cell" style="white-space:nowrap;">
-                    {% if page.locked %}
+                    {% if isNew %}
+                        <span class="status blue"></span> <span class="contentiq-status-text">New</span>
+                    {% elseif page.locked %}
                         <span class="status disabled"></span> <span class="contentiq-status-text">Locked</span>
                     {% else %}
                         <span class="status green"></span> <span class="contentiq-status-text">Will sync</span>
@@ -47,6 +51,16 @@
 {% block content %}
 
     <div style="max-width:900px;">
+
+        {# Dismissible warning — API unconfigured or unreachable. The tree
+           below still renders, but from local sync records only (see
+           CpController::actionSync()'s graceful-degradation fallback). #}
+        {% if apiWarning ?? null %}
+            <div class="pane" id="contentiq-api-warning" style="background:var(--yellow-050); border:1px solid var(--yellow-300); margin-bottom:24px; padding:12px 16px; border-radius:8px; display:flex; justify-content:space-between; align-items:center; gap:12px;">
+                <span style="font-size:13px;">{{ apiWarning }}</span>
+                <button type="button" class="btn small" onclick="document.getElementById('contentiq-api-warning').remove();">{{ 'Dismiss'|t('contentiq-importer') }}</button>
+            </div>
+        {% endif %}
 
         {# Sync controls + API info #}
         <div class="pane" style="padding:24px; border-radius:8px; margin-bottom:24px;">
@@ -143,7 +157,7 @@
 
                 {# Hint #}
                 <div style="padding:10px 16px; background:var(--gray-050); border-bottom:1px solid var(--hairline-color); font-size:13px; color:var(--medium-text-color);">
-                    Select the entries you want to update. Unselected entries will not be changed.
+                    Select the entries you want to update. Unselected entries will not be changed. <strong>New</strong> entries have never been imported — unchecking one skips it for this sync only; it will reappear as New next time.
                 </div>
 
                 <table class="data fullwidth">
@@ -215,7 +229,16 @@
             var cell = row.querySelector('.contentiq-status-cell');
             if (!cell) return;
 
-            if (cb.checked) {
+            // New (never-imported) rows are now toggleable — unchecking one
+            // excludes it from this sync only (see excludeNewIds below); it
+            // reappears as New next time since nothing gets written for it.
+            if (row.dataset.isNew === '1') {
+                if (cb.checked) {
+                    cell.innerHTML = '<span class="status blue"></span> <span class="contentiq-status-text">New</span>';
+                } else {
+                    cell.innerHTML = '<span class="status disabled"></span> <span class="contentiq-status-text">New — skipped</span>';
+                }
+            } else if (cb.checked) {
                 cell.innerHTML = '<span class="status green"></span> <span class="contentiq-status-text">Will sync</span>';
             } else {
                 cell.innerHTML = '<span class="status disabled"></span> <span class="contentiq-status-text">Locked</span>';
@@ -288,14 +311,33 @@
             var formData = new FormData(form);
 
             // Collect selected entry IDs (checked = will sync = unlock).
+            // "New" rows (never imported) have no data-element-id — there's
+            // no lock row to unlock for them, they're excluded separately
+            // below via excludeNewIds.
             if (checkboxes.length) {
                 var unlockIds = [];
                 checkboxes.forEach(function(cb) {
-                    if (cb.checked) {
+                    if (cb.checked && cb.dataset.elementId) {
                         unlockIds.push(parseInt(cb.dataset.elementId, 10));
                     }
                 });
                 formData.append('unlockIds', JSON.stringify(unlockIds));
+            }
+
+            // Collect ContentIQ page IDs for UNCHECKED "New" rows — these are
+            // skipped for this sync only (they have no lock row to unlock, so
+            // unlockIds above can't express "don't import this one"). If JS
+            // is broken or an id is missing, nothing is excluded and the
+            // page imports as before — never silently skip by default.
+            if (checkboxes.length) {
+                var excludeNewIds = [];
+                checkboxes.forEach(function(cb) {
+                    var row = cb.closest('tr');
+                    if (row && row.dataset.isNew === '1' && !cb.checked && cb.dataset.contentiqPageId) {
+                        excludeNewIds.push(parseInt(cb.dataset.contentiqPageId, 10));
+                    }
+                });
+                formData.append('excludeNewIds', JSON.stringify(excludeNewIds));
             }
 
             // Globals consent — checked = sync (unlock) this run.

@@ -615,94 +615,66 @@ class CpController extends Controller
     /**
      * Sync screen — shows API details and sync button.
      *
+     * On load, shows the FULL ContentiQ project tree (everything in the
+     * project, not just what's already been imported) merged with local sync
+     * state, matched via ImportService::findExistingEntry() (id-first, same
+     * resolver the actual import/lock-check pipeline uses) — see
+     * _buildFullSyncTree(). Falls back to the local-only view
+     * (_buildLocalOnlySyncTree() — what this screen showed before this
+     * change) whenever the API is unconfigured or unreachable, with a
+     * dismissible warning banner. The screen must never 500 because
+     * ContentiQ is down.
+     *
      * @return Response
      */
     public function actionSync(): Response
     {
-        $settings = ContentIQImporter::$plugin->getSettings();
+        $settings      = ContentIQImporter::$plugin->getSettings();
+        $apiConfigured = $settings->contentiqUrl !== '' && $settings->apiKey !== '';
 
-        if ($settings->contentiqUrl === '' || $settings->apiKey === '') {
-            Craft::$app->getSession()->setError('ContentiQ API is not configured. Set URL and API key in plugin settings.');
+        $config        = Craft::$app->config->getConfigFromFile('contentiq');
+        $sectionHandle = $config['section'] ?? 'pages';
 
-            return $this->redirect('contentiq-importer');
+        // Ordered list of collection sections from content_types config.
+        // Pages comes first, then each distinct collection section in config order.
+        $contentTypesMap    = ContentIQImporter::$plugin->imports->getContentTypesMap();
+        $collectionSections = [];
+
+        foreach ($contentTypesMap as $route) {
+            $handle = $route['section'] ?? null;
+
+            if ($handle !== null
+                && $handle !== $sectionHandle
+                && !in_array($handle, $collectionSections, true)) {
+                $collectionSections[] = $handle;
+            }
         }
 
-        // Build tree data from existing sync records.
-        $syncRecords = (new Query())
-            ->select(['element_id', 'locked'])
-            ->from('{{%contentiq_entry_syncs}}')
-            ->all();
-
-        $hasSyncRecords = count($syncRecords) > 0;
+        $apiWarning     = null;
         $syncGroups     = [];
+        $hasSyncRecords = false;
 
-        if ($hasSyncRecords) {
-            $elementIds = array_column($syncRecords, 'element_id');
-            $lockedMap  = array_column($syncRecords, 'locked', 'element_id');
+        if ($apiConfigured) {
+            // Shorter timeouts than the queue job's fetchExport() call — this
+            // runs synchronously on page load, so a slow/hung ContentiQ
+            // instance shouldn't hang the CP request for the job's full 120s.
+            $apiResult = ContentIQImporter::$plugin->api->fetchExport(timeout: 20, connectTimeout: 5);
 
-            $config        = Craft::$app->config->getConfigFromFile('contentiq');
-            $sectionHandle = $config['section'] ?? 'pages';
-
-            // Ordered list of collection sections from content_types config.
-            // Pages comes first, then each distinct collection section in config order.
-            $contentTypesMap    = ContentIQImporter::$plugin->imports->getContentTypesMap();
-            $collectionSections = [];
-
-            foreach ($contentTypesMap as $route) {
-                $handle = $route['section'] ?? null;
-
-                if ($handle !== null
-                    && $handle !== $sectionHandle
-                    && !in_array($handle, $collectionSections, true)) {
-                    $collectionSections[] = $handle;
-                }
+            if ($apiResult['success'] && is_array($apiResult['data'])) {
+                $syncGroups     = $this->_buildFullSyncTree($apiResult['data'], $sectionHandle, $collectionSections);
+                $hasSyncRecords = count($syncGroups) > 0;
+            } else {
+                $apiWarning = "Couldn't reach ContentiQ — showing imported entries only.";
             }
+        } else {
+            $apiWarning = 'ContentiQ API is not configured — showing imported entries only.';
+        }
 
-            // Query entries across the Pages section (+ homepage Single) and every
-            // collection section, restricted to those that have a sync record.
-            $entries = Entry::find()
-                ->section(array_merge([$sectionHandle, 'homepage'], $collectionSections))
-                ->id($elementIds)
-                ->status(null)
-                ->all();
-
-            // Bucket entries by their display group. Homepage folds into Pages.
-            $buckets = [];
-
-            foreach ($entries as $entry) {
-                $entrySection = $entry->section;
-                $handle       = $entrySection->handle;
-                $isHomepage   = $handle === 'homepage';
-                $groupHandle  = $isHomepage ? $sectionHandle : $handle;
-                $isStructure  = $entrySection->type === 'structure';
-                $parent       = ($isStructure && !$isHomepage) ? $entry->getParent() : null;
-
-                $buckets[$groupHandle][] = [
-                    'elementId'  => $entry->id,
-                    'title'      => $entry->title,
-                    'slug'       => $entry->slug,
-                    'locked'     => (bool)($lockedMap[$entry->id] ?? true),
-                    'parentSlug' => $parent?->slug,
-                    'depth'      => ($isStructure && !$isHomepage) ? max(0, $entry->level - 1) : 0,
-                    'isHomepage' => $isHomepage,
-                ];
-            }
-
-            // Build ordered groups: Pages first, then collection sections in config
-            // order. Omit any group with no entries (e.g. a collection not yet synced).
-            foreach (array_merge([$sectionHandle], $collectionSections) as $groupHandle) {
-                if (empty($buckets[$groupHandle])) {
-                    continue;
-                }
-
-                $section = Craft::$app->entries->getSectionByHandle($groupHandle);
-
-                $syncGroups[] = [
-                    'handle'  => $groupHandle,
-                    'name'    => $section?->name ?? ucfirst($groupHandle),
-                    'entries' => $buckets[$groupHandle],
-                ];
-            }
+        // Graceful degradation: unconfigured or unreachable API falls back to
+        // exactly the pre-existing local-only view (previously the only view
+        // this screen ever rendered).
+        if ($apiWarning !== null) {
+            [$syncGroups, $hasSyncRecords] = $this->_buildLocalOnlySyncTree($sectionHandle, $collectionSections);
         }
 
         // Parse the project slug from the API key (ciq_{slug}_{32chars}) for display.
@@ -736,10 +708,205 @@ class CpController extends Controller
             'projectSlug'    => $inferredSlug,
             'hasSyncRecords' => $hasSyncRecords,
             'syncGroups'     => $syncGroups,
+            'apiWarning'     => $apiWarning,
             'globalsLocked'     => $globalsLocked,
             'globalsOfficeCount' => $globalsOfficeCount,
             'globalsSetNames'    => ['companyInfo', 'globalContent', 'siteConfig'],
         ]);
+    }
+
+    /**
+     * Builds the sync-screen entry tree from ONLY existing local sync records
+     * (contentiq_entry_syncs) — no ContentIQ API call. This is the screen's
+     * original behaviour, preserved as the fallback for when the API is
+     * unconfigured or unreachable (see actionSync()).
+     *
+     * @param string $sectionHandle Pages section handle.
+     * @param string[] $collectionSections Ordered list of collection section handles.
+     * @return array{0: array, 1: bool} [$syncGroups, $hasSyncRecords]
+     */
+    private function _buildLocalOnlySyncTree(string $sectionHandle, array $collectionSections): array
+    {
+        $syncRecords = (new Query())
+            ->select(['element_id', 'locked'])
+            ->from('{{%contentiq_entry_syncs}}')
+            ->all();
+
+        $hasSyncRecords = count($syncRecords) > 0;
+        $syncGroups     = [];
+
+        if ($hasSyncRecords) {
+            $elementIds = array_column($syncRecords, 'element_id');
+            $lockedMap  = array_column($syncRecords, 'locked', 'element_id');
+
+            // Query entries across the Pages section (+ homepage Single) and every
+            // collection section, restricted to those that have a sync record.
+            $entries = Entry::find()
+                ->section(array_merge([$sectionHandle, 'homepage'], $collectionSections))
+                ->id($elementIds)
+                ->status(null)
+                ->all();
+
+            // Bucket entries by their display group. Homepage folds into Pages.
+            $buckets = [];
+
+            foreach ($entries as $entry) {
+                $entrySection = $entry->section;
+                $handle       = $entrySection->handle;
+                $isHomepage   = $handle === 'homepage';
+                $groupHandle  = $isHomepage ? $sectionHandle : $handle;
+                $isStructure  = $entrySection->type === 'structure';
+                $parent       = ($isStructure && !$isHomepage) ? $entry->getParent() : null;
+
+                $buckets[$groupHandle][] = [
+                    'elementId'  => $entry->id,
+                    'title'      => $entry->title,
+                    'slug'       => $entry->slug,
+                    'locked'     => (bool)($lockedMap[$entry->id] ?? true),
+                    'parentSlug' => $parent?->slug,
+                    'depth'      => ($isStructure && !$isHomepage) ? max(0, $entry->level - 1) : 0,
+                    'isHomepage' => $isHomepage,
+                    'isNew'      => false,
+                ];
+            }
+
+            // Build ordered groups: Pages first, then collection sections in config
+            // order. Omit any group with no entries (e.g. a collection not yet synced).
+            foreach (array_merge([$sectionHandle], $collectionSections) as $groupHandle) {
+                if (empty($buckets[$groupHandle])) {
+                    continue;
+                }
+
+                $section = Craft::$app->entries->getSectionByHandle($groupHandle);
+
+                $syncGroups[] = [
+                    'handle'  => $groupHandle,
+                    'name'    => $section?->name ?? ucfirst($groupHandle),
+                    'entries' => $buckets[$groupHandle],
+                ];
+            }
+        }
+
+        return [$syncGroups, $hasSyncRecords];
+    }
+
+    /**
+     * Builds the sync-screen entry tree from the FULL ContentIQ project
+     * export — every page/collection entry in the project, not just what's
+     * already been imported.
+     *
+     * Each export page is matched against Craft via
+     * ImportService::findExistingEntry() — the same id-first resolver
+     * SyncJob's own lock check uses, so this view and an actual sync always
+     * agree on what a page maps to. A match carries the entry's lock state
+     * (missing sync row ⇒ locked, same default as SyncJob/the widget sync);
+     * no match is a brand-new row (never locked — SyncJob's lock check only
+     * runs when findExistingEntry() found something, so an unimported page
+     * always imports regardless of any lock/selection state).
+     *
+     * Pages-group hierarchy (parent/child nesting) is built from the
+     * export's own document.parent_slug — the only source that can link a
+     * not-yet-imported child to an existing (or equally new) parent, since a
+     * new page has no Craft structure position yet. Collection-entry rows
+     * are deliberately kept flat (parentSlug forced null) — this mirrors
+     * _buildLocalOnlySyncTree()'s behaviour (collection sections are
+     * typically channels, which never carry a Craft parent) and avoids a
+     * latent bug in the shared tree macro (sync.twig's per-group
+     * childrenOf/rootSlugs build never checks whether a parentSlug is
+     * actually present in the same group — a parent slug pointing outside
+     * the group, e.g. a collection child's excluded collection-listing
+     * parent, would make that row simply never render).
+     *
+     * An unmapped content_type (no content_types route) is skipped from the
+     * tree entirely — mirrors ImportService::_importCollectionChild()'s own
+     * non-fatal skip; there's no Craft section to display it under.
+     *
+     * @param array $data Decoded export payload (batch `{pages: [...]}` or single-page `{document: ...}`).
+     * @param string $sectionHandle Pages section handle.
+     * @param string[] $collectionSections Ordered list of collection section handles.
+     * @return array Same shape as _buildLocalOnlySyncTree()'s $syncGroups.
+     */
+    private function _buildFullSyncTree(array $data, string $sectionHandle, array $collectionSections): array
+    {
+        $importService = ContentIQImporter::$plugin->imports;
+
+        // Same batch/single-page detection SyncJob uses.
+        $isBatch = isset($data['pages']) && is_array($data['pages']);
+        $pages   = [];
+
+        if ($isBatch) {
+            foreach ($data['pages'] as $pageData) {
+                if (is_array($pageData)) {
+                    $pages[] = $pageData;
+                }
+            }
+        } elseif (isset($data['document']) && is_array($data['document'])) {
+            $pages[] = $data;
+        }
+
+        // Local lock state, keyed by element_id — same source
+        // _buildLocalOnlySyncTree() reads, consulted per matched entry below.
+        $lockedMap = array_column(
+            (new Query())->select(['element_id', 'locked'])->from('{{%contentiq_entry_syncs}}')->all(),
+            'locked',
+            'element_id',
+        );
+
+        $buckets = [];
+
+        foreach ($pages as $pageData) {
+            $document    = $pageData['document'] ?? [];
+            $slug        = $document['slug'] ?? '';
+            $contentType = $document['content_type'] ?? null;
+            $isHomepage  = (bool)($document['is_homepage'] ?? false);
+
+            $groupHandle = $sectionHandle;
+
+            if ($contentType !== null) {
+                $route = $importService->getContentTypeRoute($contentType);
+
+                if ($route === null) {
+                    continue;
+                }
+
+                $groupHandle = $route['section'];
+            }
+
+            $existingEntry = $importService->findExistingEntry($pageData);
+            $elementId     = $existingEntry?->id;
+            $isNew         = $elementId === null;
+            $locked        = $isNew ? false : (bool)($lockedMap[$elementId] ?? true);
+
+            $buckets[$groupHandle][] = [
+                'elementId'       => $elementId,
+                'title'           => $document['title'] ?? ($slug !== '' ? $slug : '(untitled)'),
+                'slug'            => $slug,
+                'locked'          => $locked,
+                'parentSlug'      => $contentType === null ? ($document['parent_slug'] ?? null) : null,
+                'depth'           => $document['depth'] ?? 0,
+                'isHomepage'      => $isHomepage,
+                'isNew'           => $isNew,
+                'contentiqPageId' => isset($document['id']) ? (int)$document['id'] : null,
+            ];
+        }
+
+        $syncGroups = [];
+
+        foreach (array_merge([$sectionHandle], $collectionSections) as $groupHandle) {
+            if (empty($buckets[$groupHandle])) {
+                continue;
+            }
+
+            $section = Craft::$app->entries->getSectionByHandle($groupHandle);
+
+            $syncGroups[] = [
+                'handle'  => $groupHandle,
+                'name'    => $section?->name ?? ucfirst($groupHandle),
+                'entries' => $buckets[$groupHandle],
+            ];
+        }
+
+        return $syncGroups;
     }
 
     /**
@@ -788,6 +955,15 @@ class CpController extends Controller
         $unlockIdsRaw = Json::decodeIfJson($request->getBodyParam('unlockIds', '[]'));
         $unlockIds    = is_array($unlockIdsRaw) ? $unlockIdsRaw : null;
 
+        // ContentIQ page ids for unchecked "New" rows — deliberately opt-OUT:
+        // an absent/malformed param (broken JS, older cached page) means
+        // nothing is excluded and every New page still imports, same as
+        // before this feature existed. See SyncJob::$excludeNewIds.
+        $excludeNewIdsRaw = Json::decodeIfJson($request->getBodyParam('excludeNewIds', '[]'));
+        $excludeNewIds    = is_array($excludeNewIdsRaw)
+            ? array_values(array_map('intval', array_filter($excludeNewIdsRaw, 'is_scalar')))
+            : [];
+
         // The globals consent checkbox (checked = unlock for this run only).
         // SyncJob persists the inverse into contentiq_globals_sync.locked at
         // the start of the run, then relocks after a successful globals
@@ -809,6 +985,7 @@ class CpController extends Controller
             'runId'         => $runId,
             'unlockIds'     => $unlockIds,
             'unlockGlobals' => $unlockGlobals,
+            'excludeNewIds' => $excludeNewIds,
         ]));
 
         return $this->asJson([
@@ -1046,6 +1223,20 @@ class CpController extends Controller
             $db->createCommand()
                 ->insert('{{%contentiq_entry_syncs}}', array_merge(['element_id' => $elementId], $syncData))
                 ->execute();
+        }
+
+        // Acknowledge this page with ContentiQ so it can retire its own
+        // pending-import state — same contract SyncJob uses for batch syncs.
+        // Best-effort: never fails the widget sync.
+        if ($pageId !== null) {
+            $ackResult = ContentIQImporter::$plugin->api->ackPages([$pageId]);
+
+            if (!$ackResult['success']) {
+                Craft::warning(
+                    "ContentIQImporter: widget sync ack failed for page {$pageId} ({$slug}) — " . ($ackResult['error'] ?? 'unknown error'),
+                    __METHOD__,
+                );
+            }
         }
 
         $syncedAt = Craft::$app->getFormatter()->asDatetime($now, 'short');
