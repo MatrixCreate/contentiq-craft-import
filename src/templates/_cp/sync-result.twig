@@ -12,7 +12,14 @@
     </a>
 {% endblock %}
 
-{# Recursive macro for rendering page tree rows #}
+{# Recursive macro for rendering hierarchical page tree rows (the Pages
+   pane only — collection entries have no Craft parent and are rendered
+   flat via _self.flatEntryRows() below).
+
+   Padding calibration: the first cell's left inset (24px, matching every
+   pane's inner content edge on this screen) plus 24px per tree depth
+   level; the last cell's right inset is 24px too, so every row lines up
+   with the pane's own left/right edges regardless of column. #}
 {% macro pageRows(slugs, slugToPage, childrenOf, depth) %}
     {% for slug in slugs %}
         {% set page = slugToPage[slug] ?? null %}
@@ -21,14 +28,8 @@
             {% set isLocked = 'Skipped — entry is locked.' in (page.warnings ?? []) %}
             {% set isDeselected = 'Skipped — deselected.' in (page.warnings ?? []) %}
             <tr>
-                <td style="padding-left:{{ 12 + indent }}px;">
-                    {% if depth > 0 %}
-                        <span style="color:var(--hairline-color); margin-right:4px;">{% for i in 1..depth %}&mdash;{% endfor %}</span>
-                    {% endif %}
+                <td style="padding-left:{{ 24 + indent }}px;">
                     <strong>{{ page.title ?? page.slug ?? '?' }}</strong>
-                    {% if page.sectionLabel ?? null %}
-                        <span class="light" style="margin-left:6px;">— {{ page.sectionLabel }}</span>
-                    {% endif %}
                     {% set otherWarnings = (page.warnings ?? [])|filter(w => w != 'Skipped — entry is locked.' and w != 'Skipped — deselected.') %}
                     {% if isLocked %}
                         <span class="light" style="margin-left:6px;">— Skipped (locked)</span>
@@ -45,15 +46,15 @@
                 </td>
                 <td><code style="font-size:12px;">{{ page.slug ?? '?' }}</code></td>
                 <td>
-                    {% if 'Skipped — entry is locked.' in (page.warnings ?? []) %}
+                    {% if isLocked %}
                         <span class="status disabled"></span> Locked
-                    {% elseif 'Skipped — deselected.' in (page.warnings ?? []) %}
+                    {% elseif isDeselected %}
                         <span class="status disabled"></span> Deselected
                     {% elseif page.skipped ?? false %}
                         <span class="status disabled"></span> Skipped
                     {% elseif page.success ?? false %}
                         {% if page.entryFound ?? false %}
-                            <span class="status blue"></span> Updated
+                            <span class="status green"></span> Updated
                         {% else %}
                             <span class="status green"></span> Created
                         {% endif %}
@@ -61,7 +62,7 @@
                         <span class="status red"></span> Failed
                     {% endif %}
                 </td>
-                <td class="thin" style="white-space:nowrap;">
+                <td class="thin" style="white-space:nowrap; padding-right:24px;">
                     {% if page.entryId ?? null %}
                         {% set pageEntry = craft.entries.id(page.entryId).status(null).one() %}
                         {% if pageEntry %}
@@ -78,7 +79,6 @@
                 </td>
             </tr>
 
-
             {# Recurse into children #}
             {% set children = childrenOf[slug] ?? [] %}
             {% if children|length %}
@@ -88,37 +88,99 @@
     {% endfor %}
 {% endmacro %}
 
+{# Flat row rendering for a collection pane — collection entries never have
+   a Craft parent (their collection listing parent is excluded from
+   export), so there's no tree to build; each page is rendered directly in
+   result order. Same row markup/columns/status vocabulary as pageRows()
+   above, just without the depth/indent/recursion machinery. #}
+{# Recursive macro for the consolidated warnings list: walks the same
+   rootSlugs/childrenOf tree as the Pages pane (the flat results array is
+   NOT depth-first ordered), rendering a row only for pages that carry
+   warnings while always recursing so warned descendants of warning-free
+   parents still appear in tree position, indented to their walk depth. #}
+{% macro warnPageRows(slugs, slugToPage, childrenOf, depth) %}
+    {% for slug in slugs %}
+        {% set page = slugToPage[slug] ?? null %}
+        {% if page %}
+            {% if (page.warnings ?? [])|length %}
+                <div class="cq-warn-entry" style="padding-left:{{ depth * 24 }}px;">
+                    <div>
+                        <strong>{{ page.title ?? page.slug ?? '?' }}</strong>
+                        <code style="font-size:12px; color:var(--medium-text-color); margin-left:6px;">{{ page.slug ?? '?' }}</code>
+                    </div>
+                    {% for warning in page.warnings %}
+                        <div style="font-size:12px; color:var(--warning-color); margin-top:2px;">{{ warning }}</div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+            {% set children = childrenOf[slug] ?? [] %}
+            {% if children|length %}
+                {{ _self.warnPageRows(children, slugToPage, childrenOf, depth + 1) }}
+            {% endif %}
+        {% endif %}
+    {% endfor %}
+{% endmacro %}
+
+{% macro flatEntryRows(pages) %}
+    {% for page in pages %}
+        {% set isLocked = 'Skipped — entry is locked.' in (page.warnings ?? []) %}
+        {% set isDeselected = 'Skipped — deselected.' in (page.warnings ?? []) %}
+        <tr>
+            <td style="padding-left:24px;">
+                <strong>{{ page.title ?? page.slug ?? '?' }}</strong>
+                {% set otherWarnings = (page.warnings ?? [])|filter(w => w != 'Skipped — entry is locked.' and w != 'Skipped — deselected.') %}
+                {% if isLocked %}
+                    <span class="light" style="margin-left:6px;">— Skipped (locked)</span>
+                {% endif %}
+                {% if isDeselected %}
+                    <span class="light" style="margin-left:6px;">— Skipped (deselected)</span>
+                {% endif %}
+                {% if page.error ?? null %}
+                    <span style="color:var(--error-color); margin-left:6px;">— {{ page.error }}</span>
+                {% endif %}
+                {% for warning in otherWarnings %}
+                    <span style="color:var(--warning-color); margin-left:6px;">— {{ warning }}</span>
+                {% endfor %}
+            </td>
+            <td><code style="font-size:12px;">{{ page.slug ?? '?' }}</code></td>
+            <td>
+                {% if isLocked %}
+                    <span class="status disabled"></span> Locked
+                {% elseif isDeselected %}
+                    <span class="status disabled"></span> Deselected
+                {% elseif page.skipped ?? false %}
+                    <span class="status disabled"></span> Skipped
+                {% elseif page.success ?? false %}
+                    {% if page.entryFound ?? false %}
+                        <span class="status green"></span> Updated
+                    {% else %}
+                        <span class="status green"></span> Created
+                    {% endif %}
+                {% else %}
+                    <span class="status red"></span> Failed
+                {% endif %}
+            </td>
+            <td class="thin" style="white-space:nowrap; padding-right:24px;">
+                {% if page.entryId ?? null %}
+                    {% set pageEntry = craft.entries.id(page.entryId).status(null).one() %}
+                    {% if pageEntry %}
+                        <a href="{{ pageEntry.cpEditUrl }}" class="btn small" title="Edit in CP">
+                            {{ 'Edit'|t('contentiq-importer') }}
+                        </a>
+                        {% if pageEntry.url %}
+                            <a href="{{ pageEntry.url }}" class="btn small" target="_blank" title="View on site">
+                                {{ 'View'|t('contentiq-importer') }}
+                            </a>
+                        {% endif %}
+                    {% endif %}
+                {% endif %}
+            </td>
+        </tr>
+    {% endfor %}
+{% endmacro %}
+
 {% block content %}
 
-    {# Overall status banner #}
-    {% if run.status == 'success' %}
-        <div class="pane" style="background:var(--green-050); border:1px solid var(--green-300); margin-bottom:24px; padding:16px; border-radius:8px;">
-            <span class="status green"></span>
-            <strong>{{ 'Sync completed successfully'|t('contentiq-importer') }}</strong>
-        </div>
-    {% elseif run.status == 'warnings' %}
-        <div class="pane" style="background:var(--yellow-050); border:1px solid var(--yellow-300); margin-bottom:24px; padding:16px; border-radius:8px;">
-            <span class="status orange"></span>
-            <strong>{{ 'Sync completed with warnings'|t('contentiq-importer') }}</strong>
-        </div>
-    {% else %}
-        <div class="pane" style="background:var(--red-050); border:1px solid var(--red-300); margin-bottom:24px; padding:16px; border-radius:8px;">
-            <span class="status red"></span>
-            <strong>{{ 'Sync completed with errors'|t('contentiq-importer') }}</strong>
-        </div>
-    {% endif %}
-
-    {% if (run.result.ackWarning ?? null) %}
-        <div class="pane" style="background:var(--yellow-050); border:1px solid var(--yellow-300); margin-bottom:24px; padding:12px 16px; border-radius:8px; font-size:13px;">
-            {{ run.result.ackWarning }}
-        </div>
-    {% endif %}
-
-    {# Summary line.
-       'updated' = entries actually written/saved to Craft, 'skipped' = locked or
-       any other skip reason, 'total' = pages found in the API response. Locked
-       and skipped pages appear in run.result but are never written, so counting
-       them separately keeps the headline figure honest. #}
     {# Result is either the new {pages, globals} object or a legacy flat array. #}
     {% set result = run.result ?? [] %}
     {% set pages = result.pages is defined ? result.pages : result %}
@@ -153,18 +215,11 @@
         {% set reusedImages = reusedImages + (globals.imagesReused ?? 0) %}
     {% endif %}
 
-    <div style="margin-bottom:24px; font-size:14px; color:var(--text-color);">
-        <strong>{{ updatedCount }}</strong> updated
-        &middot; <strong>{{ skippedCount }}</strong> skipped
-        &middot; <strong>{{ pages|length }}</strong> total
-        &middot; <strong>{{ totalImages - reusedImages }}</strong> images downloaded
-        &middot; <strong>{{ reusedImages }}</strong> images reused
-        {% if totalWarnings > 0 %}
-            &middot; <strong style="color:var(--warning-color);">{{ totalWarnings }}</strong> {{ totalWarnings == 1 ? 'warning' : 'warnings' }}
-        {% endif %}
-    </div>
-
-    {# Warnings panel — list every warning with its page so totals match details. #}
+    {# Every warning-carrying page, in the same depth-first order as `pages`
+       itself (see CLAUDE.md "Pages must be sorted depth-first" — the API
+       export guarantees this, so a flat iteration below already lists
+       warned pages in tree order even though it isn't a real recursive
+       tree). Feeds the consolidated status+warnings pane below. #}
     {% set warningPages = [] %}
     {% for page in pages %}
         {% if (page.warnings ?? [])|length > 0 %}
@@ -172,54 +227,38 @@
         {% endif %}
     {% endfor %}
 
-    {% if warningPages|length %}
-        {# Collapsed by default — the "See more" label toggles the hidden checkbox,
-           expanding the list via a grid-rows transition (no JS, exact height). #}
-        {% css %}
-            .cq-warnings .cq-warn-toggle { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
-            .cq-warnings .cq-warn-header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-            .cq-warnings .cq-warn-header h2 { margin:0; font-size:14px; }
-            .cq-warnings .cq-warn-link { cursor:pointer; color:var(--link-color, #2563eb); text-decoration:underline; font-size:13px; white-space:nowrap; }
-            .cq-warnings .cq-warn-link::after { content:'See more'; }
-            .cq-warnings .cq-warn-toggle:checked ~ .cq-warn-header .cq-warn-link::after { content:'See less'; }
-            .cq-warnings .cq-warn-body { display:grid; grid-template-rows:0fr; transition:grid-template-rows .35s ease; }
-            .cq-warnings .cq-warn-toggle:checked ~ .cq-warn-body { grid-template-rows:1fr; }
-            .cq-warnings .cq-warn-inner { overflow:hidden; min-height:0; }
-            .cq-warnings .cq-warn-inner ul { margin:12px 0 0 0; padding-left:20px; }
-        {% endcss %}
-
-        <div class="pane cq-warnings" style="background:var(--yellow-050); border:1px solid var(--yellow-300); margin-bottom:24px; padding:16px; border-radius:8px;">
-            <input type="checkbox" id="cq-warn-toggle" class="cq-warn-toggle">
-            <div class="cq-warn-header">
-                <h2>
-                    {{ 'Warnings'|t('contentiq-importer') }}
-                    <span class="light" style="font-weight:normal;">({{ totalWarnings }})</span>
-                </h2>
-                <label for="cq-warn-toggle" class="cq-warn-link"></label>
-            </div>
-            <div class="cq-warn-body">
-                <div class="cq-warn-inner">
-                    <ul>
-                        {% for page in warningPages %}
-                            {% for warning in page.warnings %}
-                                <li style="margin-bottom:4px;">
-                                    <strong>{{ page.title ?? page.slug ?? '?' }}</strong>
-                                    <code style="font-size:12px; color:var(--medium-text-color);">{{ page.slug ?? '?' }}</code>
-                                    — {{ warning }}
-                                </li>
-                            {% endfor %}
-                        {% endfor %}
-                    </ul>
-                </div>
-            </div>
-        </div>
-    {% endif %}
-
-    {# Build tree lookup maps from parentSlug. First pass collects every slug so
-       the second pass can detect orphans — pages whose parent isn't in this
-       batch — and surface them as roots instead of silently dropping them. #}
-    {% set slugToPage = {} %}
+    {# Split results into the Pages group (sectionLabel is null — regular
+       pages/homepage, see ImportService::importPage()/SyncJob) and one
+       group per collection section (sectionLabel set by
+       ImportService::_importCollectionChild()/SyncJob for collection
+       children). Presentation only — the stored run record is untouched.
+       Computed here (rather than just before the Pages pane, where it used
+       to live) because the consolidated warnings section below needs the
+       same split. #}
+    {% set pageOnlyResults = [] %}
+    {% set collectionGroups = {} %}
+    {% set collectionGroupOrder = [] %}
     {% for page in pages %}
+        {% set label = page.sectionLabel ?? null %}
+        {% if label %}
+            {% if collectionGroups[label] is not defined %}
+                {% set collectionGroupOrder = collectionGroupOrder|merge([label]) %}
+            {% endif %}
+            {% set existing = collectionGroups[label] ?? [] %}
+            {% set collectionGroups = collectionGroups|merge({ (label): existing|merge([page]) }) %}
+        {% else %}
+            {% set pageOnlyResults = pageOnlyResults|merge([page]) %}
+        {% endif %}
+    {% endfor %}
+    {% set collectionGroupOrder = collectionGroupOrder|sort %}
+
+    {# Hierarchy maps for the Pages group — built once here because BOTH the
+       warnings sub-section and the Pages pane below render from the same
+       tree walk. The raw results array is NOT reliably depth-first ordered
+       (it groups by depth), so any correct nesting must come from walking
+       rootSlugs/childrenOf, never from iterating the flat array. #}
+    {% set slugToPage = {} %}
+    {% for page in pageOnlyResults %}
         {% set slug = page.slug ?? '' %}
         {% set slugToPage = slugToPage|merge({ (slug): page }) %}
     {% endfor %}
@@ -227,7 +266,7 @@
     {% set childrenOf = {} %}
     {% set rootSlugs = [] %}
 
-    {% for page in pages %}
+    {% for page in pageOnlyResults %}
         {% set slug = page.slug ?? '' %}
         {% set parentSlug = page.parentSlug ?? null %}
         {% set parentInBatch = parentSlug and parentSlug != '' and slugToPage[parentSlug] is defined %}
@@ -240,75 +279,256 @@
         {% endif %}
     {% endfor %}
 
-    {# Hierarchical page tree #}
-    <div class="pane" style="border-radius:8px;">
-        <table class="data fullwidth">
-            <thead>
-                <tr>
-                    <th>{{ 'Page'|t('contentiq-importer') }}</th>
-                    <th>{{ 'Slug'|t('contentiq-importer') }}</th>
-                    <th>{{ 'Status'|t('contentiq-importer') }}</th>
-                    <th></th>
-                </tr>
-            </thead>
-            <tbody>
-                {{ _self.pageRows(rootSlugs, slugToPage, childrenOf, 0) }}
-            </tbody>
-        </table>
-    </div>
+    {# Warning-only view of the collection groupings, for the consolidated
+       warnings sub-section below (warned PAGES render via the warnPageRows
+       tree walk instead — no flat filtered list). #}
+    {% set warnCollectionGroups = {} %}
+    {% set warnCollectionOrder = [] %}
+    {% for label in collectionGroupOrder %}
+        {% set filtered = collectionGroups[label]|filter(p => (p.warnings ?? [])|length > 0) %}
+        {% if filtered|length %}
+            {% set warnCollectionOrder = warnCollectionOrder|merge([label]) %}
+            {% set warnCollectionGroups = warnCollectionGroups|merge({ (label): filtered }) %}
+        {% endif %}
+    {% endfor %}
 
-    {# Globals report #}
-    {% if globals %}
-        <h2 style="margin-top:32px;">{{ 'Globals'|t('contentiq-importer') }}</h2>
+    {# Overall status banner, consolidated with the warnings list into ONE
+       pane (previously two separate yellow panels). The banner's
+       colour/dot/heading always follow run.status (green/yellow/red); the
+       "Warnings (N)" collapsible sub-section renders inside that SAME pane
+       whenever any page carries a warning, independent of the banner's own
+       colour — an 'errors' run can still carry non-fatal warnings on other
+       pages, so this isn't gated to the 'warnings' status alone. When there
+       are no warnings at all, the pane is just the status line, for all
+       three status values. #}
+    {% if run.status == 'success' %}
+        {% set bannerBg = 'var(--green-050)' %}
+        {% set bannerBorder = 'var(--green-300)' %}
+        {% set bannerDot = 'green' %}
+        {% set bannerHeading = 'Sync completed successfully'|t('contentiq-importer') %}
+    {% elseif run.status == 'warnings' %}
+        {% set bannerBg = 'var(--yellow-050)' %}
+        {% set bannerBorder = 'var(--yellow-300)' %}
+        {% set bannerDot = 'orange' %}
+        {% set bannerHeading = 'Sync completed with warnings'|t('contentiq-importer') %}
+    {% else %}
+        {% set bannerBg = 'var(--red-050)' %}
+        {% set bannerBorder = 'var(--red-300)' %}
+        {% set bannerDot = 'red' %}
+        {% set bannerHeading = 'Sync completed with errors'|t('contentiq-importer') %}
+    {% endif %}
 
-        {% if globals.locked ?? false %}
-            <div class="pane" style="border-radius:8px; padding:16px;">
-                <span class="status disabled"></span> {{ globals.skipped ?? 'Skipped — globals are locked.' }}
+    {% if warningPages|length %}
+        {# Collapsed by default — the "See more" label toggles the hidden checkbox,
+           expanding the list via a grid-rows transition (no JS, exact height). #}
+        {% css %}
+            .cq-warnings .cq-warn-toggle { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
+            .cq-warnings .cq-warn-header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+            .cq-warnings .cq-warn-link { cursor:pointer; color:var(--link-color, #2563eb); text-decoration:underline; font-size:13px; white-space:nowrap; }
+            .cq-warnings .cq-warn-link::after { content:'See more'; }
+            .cq-warnings .cq-warn-toggle:checked ~ .cq-warn-header .cq-warn-link::after { content:'See less'; }
+            .cq-warnings .cq-warn-body { display:grid; grid-template-rows:0fr; transition:grid-template-rows .35s ease; }
+            .cq-warnings .cq-warn-toggle:checked ~ .cq-warn-body { grid-template-rows:1fr; }
+            .cq-warnings .cq-warn-inner { overflow:hidden; min-height:0; }
+            .cq-warnings .cq-warn-inner > h2 { margin:0 0 8px; padding-top:24px; font-size:14px; }
+            .cq-warnings .cq-warn-entry { padding:6px 0; }
+            .cq-warnings .cq-warn-group-label { margin:8px 0 4px; padding-top:8px; border-top:1px solid var(--hairline-color); text-transform:uppercase; letter-spacing:0.05em; font-size:11px; color:var(--medium-text-color); }
+            .cq-warnings .cq-warn-group-label:first-child { margin-top:0; padding-top:0; border-top:none; }
+        {% endcss %}
+    {% endif %}
+
+    <div class="pane {{ warningPages|length ? 'cq-warnings' : '' }}" style="background:{{ bannerBg }}; border:1px solid {{ bannerBorder }}; margin-bottom:24px; padding:16px 24px; border-radius:8px;">
+        {% if warningPages|length %}
+            <input type="checkbox" id="cq-warn-toggle" class="cq-warn-toggle">
+            <div class="cq-warn-header">
+                <span>
+                    <span class="status {{ bannerDot }}"></span>
+                    <strong>{{ bannerHeading }}</strong>
+                    <span class="light">({{ totalWarnings }})</span>
+                </span>
+                <label for="cq-warn-toggle" class="cq-warn-link"></label>
+            </div>
+            <div class="cq-warn-body">
+                <div class="cq-warn-inner">
+                    <h2>{{ 'Warnings'|t('contentiq-importer') }}</h2>
+                    {# Pages — real tree walk over the same maps the Pages
+                       pane uses; only warned pages render, in tree position. #}
+                    {{ _self.warnPageRows(rootSlugs, slugToPage, childrenOf, 0) }}
+
+                    {# Collection entries group flat under their section label,
+                       same as the collection panes further down the page. #}
+                    {% for label in warnCollectionOrder %}
+                        <div class="cq-warn-group-label">{{ label }}</div>
+                        {% for page in warnCollectionGroups[label] %}
+                            <div class="cq-warn-entry">
+                                <div>
+                                    <strong>{{ page.title ?? page.slug ?? '?' }}</strong>
+                                    <code style="font-size:12px; color:var(--medium-text-color); margin-left:6px;">{{ page.slug ?? '?' }}</code>
+                                </div>
+                                {% for warning in page.warnings %}
+                                    <div style="font-size:12px; color:var(--warning-color); margin-top:2px;">{{ warning }}</div>
+                                {% endfor %}
+                            </div>
+                        {% endfor %}
+                    {% endfor %}
+                </div>
             </div>
         {% else %}
-            {% set offices = globals.offices ?? {} %}
-            <div class="pane" style="border-radius:8px; padding:16px; margin-bottom:16px;">
-                <div style="font-size:14px; margin-bottom:12px;">
-                    <strong>{{ (offices.created ?? [])|length }}</strong> created
-                    &middot; <strong>{{ (offices.updated ?? [])|length }}</strong> updated
-                    &middot; <strong>{{ (offices.adopted ?? [])|length }}</strong> adopted
-                    &middot; <strong>{{ (offices.deleted ?? [])|length }}</strong> deleted
-                    &middot; <strong>{{ (offices.unmatched ?? [])|length }}</strong> left alone
-                </div>
+            <span class="status {{ bannerDot }}"></span>
+            <strong>{{ bannerHeading }}</strong>
+        {% endif %}
+    </div>
 
-                {% for label, key in { 'Created': 'created', 'Updated': 'updated', 'Adopted': 'adopted', 'Deleted': 'deleted', 'Left alone (hand-made)': 'unmatched' } %}
-                    {% if (offices[key] ?? [])|length %}
-                        <div style="font-size:13px; margin-bottom:4px;">
-                            <span class="light">{{ label }}:</span> {{ offices[key]|join(', ') }}
-                        </div>
-                    {% endif %}
-                {% endfor %}
+    {% if (run.result.ackWarning ?? null) %}
+        <div class="pane" style="background:var(--yellow-050); border:1px solid var(--yellow-300); margin-bottom:24px; padding:12px 24px; border-radius:8px; font-size:13px;">
+            {{ run.result.ackWarning }}
+        </div>
+    {% endif %}
+
+    {# Summary stat row — same counts as before ('updated' = entries actually
+       written/saved to Craft, 'skipped' = locked/deselected/any other skip
+       reason, 'total' = pages found in the API response), presented as a
+       row of Craft-style stat cards instead of a middot-joined sentence. #}
+    <div class="pane" style="border-radius:8px; margin-bottom:24px; padding:20px 24px; display:flex; flex-wrap:wrap; gap:32px;">
+        <div>
+            <div style="font-size:22px; font-weight:600; line-height:1.2;">{{ updatedCount }}</div>
+            <div class="light" style="font-size:11px; text-transform:uppercase; letter-spacing:0.05em; margin-top:2px;">{{ 'Updated'|t('contentiq-importer') }}</div>
+        </div>
+        <div>
+            <div style="font-size:22px; font-weight:600; line-height:1.2;">{{ skippedCount }}</div>
+            <div class="light" style="font-size:11px; text-transform:uppercase; letter-spacing:0.05em; margin-top:2px;">{{ 'Skipped'|t('contentiq-importer') }}</div>
+        </div>
+        <div>
+            <div style="font-size:22px; font-weight:600; line-height:1.2;">{{ pages|length }}</div>
+            <div class="light" style="font-size:11px; text-transform:uppercase; letter-spacing:0.05em; margin-top:2px;">{{ 'Total'|t('contentiq-importer') }}</div>
+        </div>
+        <div>
+            <div style="font-size:22px; font-weight:600; line-height:1.2;">{{ totalImages - reusedImages }}</div>
+            <div class="light" style="font-size:11px; text-transform:uppercase; letter-spacing:0.05em; margin-top:2px;">{{ 'Images downloaded'|t('contentiq-importer') }}</div>
+        </div>
+        <div>
+            <div style="font-size:22px; font-weight:600; line-height:1.2;">{{ reusedImages }}</div>
+            <div class="light" style="font-size:11px; text-transform:uppercase; letter-spacing:0.05em; margin-top:2px;">{{ 'Images reused'|t('contentiq-importer') }}</div>
+        </div>
+        {% if totalWarnings > 0 %}
+            <div>
+                <div style="font-size:22px; font-weight:600; line-height:1.2; color:var(--warning-color);">{{ totalWarnings }}</div>
+                <div class="light" style="font-size:11px; text-transform:uppercase; letter-spacing:0.05em; margin-top:2px;">{{ totalWarnings == 1 ? 'Warning'|t('contentiq-importer') : 'Warnings'|t('contentiq-importer') }}</div>
+            </div>
+        {% endif %}
+    </div>
+
+    {# Pages pane — hierarchical tree walked from the maps built above,
+       same as before, just scoped to non-collection results. #}
+    {% if pageOnlyResults|length %}
+        {# padding:0 on the .pane itself — Craft's own .pane class carries its
+           own default padding, which would otherwise stack on top of this
+           header/table's own 24px inset and misalign the left edge against
+           the summary stat row / banners above (which set their padding
+           directly on the .pane and have no further nested inset). #}
+        <div class="pane" style="border-radius:8px; margin-bottom:24px; padding:0;">
+            <div style="padding:12px 24px; border-bottom:1px solid var(--hairline-color);">
+                <strong style="text-transform:uppercase; letter-spacing:0.05em; font-size:11px; color:var(--medium-text-color);">{{ 'Pages'|t('contentiq-importer') }}</strong>
+            </div>
+            <table class="data fullwidth">
+                <thead>
+                    <tr>
+                        <th style="width:45%; padding-left:24px;">{{ 'Page'|t('contentiq-importer') }}</th>
+                        <th style="width:25%;">{{ 'Slug'|t('contentiq-importer') }}</th>
+                        <th style="width:15%;">{{ 'Status'|t('contentiq-importer') }}</th>
+                        <th style="width:15%; padding-right:24px;"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{ _self.pageRows(rootSlugs, slugToPage, childrenOf, 0) }}
+                </tbody>
+            </table>
+        </div>
+    {% endif %}
+
+    {# One pane per collection section, in first-appearance order. Entries
+       are rendered flat (no tree) — collection children never have a Craft
+       parent (their collection listing parent is excluded from export). #}
+    {% for label in collectionGroupOrder %}
+        <div class="pane" style="border-radius:8px; margin-bottom:24px; padding:0;">
+            <div style="padding:12px 24px; border-bottom:1px solid var(--hairline-color);">
+                <strong style="text-transform:uppercase; letter-spacing:0.05em; font-size:11px; color:var(--medium-text-color);">{{ label }}</strong>
+            </div>
+            <table class="data fullwidth">
+                <thead>
+                    <tr>
+                        <th style="width:45%; padding-left:24px;">{{ 'Page'|t('contentiq-importer') }}</th>
+                        <th style="width:25%;">{{ 'Slug'|t('contentiq-importer') }}</th>
+                        <th style="width:15%;">{{ 'Status'|t('contentiq-importer') }}</th>
+                        <th style="width:15%; padding-right:24px;"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{ _self.flatEntryRows(collectionGroups[label]) }}
+                </tbody>
+            </table>
+        </div>
+    {% endfor %}
+
+    {# Globals report — same pane heading treatment as the Pages/collection
+       panes above, with each sub-section (offices, global set fields,
+       warnings/notes) divided by a hairline inside the one pane rather than
+       stacked as separate panes. #}
+    {% if globals %}
+        <div class="pane" style="border-radius:8px; margin-bottom:24px; padding:0;">
+            <div style="padding:12px 24px; border-bottom:1px solid var(--hairline-color);">
+                <strong style="text-transform:uppercase; letter-spacing:0.05em; font-size:11px; color:var(--medium-text-color);">{{ 'Globals'|t('contentiq-importer') }}</strong>
             </div>
 
-            {% if (globals.globalSets ?? {})|length %}
-                <div class="pane" style="border-radius:8px; padding:16px; margin-bottom:16px;">
-                    <strong style="display:block; margin-bottom:8px;">{{ 'Global set fields written'|t('contentiq-importer') }}</strong>
-                    {% for setHandle, handles in globals.globalSets %}
-                        <div style="font-size:13px; margin-bottom:4px;">
-                            <code>{{ setHandle }}</code>
-                            <span class="light">— {{ handles|length ? handles|join(', ') : 'none' }}</span>
-                        </div>
+            {% if globals.locked ?? false %}
+                <div style="padding:16px 24px;">
+                    <span class="status disabled"></span> {{ globals.skipped ?? 'Skipped — globals are locked.' }}
+                </div>
+            {% else %}
+                {% set offices = globals.offices ?? {} %}
+                <div style="padding:16px 24px;">
+                    <div style="font-size:14px; margin-bottom:12px;">
+                        <strong>{{ (offices.created ?? [])|length }}</strong> created
+                        &middot; <strong>{{ (offices.updated ?? [])|length }}</strong> updated
+                        &middot; <strong>{{ (offices.adopted ?? [])|length }}</strong> adopted
+                        &middot; <strong>{{ (offices.deleted ?? [])|length }}</strong> deleted
+                        &middot; <strong>{{ (offices.unmatched ?? [])|length }}</strong> left alone
+                    </div>
+
+                    {% for label, key in { 'Created': 'created', 'Updated': 'updated', 'Adopted': 'adopted', 'Deleted': 'deleted', 'Left alone (hand-made)': 'unmatched' } %}
+                        {% if (offices[key] ?? [])|length %}
+                            <div style="font-size:13px; margin-bottom:4px;">
+                                <span class="light">{{ label }}:</span> {{ offices[key]|join(', ') }}
+                            </div>
+                        {% endif %}
                     {% endfor %}
+                </div>
+
+                {% if (globals.globalSets ?? {})|length %}
+                    <div style="padding:16px 24px; border-top:1px solid var(--hairline-color);">
+                        <strong style="display:block; margin-bottom:8px;">{{ 'Global set fields written'|t('contentiq-importer') }}</strong>
+                        {% for setHandle, handles in globals.globalSets %}
+                            <div style="font-size:13px; margin-bottom:4px;">
+                                <code>{{ setHandle }}</code>
+                                <span class="light">— {{ handles|length ? handles|join(', ') : 'none' }}</span>
+                            </div>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            {% endif %}
+
+            {% set globalsNotes = (globals.warnings ?? [])|merge(globals.drift ?? [])|merge(globals.fieldNotes ?? []) %}
+            {% if globalsNotes|length %}
+                <div style="padding:16px 24px; border-top:1px solid var(--hairline-color); background:var(--yellow-050);">
+                    <strong style="display:block; margin-bottom:8px;">{{ 'Globals warnings and notes'|t('contentiq-importer') }}</strong>
+                    <ul style="margin:0; padding-left:20px;">
+                        {% for note in globalsNotes %}
+                            <li style="margin-bottom:4px; font-size:13px;">{{ note }}</li>
+                        {% endfor %}
+                    </ul>
                 </div>
             {% endif %}
-        {% endif %}
-
-        {% set globalsNotes = (globals.warnings ?? [])|merge(globals.drift ?? [])|merge(globals.fieldNotes ?? []) %}
-        {% if globalsNotes|length %}
-            <div class="pane" style="background:var(--yellow-050); border:1px solid var(--yellow-300); border-radius:8px; padding:16px;">
-                <strong style="display:block; margin-bottom:8px;">{{ 'Globals warnings and notes'|t('contentiq-importer') }}</strong>
-                <ul style="margin:0; padding-left:20px;">
-                    {% for note in globalsNotes %}
-                        <li style="margin-bottom:4px; font-size:13px;">{{ note }}</li>
-                    {% endfor %}
-                </ul>
-            </div>
-        {% endif %}
+        </div>
     {% endif %}
 
 {% endblock %}

@@ -6,7 +6,13 @@
     { label: 'ContentiQ', url: url('contentiq-importer') },
 ] %}
 
-{# Recursive macro for rendering the entry tree with checkboxes #}
+{# Recursive macro for rendering the entry tree with checkboxes.
+
+   Padding calibration: the first cell's left inset (24px, matching every
+   other pane's inner content edge on this screen — see the top/bottom
+   control panes and pane headers below) plus 24px per tree depth level; the
+   last cell's right inset is 24px too, so every row's content — regardless
+   of column — lines up with the pane's own left/right edges. #}
 {% macro pageRows(slugs, slugToPage, childrenOf, depth) %}
     {% for slug in slugs %}
         {% set page = slugToPage[slug] ?? null %}
@@ -14,8 +20,8 @@
             {% set indent = depth * 24 %}
             {% set isNew = page.isNew ?? false %}
             <tr data-element-id="{{ page.elementId }}" data-depth="{{ depth }}" data-is-new="{{ isNew ? '1' : '0' }}">
-                <td style="padding-left:{{ 12 + indent }}px; white-space:nowrap;">
-                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                <td style="padding-left:{{ 24 + indent }}px; white-space:nowrap;">
+                    <label style="display:flex; align-items:center; gap:8px; cursor:pointer; user-select:none; -webkit-user-select:none;">
                         <input type="checkbox"
                                class="contentiq-sync-cb"
                                {% if page.elementId ?? null %}data-element-id="{{ page.elementId }}"{% endif %}
@@ -28,7 +34,7 @@
                     </label>
                 </td>
                 <td><code style="font-size:12px;">{{ page.slug ?? '?' }}</code></td>
-                <td class="contentiq-status-cell" style="white-space:nowrap;">
+                <td class="contentiq-status-cell" style="white-space:nowrap; padding-right:24px;">
                     {% if isNew %}
                         <span class="status blue"></span> <span class="contentiq-status-text">New</span>
                     {% elseif page.locked %}
@@ -50,19 +56,21 @@
 
 {% block content %}
 
-    <div style="max-width:900px;">
+    <div>
 
         {# Dismissible warning — API unconfigured or unreachable. The tree
            below still renders, but from local sync records only (see
            CpController::actionSync()'s graceful-degradation fallback). #}
         {% if apiWarning ?? null %}
-            <div class="pane" id="contentiq-api-warning" style="background:var(--yellow-050); border:1px solid var(--yellow-300); margin-bottom:24px; padding:12px 16px; border-radius:8px; display:flex; justify-content:space-between; align-items:center; gap:12px;">
+            <div class="pane" id="contentiq-api-warning" style="background:var(--yellow-050); border:1px solid var(--yellow-300); margin-bottom:24px; padding:12px 24px; border-radius:8px; display:flex; justify-content:space-between; align-items:center; gap:12px;">
                 <span style="font-size:13px;">{{ apiWarning }}</span>
                 <button type="button" class="btn small" onclick="document.getElementById('contentiq-api-warning').remove();">{{ 'Dismiss'|t('contentiq-importer') }}</button>
             </div>
         {% endif %}
 
-        {# Sync controls + API info #}
+        {# Sync controls + API info — top control block. Same 24px horizontal
+           inset as every other pane on this screen (see padding calibration
+           note on the macro above). #}
         <div class="pane" style="padding:24px; border-radius:8px; margin-bottom:24px;">
             <div style="display:flex; justify-content:space-between; align-items:center;">
 
@@ -116,12 +124,97 @@
             </div>
         </div>
 
-        {# Globals consent — one checkbox gates the whole globals payload. #}
-        <div class="pane" style="border-radius:8px; margin-bottom:24px;">
-            <div style="padding:12px 16px; border-bottom:1px solid var(--hairline-color);">
+        {% if hasSyncRecords %}
+
+            {# Global selection bar — one master "Select all" checkbox toggling
+               every row checkbox across every pane below, plus the live
+               selection summary and the selection hint. Sits at the top of
+               the entries area, same 24px inset as every pane.
+
+               Craft's own .pane class carries its own default padding (see
+               --pane-padding); every pane below sets padding:0 on the .pane
+               itself and pushes ALL horizontal inset onto its inner
+               divs/cells instead, so the rendered left edge lines up with
+               the top control block's 24px inset regardless of how many
+               nested divs sit inside the pane. #}
+            <div class="pane" style="border-radius:8px; margin-bottom:24px; padding:0;">
+                <div style="padding:16px 24px; display:flex; justify-content:space-between; align-items:center; gap:16px;">
+                    <label style="display:flex; align-items:center; gap:10px; cursor:pointer;">
+                        <input type="checkbox" id="contentiq-select-all-master">
+                        <strong>{{ 'Select all'|t('contentiq-importer') }}</strong>
+                    </label>
+                    <span class="light" style="font-size:13px;" id="contentiq-sync-summary"></span>
+                </div>
+            </div>
+
+            {# One pane per group — Pages first, then each collection section in
+               config order (see CpController::actionSync()'s $syncGroups
+               ordering). Each pane header is two rows (Payload-style): the
+               uppercase pane title, then a select-all row whose checkbox
+               sits at the SAME 24px inset as the row checkboxes in the
+               table below (same left column), with a live per-pane
+               "n of m selected" count on the right. #}
+            {% for group in syncGroups %}
+
+                {# Build tree lookup maps scoped to this group #}
+                {% set slugToPage = {} %}
+                {% set childrenOf = {} %}
+                {% set rootSlugs = [] %}
+
+                {% for entry in group.entries %}
+                    {% set slug = entry.slug ?? '' %}
+                    {% set parentSlug = entry.parentSlug ?? null %}
+                    {% set slugToPage = slugToPage|merge({ (slug): entry }) %}
+
+                    {% if parentSlug and parentSlug != '' %}
+                        {% set existing = childrenOf[parentSlug] ?? [] %}
+                        {% set childrenOf = childrenOf|merge({ (parentSlug): existing|merge([slug]) }) %}
+                    {% else %}
+                        {% set rootSlugs = rootSlugs|merge([slug]) %}
+                    {% endif %}
+                {% endfor %}
+
+                <div class="pane" style="border-radius:8px; margin-bottom:24px; padding:0;">
+                    <div style="padding:12px 24px; border-bottom:1px solid var(--hairline-color);">
+                        <strong style="text-transform:uppercase; letter-spacing:0.05em; font-size:11px; color:var(--medium-text-color);">{{ group.name }}</strong>
+                    </div>
+
+                    <div style="padding:10px 24px; border-bottom:1px solid var(--hairline-color); background:var(--gray-050); display:flex; justify-content:space-between; align-items:center; gap:12px;">
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:12px; color:var(--medium-text-color);">
+                            <input type="checkbox" class="contentiq-pane-select-all">
+                            {{ 'Select all'|t('contentiq-importer') }}
+                        </label>
+                        <span class="light contentiq-pane-summary" style="font-size:12px;"></span>
+                    </div>
+
+                    <table class="data fullwidth">
+                        <thead>
+                            <tr>
+                                <th style="width:55%; padding-left:24px;">{{ 'Title'|t('contentiq-importer') }}</th>
+                                <th style="width:25%;">{{ 'Slug'|t('contentiq-importer') }}</th>
+                                <th style="width:20%; padding-right:24px;">{{ 'Status'|t('contentiq-importer') }}</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {{ _self.pageRows(rootSlugs, slugToPage, childrenOf, 0) }}
+                        </tbody>
+                    </table>
+                </div>
+
+            {% endfor %}
+
+        {% endif %}
+
+        {# Globals consent — one checkbox gates the whole globals payload.
+           Deliberately below all entry panes (per-entry selection above is
+           the primary decision on this screen; globals consent is the last
+           thing an editor confirms before syncing). padding:0 on the .pane
+           itself — see the padding-calibration note above the group panes. #}
+        <div class="pane" style="border-radius:8px; margin-bottom:24px; padding:0;">
+            <div style="padding:12px 24px; border-bottom:1px solid var(--hairline-color);">
                 <strong style="text-transform:uppercase; letter-spacing:0.05em; font-size:11px; color:var(--medium-text-color);">{{ 'Globals'|t('contentiq-importer') }}</strong>
             </div>
-            <div style="padding:12px 16px;">
+            <div style="padding:12px 24px;">
                 <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer;">
                     <input type="checkbox" id="contentiq-globals-cb" {{ not globalsLocked ? 'checked' : '' }}>
                     <span>
@@ -138,72 +231,48 @@
             </div>
         </div>
 
-        {% if hasSyncRecords %}
-
-            {# Entry tree pane with selection controls #}
-            <div class="pane" style="border-radius:8px; margin-bottom:24px;">
-
-                {# Header bar #}
-                <div style="padding:12px 16px; border-bottom:1px solid var(--hairline-color); display:flex; justify-content:space-between; align-items:center;">
-                    <div>
-                        <strong>{{ 'Entries'|t('contentiq-importer') }}</strong>
-                        <span class="light" style="margin-left:8px; font-size:13px;" id="contentiq-sync-summary"></span>
-                    </div>
-                    <div style="display:flex; gap:8px;">
-                        <button type="button" class="btn small" id="contentiq-select-all">{{ 'Select All'|t('contentiq-importer') }}</button>
-                        <button type="button" class="btn small" id="contentiq-select-none">{{ 'Select None'|t('contentiq-importer') }}</button>
-                    </div>
+        {# Bottom control block — mirrors the top control block so a long
+           entries list doesn't force a scroll back to the top to sync,
+           INCLUDING its idle/loading/error states (both blocks toggle in
+           lockstep — see the JS below). The idle button submits the SAME
+           #sync-form via the form="" attribute rather than duplicating the
+           form. Distinct "-bottom" ids throughout — no id collisions with
+           the top block's #sync-idle/#sync-loading/#sync-error/etc. #}
+        <div class="pane" style="padding:24px; border-radius:8px;">
+            <div id="sync-idle-bottom">
+                <div style="display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap;">
+                    <span class="light" style="font-size:13px;">{{ 'Review your selections above, then run the sync.'|t('contentiq-importer') }}</span>
+                    <button type="submit" form="sync-form" id="contentiq-sync-btn-bottom" class="btn submit">
+                        {{ 'Sync'|t('contentiq-importer') }}
+                    </button>
                 </div>
-
-                {# Hint #}
-                <div style="padding:10px 16px; background:var(--gray-050); border-bottom:1px solid var(--hairline-color); font-size:13px; color:var(--medium-text-color);">
-                    Select the entries you want to update. Unselected entries will not be changed. <strong>New</strong> entries have never been imported — unchecking one skips it for this sync only; it will reappear as New next time.
-                </div>
-
-                <table class="data fullwidth">
-                    <thead>
-                        <tr>
-                            <th>{{ 'Title'|t('contentiq-importer') }}</th>
-                            <th>{{ 'Slug'|t('contentiq-importer') }}</th>
-                            <th>{{ 'Status'|t('contentiq-importer') }}</th>
-                        </tr>
-                    </thead>
-
-                    {# One tbody per section group, each headed by a section label. #}
-                    {% for group in syncGroups %}
-
-                        {# Build tree lookup maps scoped to this group #}
-                        {% set slugToPage = {} %}
-                        {% set childrenOf = {} %}
-                        {% set rootSlugs = [] %}
-
-                        {% for entry in group.entries %}
-                            {% set slug = entry.slug ?? '' %}
-                            {% set parentSlug = entry.parentSlug ?? null %}
-                            {% set slugToPage = slugToPage|merge({ (slug): entry }) %}
-
-                            {% if parentSlug and parentSlug != '' %}
-                                {% set existing = childrenOf[parentSlug] ?? [] %}
-                                {% set childrenOf = childrenOf|merge({ (parentSlug): existing|merge([slug]) }) %}
-                            {% else %}
-                                {% set rootSlugs = rootSlugs|merge([slug]) %}
-                            {% endif %}
-                        {% endfor %}
-
-                        <tbody>
-                            <tr>
-                                <td colspan="3" style="background:var(--gray-050); border-top:1px solid var(--hairline-color); padding:8px 12px;">
-                                    <strong style="text-transform:uppercase; letter-spacing:0.05em; font-size:11px; color:var(--medium-text-color);">{{ group.name }}</strong>
-                                </td>
-                            </tr>
-                            {{ _self.pageRows(rootSlugs, slugToPage, childrenOf, 0) }}
-                        </tbody>
-
-                    {% endfor %}
-                </table>
             </div>
 
-        {% endif %}
+            {# Loading state — shown while job is running, mirrors #sync-loading.
+               Right-aligned so it appears where the Sync button was, keeping
+               the block's layout stable through the idle → loading swap. #}
+            <div id="sync-loading-bottom" style="display:none;">
+                <div style="display:flex; align-items:center; justify-content:flex-end; gap:12px; text-align:left;">
+                    <div class="spinner" style="display:block;"></div>
+                    <div>
+                        <strong>{{ 'Syncing content and downloading assets'|t('contentiq-importer') }}</strong>
+                        <div class="light" style="font-size:13px; margin-top:2px;">{{ 'This may take a moment for large imports.'|t('contentiq-importer') }}</div>
+                    </div>
+                </div>
+            </div>
+
+            {# Error state — mirrors #sync-error, right-aligned like the
+               loading state above. #}
+            <div id="sync-error-bottom" style="display:none;">
+                <div style="display:flex; align-items:center; justify-content:flex-end; gap:12px; text-align:left;">
+                    <div class="error">
+                        <strong>{{ 'Sync failed'|t('contentiq-importer') }}</strong>
+                        <span id="sync-error-message-bottom"></span>
+                    </div>
+                    <button type="button" class="btn small" onclick="resetSync()">{{ 'Try Again'|t('contentiq-importer') }}</button>
+                </div>
+            </div>
+        </div>
 
     </div>
 
@@ -214,12 +283,21 @@
         var loadingEl = document.getElementById('sync-loading');
         var errorEl = document.getElementById('sync-error');
         var errorMsg = document.getElementById('sync-error-message');
+        // Bottom control block — mirrors the top block's idle/loading/error
+        // states in lockstep (see the submit/showError/resetSync handlers
+        // below). Distinct "-bottom" ids, no collisions with the top block.
+        var idleElBottom = document.getElementById('sync-idle-bottom');
+        var loadingElBottom = document.getElementById('sync-loading-bottom');
+        var errorElBottom = document.getElementById('sync-error-bottom');
+        var errorMsgBottom = document.getElementById('sync-error-message-bottom');
         var runId = null;
         var pollTimer = null;
 
         // ----- Tree checkbox logic -----
         // Checked = will sync, unchecked = locked (won't sync).
         var checkboxes = Array.from(document.querySelectorAll('.contentiq-sync-cb'));
+        var paneSelectAlls = Array.from(document.querySelectorAll('.contentiq-pane-select-all'));
+        var masterSelectAll = document.getElementById('contentiq-select-all-master');
         var lastCheckedIndex = null;
         var summaryEl = document.getElementById('contentiq-sync-summary');
         var btnHintEl = document.getElementById('contentiq-sync-btn-hint');
@@ -263,43 +341,137 @@
             }
         }
 
-        // Shift-click range selection.
+        // ----- Master / per-pane "Select all" checkboxes -----
+        // Reflect selection state: checked when every row in scope is
+        // checked, unchecked when none are, indeterminate when mixed.
+
+        function checkboxesInPane(paneCb) {
+            var pane = paneCb.closest('.pane');
+            return pane ? Array.from(pane.querySelectorAll('.contentiq-sync-cb')) : [];
+        }
+
+        function paneSummaryEl(paneCb) {
+            var pane = paneCb.closest('.pane');
+            return pane ? pane.querySelector('.contentiq-pane-summary') : null;
+        }
+
+        function refreshPaneSelectAll(paneCb) {
+            var rows = checkboxesInPane(paneCb);
+            var paneSummary = paneSummaryEl(paneCb);
+
+            if (!rows.length) {
+                paneCb.checked = false;
+                paneCb.indeterminate = false;
+                if (paneSummary) paneSummary.textContent = '0 of 0 selected';
+                return;
+            }
+
+            var checkedCount = rows.filter(function(cb) { return cb.checked; }).length;
+            paneCb.checked = checkedCount === rows.length;
+            paneCb.indeterminate = checkedCount > 0 && checkedCount < rows.length;
+
+            // Per-pane "n of m selected" — live-updates on every toggle that
+            // routes through refreshAllSelectAlls() (row click, shift-range,
+            // this pane's own select-all, or the global master select-all).
+            if (paneSummary) {
+                paneSummary.textContent = checkedCount + ' of ' + rows.length + ' selected';
+            }
+        }
+
+        function refreshMasterSelectAll() {
+            if (!masterSelectAll || !checkboxes.length) return;
+            var checkedCount = checkboxes.filter(function(cb) { return cb.checked; }).length;
+            masterSelectAll.checked = checkedCount === checkboxes.length;
+            masterSelectAll.indeterminate = checkedCount > 0 && checkedCount < checkboxes.length;
+        }
+
+        function refreshAllSelectAlls() {
+            paneSelectAlls.forEach(refreshPaneSelectAll);
+            refreshMasterSelectAll();
+        }
+
+        // Toggling a page with children toggles all its descendants to the
+        // same state. Rows render in depth-first order, so the descendants
+        // of row N are the rows that follow it (same pane) while their
+        // data-depth stays greater than N's.
+        function cascadeToDescendants(cb, index) {
+            var row = cb.closest('tr');
+            var pane = cb.closest('.pane');
+            if (!row || !pane) return;
+            var depth = parseInt(row.dataset.depth || '0', 10);
+            for (var i = index + 1; i < checkboxes.length; i++) {
+                var nextRow = checkboxes[i].closest('tr');
+                if (!nextRow || checkboxes[i].closest('.pane') !== pane) break;
+                var nextDepth = parseInt(nextRow.dataset.depth || '0', 10);
+                if (nextDepth <= depth) break;
+                checkboxes[i].checked = cb.checked;
+                updateStatusCell(checkboxes[i]);
+            }
+        }
+
+        // Shift-click range selection — handled on the LABEL, not the
+        // checkbox: shift-clicking a label doesn't reliably activate its
+        // control (browsers treat shift-click as a selection gesture), and
+        // a label's forwarded synthetic click drops modifier keys anyway.
+        // The range takes the ANCHOR row's state (the last plain click).
+        // Activation is cancelled and the range applied on a 0-timeout so
+        // the browser's post-cancel checkbox revert can't clobber it.
+        // Indices span the full row list (all panes) so a range can cross
+        // a pane boundary; each pane's select-all recomputes regardless.
         checkboxes.forEach(function(cb, index) {
-            cb.addEventListener('click', function(e) {
-                if (e.shiftKey && lastCheckedIndex !== null) {
-                    var start = Math.min(lastCheckedIndex, index);
-                    var end = Math.max(lastCheckedIndex, index);
-                    var state = cb.checked;
+            var rowLabel = cb.closest('label') || cb;
+
+            rowLabel.addEventListener('click', function(e) {
+                if (!e.shiftKey || lastCheckedIndex === null) return;
+                e.preventDefault();
+                var state = checkboxes[lastCheckedIndex].checked;
+                var start = Math.min(lastCheckedIndex, index);
+                var end = Math.max(lastCheckedIndex, index);
+                setTimeout(function() {
                     for (var i = start; i <= end; i++) {
                         checkboxes[i].checked = state;
                         updateStatusCell(checkboxes[i]);
                     }
-                }
+                    lastCheckedIndex = index;
+                    updateSummary();
+                    refreshAllSelectAlls();
+                }, 0);
+            });
+
+            cb.addEventListener('click', function(e) {
+                if (e.shiftKey) return; // shift ranges are owned by the label handler
                 lastCheckedIndex = index;
                 updateStatusCell(cb);
+                cascadeToDescendants(cb, index);
                 updateSummary();
+                refreshAllSelectAlls();
             });
         });
 
-        // Select All / Select None buttons.
-        var selectAllBtn = document.getElementById('contentiq-select-all');
-        var selectNoneBtn = document.getElementById('contentiq-select-none');
-
-        if (selectAllBtn) {
-            selectAllBtn.addEventListener('click', function() {
-                checkboxes.forEach(function(cb) { cb.checked = true; updateStatusCell(cb); });
+        // Per-pane "Select all" — toggles just this pane's rows.
+        paneSelectAlls.forEach(function(paneCb) {
+            paneCb.addEventListener('click', function() {
+                var rows = checkboxesInPane(paneCb);
+                var state = paneCb.checked;
+                rows.forEach(function(cb) { cb.checked = state; updateStatusCell(cb); });
                 updateSummary();
+                refreshAllSelectAlls();
+            });
+        });
+
+        // Global master "Select all" — toggles every row in every pane.
+        if (masterSelectAll) {
+            masterSelectAll.addEventListener('click', function() {
+                var state = masterSelectAll.checked;
+                checkboxes.forEach(function(cb) { cb.checked = state; updateStatusCell(cb); });
+                updateSummary();
+                refreshAllSelectAlls();
             });
         }
-        if (selectNoneBtn) {
-            selectNoneBtn.addEventListener('click', function() {
-                checkboxes.forEach(function(cb) { cb.checked = false; updateStatusCell(cb); });
-                updateSummary();
-            });
-        }
 
-        // Initial summary.
+        // Initial state.
         updateSummary();
+        refreshAllSelectAlls();
 
         // ----- Sync form submission -----
         form.addEventListener('submit', function(e) {
@@ -307,6 +479,9 @@
             idleEl.style.display = 'none';
             loadingEl.style.display = 'block';
             errorEl.style.display = 'none';
+            if (idleElBottom) idleElBottom.style.display = 'none';
+            if (loadingElBottom) loadingElBottom.style.display = 'block';
+            if (errorElBottom) errorElBottom.style.display = 'none';
 
             var formData = new FormData(form);
 
@@ -390,11 +565,16 @@
             loadingEl.style.display = 'none';
             errorEl.style.display = 'block';
             errorMsg.textContent = msg;
+            if (loadingElBottom) loadingElBottom.style.display = 'none';
+            if (errorElBottom) errorElBottom.style.display = 'block';
+            if (errorMsgBottom) errorMsgBottom.textContent = msg;
         }
 
         window.resetSync = function() {
             errorEl.style.display = 'none';
             idleEl.style.display = 'block';
+            if (errorElBottom) errorElBottom.style.display = 'none';
+            if (idleElBottom) idleElBottom.style.display = 'block';
         };
     })();
     </script>
