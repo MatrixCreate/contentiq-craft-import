@@ -2118,6 +2118,12 @@ class ImportService extends Component
         if (!$dryRun) {
             $ctaIndex = 0;
 
+            // Stable ContentIQ page id + per-page claim set — same contract as
+            // the page path (see importPage() step 10 for why the claim set
+            // exists).
+            $pageId = isset($data['document']['id']) ? (int)$data['document']['id'] : null;
+            $claimedCtaElementIds = [];
+
             foreach ($matrixData as $key => &$entry) {
                 if (empty($entry['_cta'])) {
                     continue;
@@ -2134,6 +2140,8 @@ class ImportService extends Component
                     $ctaBlocks[$ctaIndex],
                     $result,
                     $dryRun,
+                    $pageId,
+                    $claimedCtaElementIds,
                 );
                 $ctaIndex++;
 

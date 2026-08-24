@@ -2,6 +2,10 @@
 
 Capped rolling log — older entries roll off verbatim to `docs/_archive/`. Durable knowledge belongs in `docs/`, not accumulated here.
 
+## Fix collection-child CTA crash — "Too few arguments" (2026-08-24) — 1.21.1
+
+`_buildBlockFieldValues()`'s CTA loop still called `_resolveCtaEntry()` with the pre-1.16.0 3-argument shape, while the signature requires 5 (`$pageId`, `&$claimedElementIds` — the stable `(page_id, block_id)` identity contract). The page path was updated when the signature changed; the collection-child path came in on the other side of merge `dff3195` and never was. Result: any real (non-dry-run) sync of a collection child whose `blocks[]` contains a `call_to_action` block threw `ArgumentCountError` — surfaced on Lucia 2026-08-24, latent since 1.17.0. Fix derives `$pageId` from `$data['document']['id']` (same as `importPage()`) and a per-child claim set inside `_buildBlockFieldValues()`, so collection-child CTAs now also get stable identity in `contentiq_cta_syncs` instead of title-only matching.
+
 ## Read-only export acknowledgement + full-project Sync tree (2026-08-21)
 
 ContentiQ's export GETs (`/api/v1/export`, `/api/v1/pages/{slug}/export`) are becoming side-effect-free — they no longer flip page statuses just by being fetched. The CMS now explicitly acknowledges pages it actually wrote, and the Sync screen shows ContentiQ's full project tree (not just what's already been imported) on load.
