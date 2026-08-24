@@ -87,7 +87,7 @@ class ImportService extends Component
             $config = $this->_getConfig();
 
             // DIFF-AWARE Matrix writes (see MatrixBuilder::build() docblock and
-            // CLAUDE.md's "Saving nested Matrix data") — gated off by default,
+            // docs/block-mapping.md) — gated off by default,
             // see _getConfig()'s 'preserveBlockIdentity' default and comment.
             $preserveBlockIdentity = (bool)($config['preserveBlockIdentity'] ?? false);
 
@@ -1109,7 +1109,7 @@ class ImportService extends Component
             // Matrix save path and cannot be integration-tested outside a live
             // Craft instance (no runtime/test harness here — see tests/). Flip
             // on per-project in config/contentiq.php only after validating the
-            // LIVE-VALIDATION CHECKLIST in CLAUDE.md. See MatrixBuilder::build()
+            // live-validation checklist in docs/block-mapping.md. See MatrixBuilder::build()
             // and importPage()'s block-map load/record steps.
             'preserveBlockIdentity' => false,
         ];

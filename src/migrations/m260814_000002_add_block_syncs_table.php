@@ -15,14 +15,14 @@ use craft\db\Migration;
  * ImportService diff-aware-save the TOP-LEVEL blocks only: when a payload
  * block's stable `id` has a live mapping row, its Matrix key is emitted as
  * the existing nested element id (an int) instead of 'new*', so Craft UPDATES
- * it in place (see CLAUDE.md "Saving nested Matrix data": integer keys are
+ * it in place (see docs/block-mapping.md "Matrix key format": integer keys are
  * treated as existing entry IDs) — preserving the element's identity,
  * revisions, and drafts.
  *
  * Only populated/consulted when config/contentiq.php sets
  * 'preserveBlockIdentity' => true. Defaults to false — off until validated
  * on a live Craft instance (this rewrites the core save path and cannot be
- * integration-tested in a standalone PHP environment). See CLAUDE.md.
+ * integration-tested in a standalone PHP environment). See docs/block-mapping.md.
  *
  * @author Matrix Create <hello@matrixcreate.com>
  * @since 1.16.0

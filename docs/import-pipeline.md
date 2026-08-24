@@ -1,0 +1,144 @@
+# Import pipeline — the life of a sync
+
+This covers what happens to a page once its JSON has arrived in Craft: the four ways a sync can start, how they all funnel through one pipeline method, how that method decides whether it's creating or updating an entry, why it saves the way it does, how collection children (blog posts, case studies, team members) differ from ordinary pages, and the tables that remember state between runs. It assumes you've already read [integration.md](integration.md) for how the JSON gets fetched in the first place.
+
+Verified against code 2026-08-24.
+
+## Four entry points, one pipeline method
+
+Every way of getting ContentiQ content into Craft ends up calling `ImportService::importPage(array $data, bool $dryRun, bool $verbose): array` (`src/services/ImportService.php:79`) once per page:
+
+- **CLI** — `php craft contentiq-importer/import --file=export.json`. `ImportController::_runSinglePage()` (`src/console/controllers/ImportController.php:433`) calls it directly; `_runBatch()` loops it once per page in a batch file.
+- **CP upload** — `CpController::actionRunImport()` (`src/controllers/CpController.php:376`), for a previously-exported JSON file dragged into the CP.
+- **CP Sync queue job** — `SyncJob::execute()` (`src/jobs/SyncJob.php:77`), the "click Sync" path against the live API.
+- **Sidebar widget single-page sync** — `CpController::actionWidgetSync()` (`src/controllers/CpController.php:1080`), one entry at a time from the entry edit screen.
+
+All four also share the pass-2 card-reference resolver, `ImportService::resolveCardReferences()` (`src/services/ImportService.php:615`) — see "cards" in [block-mapping.md](block-mapping.md) for what it resolves; this doc only covers where it sits in the sequence.
+
+Because every entry point reaches the same `importPage()`, a bug fix or behaviour change made in `ImportService` applies uniformly — there's no separate "CLI import logic" to keep in sync with "widget import logic." Each entry point differs only in: how it gets the JSON, whether it enforces the lock check before calling in (CLI, upload, and widget all check locks themselves before calling `importPage()`; `SyncJob` does too, in its pass-1 loop), and what it does with the result afterward (report rendering, audit-trail row, ack call).
+
+## SyncJob's passes
+
+`SyncJob::execute()` is the most involved caller — it's the only one that also has to reconcile a whole batch's hierarchy and cross-page references in one run. In order:
+
+1. **Apply lock/unlock state and globals consent — at job execution, not at the controller request.** `CpController::actionRunSync()` captures the user's checkbox selections but does not write them; it passes them into the queued `SyncJob` and lets `_applyLockState()` / `_setGlobalsLock()` (`src/jobs/SyncJob.php:606`, `:643`) run them when the job actually executes (`src/jobs/SyncJob.php:100-101`). This matters because a queue worker can die or never pick up the job — writing the unlock at request time would leave an unlock/consent "leaked" against a sync that never ran. Deferring it means a run that never executes leaves every lock and the globals-consent row exactly as it was.
+2. **Fetch** — `ContentIQApiService::fetchExport()`. A failed fetch or a non-array decoded body fails the whole run immediately (`_failRun()`) rather than attempting anything (`src/jobs/SyncJob.php:108-123`).
+3. **Pass 1: import, building the slug map.** Loops every page, resolves lock state via `findExistingEntry()` (see below), skips locked entries and user-deselected "New" rows, and otherwise calls `importPage()`. Each successful page's slug and entry id are recorded into `$slugToEntryId` as it goes, and structure position (parent/root) is reapplied on every run regardless of whether the entry was just created or already existed (`src/jobs/SyncJob.php:328-369`) — collection children are explicitly excluded from this positioning step (see below).
+4. **Pass 2: deferred card-reference resolution.** Runs once *after* pass 1 finishes, so the slug map is complete — a Cards block referencing "pages" or "children" mode can't be resolved until every page in the batch has an entry id, including pages later in the export than the one holding the block. `resolveCardReferences()` (`src/services/ImportService.php:615`) locates each deferred block by its recorded `blockIndex` and saves it directly (the owner entry itself is never re-saved for this).
+5. **Ack** — see [integration.md](integration.md#read-only-export--explicit-ack-contract). Built from pass-1+2 results, filtered to genuinely-written pages only.
+6. **Auto-lock** — every successfully-synced entry (not skipped-locked) gets `contentiq_entry_syncs.locked` set back to `true` after the run, plus `synced_at` and the aggregated block notes. This is what makes a sync self-limiting: once imported, a page won't be touched again until a human explicitly unlocks it for the next run.
+7. **Conditional globals import** — only runs when `isset($data['globals'])` **and** the globals-consent row is unlocked for this run; the drift-check part of it runs regardless of lock state (read-only, advisory). See [globals.md](globals.md) for the globals model itself — out of scope here beyond noting it shares the same run and the same overall status computation (a globals warning flips the run to `warnings` same as a page warning does).
+
+Steps 3 through 7 all happen inside one `try`/`catch (\Throwable)` wrapping the whole job body (`src/jobs/SyncJob.php:91`) — any uncaught exception anywhere in the run still reaches `_failRun()` before rethrowing, so the run record always ends in a terminal status (`errors`, never stuck on `pending`) even if something inside pass 2 or the globals import throws unexpectedly.
+
+## Find-or-create identity
+
+Every write path needs to answer "does this page already have a Craft entry?" — that's `ImportService::findExistingEntry(array $pageData): ?Entry` (`src/services/ImportService.php:479`), the single resolver used by `importPage()` itself, `SyncJob`'s lock check, the CLI's lock check, and the CP upload path's lock check. All four agree, by construction, on which entry a page maps to.
+
+Resolution order:
+
+0. **`document.id` → `contentiq_entry_syncs.contentiq_page_id`.** Checked first. If a mapping row exists and its `element_id` still resolves to a live (possibly trashed-but-not-hard-deleted — `status(null)`) entry, that entry wins outright, no further lookup. This is the important one: it means a page renamed on either side (ContentiQ or Craft) still resolves to the same entry instead of creating a duplicate — the column was added specifically to fix that (`src/migrations/m260813_000000_add_page_id_to_entry_syncs.php`). A stale mapping (element hard-deleted) falls through to the steps below rather than failing.
+1. **`document.content_type` set** → route via `getContentTypeRoute()`, then section + slug lookup in the routed section.
+2. **`document.is_homepage`** → section-only lookup of the homepage Single (no slug involved — Singles have exactly one entry).
+3. **Otherwise** → the configured pages section + slug.
+
+An empty/whitespace slug never drives steps 1 or 3 (Craft treats a falsy `->slug()` filter as "no filter," which would match the section's first entry rather than "no match") — those steps return `null` instead. Step 0 and step 2 don't depend on slug, so they're unaffected.
+
+`findExistingEntry()` applies no slug translation — `slugMap` (see [integration.md](integration.md)) only affects the sidebar widget's *outbound* API call, never this Craft-side lookup.
+
+## Homepage specifics
+
+A page with `document.is_homepage: true` resolves via step 2 above (the configured `homepageSection`/`homepageEntryType`, default `homepage`/`homepage`) instead of the ordinary pages Structure, and gets different treatment in a few places once resolved:
+
+- **Title is never overwritten on an existing homepage entry** — `importPage()` guards the `$existing->title = $title` assignment with `if (!$isHomepage)` (`src/services/ImportService.php:361`). A brand-new homepage entry (the Single's very first save) does get the exported title, same as any other new entry.
+- **No structure positioning.** Both `ImportController::_runBatch()` and `SyncJob` explicitly skip the parent/root append step for homepage pages (`!$isHomepage` guards) — Singles have no parent to set.
+- **Same `hero` ContentBlock field as ordinary pages** — `_buildHeroField()` doesn't distinguish homepage from pages architecturally; see [block-mapping.md](block-mapping.md#hero).
+
+## Hierarchy — parent/child positioning for Structure pages
+
+After a page (non-homepage, non-collection-child) is saved, `ImportController::_runBatch()` and `SyncJob` both reposition it in the section's Structure using `document.parent_slug`:
+
+- No `parent_slug` → `Structures::appendToRoot()`.
+- `parent_slug` present → resolved against the in-run `$slugToEntryId` map first (pages already processed earlier in this same batch), and if not found there, a live Craft query (`Entry::find()->section(...)->slug($parentSlug)`) — so a re-import correctly re-parents under a page that already exists in Craft even if the batch itself isn't depth-first ordered. Only when **neither** finds the parent does the entry fall back to `appendToRoot()`, with a warning naming the missing slug. Nothing later retries this automatically — the next sync that successfully resolves the parent will reposition it.
+
+Depth-first ordering in the export (parents before children) is what makes the in-run map hit on the first pass rather than falling through to the query — not a hard requirement for correctness, just for avoiding an extra DB lookup per child on a fresh import.
+
+## Why the owner entry is resolved before the Matrix is built
+
+In `importPage()`, `findExistingEntry()` runs (step 6, `src/services/ImportService.php:171`) *before* `MatrixBuilder::build()` is called (step 7, `:231`) — that ordering was deliberately moved up from a later point in the pipeline specifically to support `preserveBlockIdentity` (off by default; see [integration.md](integration.md#config-surface) and [block-mapping.md](block-mapping.md#diff-aware-matrix-writes-preserveblockidentity) for the full mechanic and its live-validation checklist). When it's on and the owner entry already exists, its current top-level block map (`contentiq_block_syncs`: payload block id → nested Matrix element id) is loaded (`_loadBlockSyncMap()`) and handed into `MatrixBuilder::build()` so unchanged top-level blocks can be emitted with their real element id instead of a fresh `'new*'` key — letting Craft update them in place rather than delete-and-recreate, which is what preserves editor provisional drafts attached to those blocks across syncs. After a successful save, `_recordBlockSyncMap()` writes the map for the *next* sync to consume (`src/services/ImportService.php:381-383` for the existing-entry branch, `:423-425` for the newly-created-entry branch) — bookkeeping only, wrapped in its own try/catch so a failure there can never fail the page save itself. When the flag is off (the default), `$existingBlockMap` is always empty and every top-level block gets a `'new*'` key exactly as it did before this feature existed — byte-identical behaviour.
+
+## The no-drafts rule
+
+The importer saves directly to the canonical entry — `Craft::$app->getElements()->saveElement($entry, false)` — never through `getDrafts()->createDraft()`. This was a deliberate correction: an earlier version used drafts, which wrote images into the database successfully but left them invisible in the CP, because the CP entry-edit screen renders the canonical entry's content, not a draft's. That cost real debugging time before the pattern was fixed, and it's now settled — every write path in `ImportService` uses this same call, for both existing-entry updates and new-entry creates.
+
+## `saveElement($entry, false)` and the manual URI refresh it necessitates
+
+The `false` argument skips Craft's element validation. This is necessary because nested nothing-changed Matrix blocks can trip `MatrixBlockAnchorField` uniqueness validation that has nothing to do with whether the actual content is valid — see [block-mapping.md](block-mapping.md#setting-field-values--data-shapes-and-exploring-a-target-project) for the underlying Matrix-write data shapes and key rules this interacts with.
+
+The cost of skipping validation: **URI generation is a validation-time concern in Craft** (`ElementUriValidator`), so a validation-skipped save leaves `uri = null` — the entry has no front-end URL and no "view" globe icon in the CP, even though the save otherwise succeeded.
+
+- **Pages** (Structure section) get this fixed for free, because `SyncJob`/`ImportController`/`actionRunImport()` all call `Structures::append()` or `appendToRoot()` after the save to (re)position the entry in its structure, and that call's `afterMoveInStructure()` hook regenerates the URI as a side effect.
+- **Collection children** (channel sections — blog posts, case studies, team members) have no structure step at all, so nothing does this for them implicitly. `_importCollectionChild()` (`src/services/ImportService.php:839`) calls `_refreshUri()` (`src/services/ImportService.php:1038`) explicitly after every save, which invokes `Craft::$app->getElements()->updateElementSlugAndUri($entry, true, false)` directly — regenerating slug + URI without re-running full element validation. This is a no-op (leaves `uri = null`) if the section has no URL format at all.
+
+## Field-layout filtering before `setFieldValues()`
+
+Every field-values array built by the pipeline (Matrix data, hero fields, SEO fields, card fields, collection-child content fields) is passed through `_filterToValidFields()` (`src/services/ImportService.php:1228`) before being handed to `setFieldValues()`. This intersects the built values against the target entry type's actual field layout and drops anything not present. Skipping this throws `yii\base\UnknownPropertyException` ("Setting unknown property: CustomFieldBehavior::handleName") in Craft 5 the moment an unrecognised handle is set — so this filtering isn't optional defensive code, it's required for the importer to tolerate a Craft Starter fork whose field layout doesn't (yet, or ever) match every handle the mapping config expects. Filtered-out fields aren't silently lost from the report either — several of the guard checks upstream (e.g. the text-block first-column probe, the hero-shape probe) look at the field layout *before* building values specifically so they can route around a missing field rather than relying on this filter to catch it after the fact.
+
+## Content-type routing for collection children
+
+A page whose `document.content_type` is set (blog posts, case studies, team members, blog categories) is a **collection child**, not an ordinary Structure page, and is routed through a separate path, `_importCollectionChild()` (`src/services/ImportService.php:839`), from the very top of `importPage()` (`src/services/ImportService.php:124-127`) — before section/entry-type resolution, before the hero/CTA extraction, before anything the ordinary page path does.
+
+**The wire contract is either `content` or `blocks[]`, never both, but both shapes exist.** Historically a collection child carried a raw `content` ProseMirror document (not a `blocks` array) that got serialised whole to HTML and written into one configured `contentField`. ContentiQ is transitioning collection children onto the same `blocks[]` shape ordinary pages use, and the importer already handles both: when `blocks[]` is present and non-empty, the same Matrix/hero/CTA machinery the page path uses runs via `_buildBlockFieldValues()`, routed to a Matrix field (`blocksField` from the content-type mapping if set, otherwise the ordinary `matrixField`). When blocks own the page, `contentField` and — if configured — `headingField` are explicitly cleared to `''` rather than left stale from a prior content-only sync (`_buildCollectionChildContentFields()`, `src/services/ImportService.php:2235`). The first time an unlocked sync is about to clear a previously non-empty `contentField`/`headingField`, or replace a previously non-empty Matrix, a warning is added to the result — this fires identically in the CP dry-run preview and the real sync, so an editor sees it coming before it happens, though nothing blocks the write itself (the lock is the only thing that can prevent it).
+
+**`headingField` H1 lifting** (content-only path): when a content-type mapping configures a `headingField` and the child is on the `content`-document path (not `blocks[]`), the importer extracts the first level-1 heading out of the document via `NodesRenderer::extractHeading()` and writes its plain text into `headingField`, removing it from the body so the H1 doesn't render twice — once as the field, once inline in the content. `blog_categories` and `team` in the shipped defaults have no `headingField` because their templates don't render one from a separate field.
+
+**Routing is a three-layer merge**, `_getContentTypesMap()` (`src/services/ImportService.php:769`): `src/config/defaults.php`'s `content_types` array ← the CP Mappings screen's saved settings (`Settings::$collectionMappings`, project config) ← `config/contentiq.php`'s own `content_types` key. Per-slug `array_replace` at each layer — the config file always wins for a given slug and is meant as the dev escape hatch; the CP screen (`ContentiQ → Mappings`) is the editor-facing way to map a new collection without a deploy. Settings rows with no `section` are dropped before merging, so an empty CP mapping table doesn't disturb anything.
+
+**An unmapped `content_type`** (no route found at any layer) is a non-fatal skip: `_importCollectionChild()` sets `skipped = true`, `success = true`, and a warning naming the type and pointing at the Mappings screen (`src/services/ImportService.php:848-856`) — the whole run isn't failed by one unrecognised collection.
+
+**No Craft parent.** Collection children never get structure positioning — `SyncJob`'s hierarchy step explicitly excludes them (`$contentType === null && ...` guards the whole block, `src/jobs/SyncJob.php:337`) and `document.parent_slug` is simply never read for them. This is intentional, not a gap: a collection child's real "parent" is its collection listing page, which is excluded from export server-side and has nothing to attach a Craft Structure parent to.
+
+## Per-page error isolation
+
+`importPage()` wraps its entire body in one `try { ... } catch (Throwable $e)` (`src/services/ImportService.php:83`, `:429`) that converts any exception — a save failure, a missing section, a malformed block, an unexpected null somewhere deep in a handler — into the same fatal result shape (`success: false`, `error: ...`) rather than letting it propagate. That's what makes a batch sync resilient to one bad page: `SyncJob`'s pass-1 loop calls `importPage()` per page and simply records whatever comes back, success or failure, then moves to the next page. One page's exception never aborts the run — only a `\Throwable` that gets past this catch (or is thrown from code *around* the `importPage()` call, like the structure-positioning step) can do that, and `SyncJob`'s own outer catch handles that case at the run level.
+
+## Result shape and dry-run
+
+Every call to `importPage()` returns the same associative array shape, starting from `_emptyResult()` (`src/services/ImportService.php:1052`) and either merged with real data on success or marked fatal by `_fatal()` (`src/services/ImportService.php:1078`, which also logs the message via `Craft::error()` before returning). Read `_emptyResult()` directly for the exhaustive key list rather than copying it here; the keys worth knowing about because callers actively branch on them are `success`, `entryId`, `entryFound` (create vs update), `warnings` (non-fatal, accumulated throughout the run), `error` (set only on a fatal result), `skipped` (a non-fatal skip — e.g. an unmapped `content_type`), and `cardRefs` (pass-2 deferred work, consumed by the caller, not part of the "public" result a report screen would render).
+
+`dryRun` is honoured inside `importPage()` itself — it runs every resolution step (config, matrix build, SEO, hero, card fields) and returns before step 10 (CTA entry creation) and the actual save (`src/services/ImportService.php:263-267`), so a dry run still reports accurate block/image/warning counts without writing anything. Not every entry point exposes it, though:
+
+- **CLI** — `--dry-run` / `-n` flag, passed straight through.
+- **CP upload** — `actionPreview()` (`src/controllers/CpController.php:281`) always dry-runs every page before showing the preview screen, regardless of any flag; the real write only happens after the user confirms and `actionRunImport()` runs for real.
+- **CP Sync (`SyncJob`)** — never dry-runs; a queued sync is already a confirmed action. (The Sync screen's *tree preview*, shown before the user clicks Sync, is a separate, lighter-weight read — see [integration.md](integration.md) — not a dry run of `importPage()` itself.)
+- **Sidebar widget** — never dry-runs; clicking Sync in the sidebar is itself the confirmation.
+
+## Tracking tables
+
+All seven tables below are created together by `src/migrations/Install.php` on a fresh plugin install; the individual migration files listed exist to bring an already-installed plugin forward incrementally. Read a table's own migration file for its exact columns — this is a one-line orientation per table, not a schema copy.
+
+- **`contentiq_import_runs`** — one row per sync/upload/CLI/widget run; the audit trail and source for the CP History and result screens. `src/migrations/Install.php`.
+- **`contentiq_entry_syncs`** — one row per synced Craft entry: `locked` (skip on batch sync), `synced_at`, `notes` (aggregated block notes), `contentiq_page_id` (the stable-id mapping — see "Find-or-create identity" above). `src/migrations/m250418_000000_add_entry_syncs_table.php`, `m250419_000000_add_notes_to_entry_syncs.php`, `m250419_000001_add_locked_to_entry_syncs.php`, `m260813_000000_add_page_id_to_entry_syncs.php`.
+- **`contentiq_office_syncs`** — ContentiQ office id → Craft office entry element id, so globals re-syncs update the same entry rather than duplicating it. `src/migrations/m260712_000000_add_globals_sync_tables.php`. See [globals.md](globals.md).
+- **`contentiq_globals_sync`** — single-row consent/lock state for globals imports (missing row ⇒ locked). Same migration file as office syncs.
+- **`contentiq_asset_syncs`** — ContentiQ image key → Craft asset element id, so two images from different pages that happen to share a bare filename don't collide. `src/migrations/m260814_000000_add_asset_syncs_table.php`. See [assets.md](assets.md).
+- **`contentiq_cta_syncs`** — `(page_id, block_id)` → the `callToActionEntry` element it produced, so two CTA blocks with the same or blank title on one page stay distinct instead of collapsing onto one entry. `src/migrations/m260814_000001_add_cta_syncs_table.php`.
+- **`contentiq_block_syncs`** — `(owner_element_id, block_id)` → the top-level nested Matrix element id it produced. Only populated/consulted when `preserveBlockIdentity` is on (off by default — see [integration.md](integration.md)'s config section and [block-mapping.md](block-mapping.md#diff-aware-matrix-writes-preserveblockidentity)). `src/migrations/m260814_000002_add_block_syncs_table.php`.
+
+## Lock semantics
+
+Lock state lives entirely in `contentiq_entry_syncs.locked`, per Craft entry (`element_id`). A **missing row** is treated as locked everywhere it's checked — the safe default, so a hand-built entry that happens to collide with a synced slug/section (no sync row yet) is never silently overwritten just because nothing has locked it explicitly.
+
+- **Batch sync (`SyncJob`)** — locked entries are skipped in pass 1, logged as "Skipped — entry is locked" in the report, and left completely untouched (their existing `locked`/`synced_at`/`notes` row is not rewritten, so the audit trail correctly shows it was skipped rather than looking like a fresh sync happened). Every successfully-synced entry is auto-relocked at the end of the run (see "SyncJob's passes" step 6 above) — the Sync screen's per-entry checkboxes are how a human unlocks specific entries for the *next* run, not a persistent state.
+- **Per-entry, via the sidebar widget** — a CSS-only lightswitch (deliberately not Craft's native lightswitch component, which needs DOM-ready init that doesn't fire reliably for HTML injected into the sidebar after page load) toggles the same `locked` column immediately via `contentiq-importer/cp/toggle-lock`, and disables the widget's own Sync button client-side when on. `CpController::actionWidgetSync()` re-checks the lock server-side regardless (`src/controllers/CpController.php:1101-1113`) — the disabled button is advisory only, not the actual enforcement.
+- **CLI** — enforces the same lock check unless `--force` is passed (`ImportController::_runSinglePage()`, `src/console/controllers/ImportController.php:439`).
+- **CP upload** — enforces the same lock check with no override flag at all (`CpController::actionRunImport()`, `src/controllers/CpController.php:437`) — a locked entry cannot be overwritten by re-uploading a file, full stop.
+
+## Related docs
+
+- [README.md](README.md)
+- [integration.md](integration.md)
+- [block-mapping.md](block-mapping.md)
+- [globals.md](globals.md)
+- [assets.md](assets.md)
+- [cp-and-widget.md](cp-and-widget.md)

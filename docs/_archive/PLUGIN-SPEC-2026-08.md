@@ -1,3 +1,5 @@
+> Superseded by `docs/`, absorbed 2026-08-24.
+
 # ContentIQ Craft Import — Technical Reference
 
 Full architecture and developer reference for the `matrixcreate/contentiq-craft-import` Craft CMS 5 plugin. Covers the import pipeline, ContentiQ JSON format, API endpoints, block mapping system, and database schema.

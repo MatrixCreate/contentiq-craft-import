@@ -94,7 +94,7 @@ class MatrixBuilder extends Component
      * entry for a TOP-LEVEL, non-grouped block's stable `id`, that block's Matrix key
      * is emitted as the existing nested element id (an int) instead of 'new{N}', so
      * Craft UPDATES the existing nested entry in place rather than deleting and
-     * recreating it (see CLAUDE.md "Saving nested Matrix data": integer keys are
+     * recreating it (see docs/block-mapping.md "Matrix key format": integer keys are
      * treated as existing entry IDs). Grouped blocks and inner/nested blocks always
      * use 'new{N}' — see _resolveTopLevelKey() and the grouped branch below. When
      * $existingBlockMap is empty (the default), every key is 'new{N}' exactly as it
@@ -203,7 +203,7 @@ class MatrixBuilder extends Component
                 // whole, and the grouping shape (which blocks merged together)
                 // can change between syncs — an ambiguous case where a wrong-id
                 // reuse would corrupt an unrelated block. A recreate here is safe
-                // (today's behaviour); see CLAUDE.md's "Text & Media grouping".
+                // (today's behaviour); see docs/block-mapping.md "Text & Media grouping".
                 $key              = 'new' . $counter;
                 $consumedBlockIds = array_values(array_filter(array_map(
                     static fn(array $b): ?string => isset($b['id']) && $b['id'] !== '' ? (string)$b['id'] : null,
@@ -315,7 +315,7 @@ class MatrixBuilder extends Component
      * produce (e.g. the block's type changed at the same position between
      * syncs). MatrixBuilder has no cheap way to check a live element's type
      * without an extra Craft query per top-level block — flagged as a
-     * live-validation risk; see CLAUDE.md's preserveBlockIdentity section.
+     * live-validation risk; see docs/block-mapping.md "DIFF-AWARE Matrix writes".
      *
      * @param string|null               $blockId          The block's stable payload id, or null if absent.
      * @param array<string, int>        $existingBlockMap block_id => nested element id, for this owner.
