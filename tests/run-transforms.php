@@ -248,9 +248,9 @@ $built = $matrixBuilder->build($fixture['blocks'], false, $fixture['document']['
 check('matrixData has one outer entry per block', 2, count($built['matrixData']));
 check('new1 (usp) outer type', 'contentiqUsp', $built['matrixData']['new1']['type'] ?? null);
 check(
-    'new1 (usp) uspText renders heading + list',
+    'new1 (usp) richText renders heading + list',
     '<h2>Why it matters</h2><ul><li>Reduces bycatch</li><li>Protects reef habitats</li><li>Supports local fisheries</li></ul>',
-    $built['matrixData']['new1']['fields']['uspText'] ?? null,
+    $built['matrixData']['new1']['fields']['richText'] ?? null,
 );
 check('new2 (text) outer type', 'text', $built['matrixData']['new2']['type'] ?? null);
 check('new2 (text) columnLayout passes through', 'singleColumn', $built['matrixData']['new2']['fields']['columnLayout'] ?? null);

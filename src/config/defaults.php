@@ -181,7 +181,7 @@ return [
             // '_block' passes the entire block fields to the handler.
             // USP API shape: {heading: {level, text}, items: [string, ...]}
             // Falls back to rendering a 'nodes' array if present instead.
-            '_block' => ['uspText', 'uspContent'],
+            '_block' => ['richText', 'uspContent'],
         ],
         'innerMatrix' => null,
     ],
@@ -189,7 +189,7 @@ return [
     'global' => [
         'outerType'   => 'contentiqGlobal',
         'outerFields' => [
-            'nodes' => ['globalContent', 'nodes'],  // rendered as HTML into the globalContent CKEditor field
+            'nodes' => ['richText', 'nodes'],  // rendered as HTML into the shared richText CKEditor field
         ],
         'innerMatrix' => null,
     ],
@@ -197,8 +197,8 @@ return [
     'custom' => [
         'outerType'   => 'contentiqCustom',
         'outerFields' => [
-            'nodes'  => ['contentiqContent', 'nodes'],   // all content nodes → CKEditor HTML
-            'images' => ['contentiqImages',  'images'],  // optional multiple assets (up to 10)
+            'nodes'  => ['richText',        'nodes'],   // all content nodes → CKEditor HTML
+            'images' => ['contentiqImages', 'images'],  // optional multiple assets (up to 10)
         ],
         'innerMatrix' => null,
     ],
