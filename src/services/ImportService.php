@@ -111,8 +111,9 @@ class ImportService extends Component
             $result['slug']  = $slug;
             $result['title'] = $title;
 
-            // Stable ContentIQ page id — threaded into _resolveCtaEntry() below so
-            // CTA identity can key on (page_id, block_id) instead of title alone.
+            // Stable ContentIQ page id — threaded into _resolveCtaBlocks() below so
+            // 'page'-source CTA identity can key on (page_id, block_id) instead of
+            // title alone (see _resolveCtaEntry()).
             $pageId = isset($data['document']['id']) ? (int)$data['document']['id'] : null;
 
             // -----------------------------------------------------------------------
@@ -267,46 +268,32 @@ class ImportService extends Component
             }
 
             // -----------------------------------------------------------------------
-            // 10. Resolve CTA blocks → create callToActionEntry entries and
-            //     patch their IDs into the matrixData placeholders.
+            // 10. Resolve CTA blocks. Each one routes by its ContentIQ
+            //     fields.source label (see _ctaSource()):
+            //       'page'   → unchanged: create/update a per-page
+            //                  callToActionEntry, patch its id into the
+            //                  matrixData placeholder.
+            //       'global' → the placeholder is dropped entirely (no inline
+            //                  block); the shared entry itself is written by
+            //                  _resolveGlobalCtaEntry(), gated on globals
+            //                  consent — see docs/globals.md.
+            //     footerCallToAction.showGlobalCallToAction is queued below as
+            //     a tri-state decision (see _resolveCtaBlocks()'s return
+            //     value): ON when ≥1 block routed 'global'; OFF when only
+            //     'page'-routed blocks were found; untouched when there were
+            //     no CTA blocks at all.
             // -----------------------------------------------------------------------
-            $matrixData = $built['matrixData'];
-            $ctaIndex   = 0;
+            $matrixData          = $built['matrixData'];
+            $blockKeyConsumption = $built['blockKeyConsumption'] ?? [];
 
-            // Per-page claim set: once a CTA block resolves to an element this run
-            // (created, adopted, or mapped), later blocks' title-fallback lookups
-            // skip it — otherwise two blocks sharing a title (e.g. both blank,
-            // "Call to Action") would both match the entry the first block just
-            // created and collapse onto it. Only consulted when a block carries a
-            // stable (page_id, block_id) identity — see _resolveCtaEntry().
-            $claimedCtaElementIds = [];
-
-            foreach ($matrixData as $key => &$entry) {
-                if (empty($entry['_cta'])) {
-                    continue;
-                }
-
-                unset($entry['_cta']);
-
-                if (!isset($ctaBlocks[$ctaIndex])) {
-                    $ctaIndex++;
-                    continue;
-                }
-
-                $ctaEntryId = $this->_resolveCtaEntry(
-                    $ctaBlocks[$ctaIndex],
-                    $result,
-                    $dryRun,
-                    $pageId,
-                    $claimedCtaElementIds,
-                );
-                $ctaIndex++;
-
-                if ($ctaEntryId !== null) {
-                    $entry['fields']['chooseCallToAction'] = [$ctaEntryId];
-                }
-            }
-            unset($entry);
+            $footerGlobalCtaIntent = $this->_resolveCtaBlocks(
+                $matrixData,
+                $blockKeyConsumption,
+                $ctaBlocks,
+                $result,
+                $dryRun,
+                $pageId,
+            );
 
             // -----------------------------------------------------------------------
             // 11. Build the complete field values array.
@@ -318,6 +305,9 @@ class ImportService extends Component
                 $heroData ?? [],
                 $cardValues,
                 $seoValues,
+                $footerGlobalCtaIntent !== null
+                    ? ($this->_buildFooterGlobalCtaField($entryType->getFieldLayout(), $config, $result, $footerGlobalCtaIntent) ?? [])
+                    : [],
             );
 
             // -----------------------------------------------------------------------
@@ -379,7 +369,7 @@ class ImportService extends Component
                     // accurate. Bookkeeping only — a failure here can't fail this
                     // page (see _recordBlockSyncMap()).
                     if ($preserveBlockIdentity && !$matrixHandleOmitted) {
-                        $this->_recordBlockSyncMap($existing, $built['blockKeyConsumption'] ?? [], $matrixHandle);
+                        $this->_recordBlockSyncMap($existing, $blockKeyConsumption, $matrixHandle);
                     }
 
                     $result['entryId'] = $existing->id;
@@ -421,7 +411,7 @@ class ImportService extends Component
             // to preserve, but recording one now lets the SECOND sync reuse these
             // blocks' identities. Bookkeeping only — see _recordBlockSyncMap().
             if ($preserveBlockIdentity) {
-                $this->_recordBlockSyncMap($entry, $built['blockKeyConsumption'] ?? [], $matrixHandle);
+                $this->_recordBlockSyncMap($entry, $blockKeyConsumption, $matrixHandle);
             }
 
             $result['entryId'] = $entry->id;
@@ -1060,6 +1050,7 @@ class ImportService extends Component
             'blocks'        => [],
             'images'        => [],
             'blockNotes'    => '',
+            'routingNotes'  => '',
             'warnings'      => [],
             'error'         => null,
             'skipped'       => false,
@@ -1112,6 +1103,14 @@ class ImportService extends Component
             // live-validation checklist in docs/block-mapping.md. See MatrixBuilder::build()
             // and importPage()'s block-map load/record steps.
             'preserveBlockIdentity' => false,
+            // CTA source routing (fields.source === 'global') — see
+            // _resolveCtaBlocks()/_resolveGlobalCtaEntry()/_buildFooterGlobalCtaField()
+            // and docs/globals.md. These are the Craft Starter's own handles;
+            // override per-project in config/contentiq.php if a fork renamed them.
+            'footerCtaField'           => 'footerCallToAction',      // ContentBlock field on pages/homepage
+            'footerCtaShowGlobalField' => 'showGlobalCallToAction',  // Lightswitch nested inside it
+            'globalContentSet'         => 'globalContent',           // Global set holding the relation
+            'globalChooseCtaField'     => 'globalChooseCallToAction', // Entries field on that global set
         ];
 
         $projectConfig = Craft::$app->getConfig()->getConfigFromFile('contentiq');
@@ -1703,7 +1702,10 @@ class ImportService extends Component
     }
 
     /**
-     * Creates (or updates) a callToActionEntry from a ContentIQ CTA block.
+     * Creates (or updates) a per-page callToActionEntry from a ContentIQ CTA
+     * block. Only invoked for `fields.source === 'page'` blocks — the router,
+     * _resolveCtaBlocks(), sends `'global'`-source blocks to
+     * _resolveGlobalCtaEntry() instead (see docs/block-mapping.md#cta-entry-creation).
      *
      * Extracts title from the first heading node, renders richText from non-button
      * nodes, imports image if present, and builds actionButtons Matrix entries from
@@ -1743,17 +1745,7 @@ class ImportService extends Component
      */
     private function _resolveCtaEntry(array $ctaBlock, array &$result, bool $dryRun, ?int $pageId, array &$claimedElementIds): ?int
     {
-        $fields = $ctaBlock['fields'] ?? [];
-        $nodes  = is_array($fields['nodes'] ?? null) ? $fields['nodes'] : [];
-
-        // Extract title from first heading node.
-        $title = 'Call to Action';
-        foreach ($nodes as $node) {
-            if (($node['type'] ?? '') === 'heading' && !empty($node['text'])) {
-                $title = (string)$node['text'];
-                break;
-            }
-        }
+        $title = $this->_extractCtaTitle($ctaBlock);
 
         // The block's own stable id (e.g. "Call to Action-0") — unique within a
         // page, survives edits/reorders. Absent/empty on older exports.
@@ -1799,70 +1791,10 @@ class ImportService extends Component
             return null;
         }
 
-        // Separate ctaButton nodes (→ actionButtons Matrix) from content nodes (→ richText).
-        // ContentIQ sends buttons as ctaButton nodes in fields.nodes (same pattern as faq/price_list).
-        $contentNodes      = [];
-        $actionButtonsData = [];
-        $btnCounter        = 0;
-
-        foreach ($nodes as $node) {
-            if (($node['type'] ?? '') === 'ctaButton') {
-                $label = (string)($node['label'] ?? '');
-                $url   = (string)($node['url'] ?? '');
-
-                if ($label !== '' || $url !== '') {
-                    $actionButtonsData['new' . (++$btnCounter)] = [
-                        'type'   => 'actionButton',
-                        'fields' => [
-                            'actionButton' => [[
-                                'type'      => 'verbb\\hyper\\links\\Url',
-                                'handle'    => 'default-verbb-hyper-links-url',
-                                'linkValue' => LinkHelper::hyperInertUrl($url),
-                                'linkText'  => $label,
-                                'linkClass' => 'btn btn-primary',
-                            ]],
-                        ],
-                    ];
-                }
-            } else {
-                $contentNodes[] = $node;
-            }
-        }
-
-        // Build field values.
-        $ctaFieldValues = [];
-
-        // richText — render content nodes only (ctaButton nodes excluded above).
-        $ctaFieldValues['richText'] = ContentIQImporter::$plugin->nodes->render($contentNodes);
-
-        // image — import if present.
-        $imageData = $fields['image'] ?? null;
-        if (is_array($imageData) && !empty($imageData['url'])) {
-            $imageResult = ContentIQImporter::$plugin->images->importFromField($imageData, $dryRun);
-            if ($imageResult !== null && $imageResult['id'] !== null) {
-                $ctaFieldValues['image'] = [$imageResult['id']];
-                $result['images'][] = ['filename' => $imageResult['filename'], 'reused' => $imageResult['reused']];
-            }
-        }
-
-        // desktopBackgroundImage — import background_image if present.
-        $bgImageData = $fields['background_image'] ?? null;
-        if (is_array($bgImageData) && !empty($bgImageData['url'])) {
-            $bgResult = ContentIQImporter::$plugin->images->importFromField($bgImageData, $dryRun);
-            if ($bgResult !== null && $bgResult['id'] !== null) {
-                $ctaFieldValues['desktopBackgroundImage'] = [$bgResult['id']];
-                $result['images'][] = ['filename' => $bgResult['filename'], 'reused' => $bgResult['reused']];
-            }
-        }
-
-        // actionButtons — prefer ctaButton nodes; fall back to legacy flat fields.buttons array.
-        if (empty($actionButtonsData)) {
-            $actionButtonsData = $this->_buildActionButtons($fields['buttons'] ?? []);
-        }
-
-        if (!empty($actionButtonsData)) {
-            $ctaFieldValues['actionButtons'] = $actionButtonsData;
-        }
+        // Field values (richText/image/desktopBackgroundImage/actionButtons) —
+        // shared with _resolveGlobalCtaEntry() so both CTA destinations map
+        // ContentIQ's fields identically. See _buildCtaContentValues().
+        $ctaFieldValues = $this->_buildCtaContentValues($ctaBlock, $dryRun, $result);
 
         // Idempotency — update an existing entry rather than creating a duplicate.
         //
@@ -1938,6 +1870,514 @@ class ImportService extends Component
         }
 
         return $entry->id;
+    }
+
+    /**
+     * Extracts a CTA entry's title from its first heading node.
+     *
+     * Pure — no Craft dependency — shared by _resolveCtaEntry() (its dry-run
+     * lookup and its real create/update path) and _resolveGlobalCtaEntry().
+     *
+     * @param array $ctaBlock The raw call_to_action block from the JSON.
+     * @return string Defaults to 'Call to Action' when no heading node is present.
+     */
+    private function _extractCtaTitle(array $ctaBlock): string
+    {
+        $nodes = is_array($ctaBlock['fields']['nodes'] ?? null) ? $ctaBlock['fields']['nodes'] : [];
+
+        foreach ($nodes as $node) {
+            if (($node['type'] ?? '') === 'heading' && !empty($node['text'])) {
+                return (string)$node['text'];
+            }
+        }
+
+        return 'Call to Action';
+    }
+
+    /**
+     * Classifies a call_to_action block's routing destination from its
+     * ContentIQ `fields.source` label: 'page' (the pre-existing per-page
+     * inline block) or 'global' (the shared footer CTA — see
+     * _resolveCtaBlocks()/_resolveGlobalCtaEntry()).
+     *
+     * An absent `source` key defaults to 'global' — mirrors ContentiQ's own
+     * default (app/Support/ProseMirrorBlockBuilder.php::serialiseCta()'s
+     * `$source = 'global'` parameter default), not re-decided here. Pure — no
+     * Craft dependency — covered directly by tests/run-transforms.php.
+     *
+     * @param array $ctaBlock The raw call_to_action block from the JSON.
+     * @return string 'page' or 'global'.
+     */
+    private function _ctaSource(array $ctaBlock): string
+    {
+        $source = $ctaBlock['fields']['source'] ?? 'global';
+
+        return $source === 'page' ? 'page' : 'global';
+    }
+
+    /**
+     * Builds a CTA entry's field values (richText/image/desktopBackgroundImage/
+     * actionButtons) from a ContentIQ call_to_action block.
+     *
+     * The content-mapping core shared by both CTA destinations:
+     *   - the per-page callToActionEntry _resolveCtaEntry() creates/updates
+     *     (fields.source === 'page', the original path).
+     *   - the single shared entry _resolveGlobalCtaEntry() creates/updates
+     *     (fields.source === 'global').
+     *
+     * See docs/block-mapping.md#cta-entry-creation.
+     *
+     * @param array $ctaBlock The raw call_to_action block from the JSON.
+     * @param bool  $dryRun
+     * @param array &$result  Result array — images appended (image downloads only).
+     * @return array<string, mixed> Field values ready for setFieldValues().
+     */
+    private function _buildCtaContentValues(array $ctaBlock, bool $dryRun, array &$result): array
+    {
+        $fields = $ctaBlock['fields'] ?? [];
+        $nodes  = is_array($fields['nodes'] ?? null) ? $fields['nodes'] : [];
+
+        // Separate ctaButton nodes (→ actionButtons Matrix) from content nodes (→ richText).
+        // ContentIQ sends buttons as ctaButton nodes in fields.nodes (same pattern as faq/price_list).
+        $contentNodes      = [];
+        $actionButtonsData = [];
+        $btnCounter        = 0;
+
+        foreach ($nodes as $node) {
+            if (($node['type'] ?? '') === 'ctaButton') {
+                $label = (string)($node['label'] ?? '');
+                $url   = (string)($node['url'] ?? '');
+
+                if ($label !== '' || $url !== '') {
+                    $actionButtonsData['new' . (++$btnCounter)] = [
+                        'type'   => 'actionButton',
+                        'fields' => [
+                            'actionButton' => [[
+                                'type'      => 'verbb\\hyper\\links\\Url',
+                                'handle'    => 'default-verbb-hyper-links-url',
+                                'linkValue' => LinkHelper::hyperInertUrl($url),
+                                'linkText'  => $label,
+                                'linkClass' => 'btn btn-primary',
+                            ]],
+                        ],
+                    ];
+                }
+            } else {
+                $contentNodes[] = $node;
+            }
+        }
+
+        // Build field values.
+        $ctaFieldValues = [];
+
+        // richText — render content nodes only (ctaButton nodes excluded above).
+        $ctaFieldValues['richText'] = ContentIQImporter::$plugin->nodes->render($contentNodes);
+
+        // image — import if present.
+        $imageData = $fields['image'] ?? null;
+        if (is_array($imageData) && !empty($imageData['url'])) {
+            $imageResult = ContentIQImporter::$plugin->images->importFromField($imageData, $dryRun);
+            if ($imageResult !== null && $imageResult['id'] !== null) {
+                $ctaFieldValues['image'] = [$imageResult['id']];
+                $result['images'][] = ['filename' => $imageResult['filename'], 'reused' => $imageResult['reused']];
+            }
+        }
+
+        // desktopBackgroundImage — import background_image if present.
+        $bgImageData = $fields['background_image'] ?? null;
+        if (is_array($bgImageData) && !empty($bgImageData['url'])) {
+            $bgResult = ContentIQImporter::$plugin->images->importFromField($bgImageData, $dryRun);
+            if ($bgResult !== null && $bgResult['id'] !== null) {
+                $ctaFieldValues['desktopBackgroundImage'] = [$bgResult['id']];
+                $result['images'][] = ['filename' => $bgResult['filename'], 'reused' => $bgResult['reused']];
+            }
+        }
+
+        // actionButtons — prefer ctaButton nodes; fall back to legacy flat fields.buttons array.
+        if (empty($actionButtonsData)) {
+            $actionButtonsData = $this->_buildActionButtons($fields['buttons'] ?? []);
+        }
+
+        if (!empty($actionButtonsData)) {
+            $ctaFieldValues['actionButtons'] = $actionButtonsData;
+        }
+
+        return $ctaFieldValues;
+    }
+
+    /**
+     * Resolves every CTA block referenced by a built matrixData array, routing
+     * each by _ctaSource(). Shared by importPage() (ordinary pages/homepage)
+     * and _buildBlockFieldValues() (collection children carrying blocks[]) so
+     * every entry point routes CTA blocks identically — see
+     * docs/import-pipeline.md.
+     *
+     * 'page'   — unchanged pre-existing behaviour: _resolveCtaEntry() creates/
+     *            updates a per-page callToActionEntry and patches its id into
+     *            the placeholder's chooseCallToAction field.
+     * 'global' — the placeholder is dropped from $matrixData (and its
+     *            $blockKeyConsumption entry, kept in lockstep so
+     *            preserveBlockIdentity's _recordBlockSyncMap() zip stays
+     *            aligned — see its docblock) entirely, so no inline block is
+     *            written; a routingNotes line records the routing — never
+     *            blockNotes, which is reserved for ContentIQ's own
+     *            payload-authored block.notes and persists to
+     *            contentiq_entry_syncs.notes (see SyncJob::run()/
+     *            CpController::actionWidgetSync()) — the shared entry itself
+     *            is created/updated by _resolveGlobalCtaEntry(), gated on
+     *            globals consent (docs/globals.md).
+     *
+     * The caller is told, via the tri-state return value, what to do with the
+     * page's own footerCallToAction.showGlobalCallToAction lightswitch: ON
+     * when ≥1 block routed 'global' this run (wins even alongside 'page'
+     * ones — a page can carry both); OFF when every CTA block routed 'page'
+     * and none routed 'global' (the page supplies its own CTA, so the shared
+     * footer one has nothing to add); untouched (null) when $ctaBlocks was
+     * empty — a page with no CTA blocks at all must never touch a field an
+     * editor may have set by hand. The OFF decision gets the same
+     * routingNotes/warnings treatment as the ON one — one line, once per page
+     * (not per block, since it's a single aggregate decision over every CTA
+     * block rather than a property of any one of them) — see the loop below.
+     *
+     * Never called during a dry run — both callers already gate the whole CTA
+     * step behind `!$dryRun` (dry-run reporting stops before any CTA writes;
+     * see importPage()'s step 9) — the $dryRun === true guard below is
+     * defensive only.
+     *
+     * @param array<string, array> $matrixData Built matrix data (byref — global-
+     *                              routed placeholders are removed).
+     * @param array<string|int, string[]> $blockKeyConsumption byref — MatrixBuilder::build()'s
+     *                              emitted-key => payload-block-id(s) map, kept in
+     *                              lockstep with $matrixData.
+     * @param array $ctaBlocks      Raw call_to_action blocks, in MatrixBuilder::build() order.
+     * @param array &$result        Result array — warnings/images/routingNotes appended.
+     * @param bool  $dryRun
+     * @param int|null $pageId
+     * @return bool|null true (ON) when ≥1 CTA block routed 'global'; false (OFF)
+     *                    when ≥1 routed 'page' and none routed 'global'; null
+     *                    (leave the field untouched) when there were no CTA
+     *                    blocks at all.
+     */
+    private function _resolveCtaBlocks(
+        array &$matrixData,
+        array &$blockKeyConsumption,
+        array $ctaBlocks,
+        array &$result,
+        bool $dryRun,
+        ?int $pageId,
+    ): ?bool {
+        if ($dryRun || empty($ctaBlocks)) {
+            return null;
+        }
+
+        $ctaIndex = 0;
+
+        // Per-page claim set — see _resolveCtaEntry()'s docblock for why this
+        // exists. Only relevant to 'page'-routed blocks.
+        $claimedCtaElementIds = [];
+        $globalKeysToRemove   = [];
+        $hasGlobalCta         = false;
+        $hasPageCta           = false;
+
+        foreach ($matrixData as $key => &$entry) {
+            if (empty($entry['_cta'])) {
+                continue;
+            }
+
+            unset($entry['_cta']);
+
+            if (!isset($ctaBlocks[$ctaIndex])) {
+                $ctaIndex++;
+                continue;
+            }
+
+            $ctaBlock = $ctaBlocks[$ctaIndex];
+            $ctaIndex++;
+
+            if ($this->_ctaSource($ctaBlock) === 'global') {
+                $hasGlobalCta         = true;
+                $globalKeysToRemove[] = $key;
+
+                $this->_resolveGlobalCtaEntry($ctaBlock, $result);
+
+                // routingNotes only — deliberately NOT blockNotes (that key is
+                // reserved for ContentIQ's own payload-authored block.notes,
+                // which persist to contentiq_entry_syncs.notes/the sidebar
+                // widget; a plugin-generated routing message must never land
+                // there) and NOT warnings (this routing is expected behaviour,
+                // not an actionable problem, and warnings drive run/page
+                // status — SyncJob::run()/CpController's $hasWarnings both
+                // gate on `!empty($result['warnings'])`, and any non-empty
+                // warnings flips the whole run to 'warnings'). Absent
+                // `fields.source` defaults to 'global' (_ctaSource()), so
+                // pushing this into warnings previously stamped nearly every
+                // legacy sync (anything not yet opted into 'page') as
+                // warning-laden. Both result.twig and sync-result.twig render
+                // routingNotes as a neutral info line alongside blockNotes and
+                // warnings — see docs/import-pipeline.md. Genuine problems in
+                // this path (globals locked, missing field/set — see
+                // _resolveGlobalCtaEntry()) still push to $result['warnings']
+                // and are untouched by this change.
+                $note                    = 'Call to Action → global footer CTA';
+                $existingNotes           = $result['routingNotes'] ?? '';
+                $result['routingNotes']  = $existingNotes === '' ? $note : $existingNotes . "\n\n" . $note;
+
+                continue;
+            }
+
+            $hasPageCta = true;
+
+            $ctaEntryId = $this->_resolveCtaEntry($ctaBlock, $result, $dryRun, $pageId, $claimedCtaElementIds);
+
+            if ($ctaEntryId !== null) {
+                $entry['fields']['chooseCallToAction'] = [$ctaEntryId];
+            }
+        }
+        unset($entry);
+
+        foreach ($globalKeysToRemove as $key) {
+            unset($matrixData[$key], $blockKeyConsumption[$key]);
+        }
+
+        if ($hasGlobalCta) {
+            return true;
+        }
+
+        if ($hasPageCta) {
+            // Single page-level note (not per-block, unlike the 'global'
+            // branch above) — the lightswitch decision is an aggregate over
+            // every CTA block on the page, not a property of any one block.
+            // routingNotes only — same reasoning as the 'global' branch
+            // above: never blockNotes (reserved for payload-authored
+            // block.notes, which persist to contentiq_entry_syncs.notes),
+            // and never warnings — this is the expected OFF outcome for any
+            // page whose CTA blocks are all 'page'-source, not an actionable
+            // problem. Pushing it into warnings previously flipped run/page
+            // status to 'warnings' (see SyncJob::run()/CpController's
+            // $hasWarnings, both gated on `!empty($result['warnings'])`) for
+            // completely routine pages, burying real warnings in noise. See
+            // docs/import-pipeline.md.
+            $note                    = 'Page CTA → global footer CTA disabled';
+            $existingNotes           = $result['routingNotes'] ?? '';
+            $result['routingNotes']  = $existingNotes === '' ? $note : $existingNotes . "\n\n" . $note;
+
+            return false;
+        }
+
+        return null;
+    }
+
+    /**
+     * Creates or updates the SHARED global call-to-action entry from a
+     * `fields.source === 'global'` CTA block, and relates it on
+     * globalContent.globalChooseCallToAction (handles configurable — see
+     * _getConfig()'s 'globalContentSet'/'globalChooseCtaField' keys).
+     *
+     * Gated on the same globals-consent lock GlobalsImportService/SyncJob use
+     * (contentiq_globals_sync.locked — missing row ⇒ locked, the safe
+     * default; see _globalsLocked()): locked skips both writes and adds a
+     * per-page warning. The page's own footerCallToAction.showGlobalCallToAction
+     * lightswitch is set by the CALLER regardless (_resolveCtaBlocks()) —
+     * that write is page-scoped, already consented via the page's own unlock,
+     * unlike this method's two site-wide writes.
+     *
+     * Identity is NOT contentiq_cta_syncs — that table means per-page
+     * ownership (see docs/import-pipeline.md), which doesn't apply to a
+     * single shared entry. Instead, globalContent's CURRENT
+     * globalChooseCallToAction relation is read fresh on every call: if it
+     * already points at a live entry, that entry's content is updated in
+     * place; otherwise a new callsToAction entry is created (same
+     * construction as the page path) and related. Two 'global'-labelled CTA
+     * blocks in one run therefore naturally resolve to ONE entry, with the
+     * last-processed block's content winning — see PROGRESS.md.
+     *
+     * @param array $ctaBlock The raw call_to_action block (fields.source === 'global').
+     * @param array &$result  Result array — warnings/images appended.
+     * @return void
+     */
+    private function _resolveGlobalCtaEntry(array $ctaBlock, array &$result): void
+    {
+        if ($this->_globalsLocked()) {
+            $result['warnings'][] = 'Global CTA not applied — globals are locked.';
+
+            return;
+        }
+
+        $config           = $this->_getConfig();
+        $globalSetHandle  = $config['globalContentSet'] ?? 'globalContent';
+        $ctaFieldHandle   = $config['globalChooseCtaField'] ?? 'globalChooseCallToAction';
+
+        $globalSet = Craft::$app->getGlobals()->getSetByHandle($globalSetHandle);
+
+        if ($globalSet === null) {
+            $result['warnings'][] = "Global set '{$globalSetHandle}' not found — global CTA not applied.";
+
+            return;
+        }
+
+        $globalLayout = $globalSet->getFieldLayout();
+
+        if ($globalLayout?->getFieldByHandle($ctaFieldHandle) === null) {
+            $result['warnings'][] = "Field '{$ctaFieldHandle}' not found on the '{$globalSetHandle}' global set — global CTA not applied.";
+
+            return;
+        }
+
+        $title          = $this->_extractCtaTitle($ctaBlock);
+        $ctaFieldValues = $this->_buildCtaContentValues($ctaBlock, false, $result);
+
+        // Read the current relation fresh every call — see docblock above for
+        // why this (not contentiq_cta_syncs) is this method's identity source.
+        $entry = $globalSet->getFieldValue($ctaFieldHandle)->status(null)->one();
+
+        if ($entry === null) {
+            $section   = Craft::$app->entries->getSectionByHandle('callsToAction');
+            $entryType = Craft::$app->entries->getEntryTypeByHandle('callToActionEntry');
+
+            if ($section === null || $entryType === null) {
+                $result['warnings'][] = "Section 'callsToAction' or entry type 'callToActionEntry' not found — global CTA not applied.";
+
+                return;
+            }
+
+            $entry = new Entry();
+            $entry->sectionId = $section->id;
+            $entry->typeId    = $entryType->id;
+            $entry->siteId    = Craft::$app->getSites()->getPrimarySite()->id;
+        }
+
+        // Unlike _resolveCtaEntry()'s page path (which never renames an
+        // already-matched entry — see its docblock), the global entry's
+        // title IS part of its content update, both create and update.
+        $entry->title = $title;
+        $entry->setFieldValues($ctaFieldValues);
+
+        if (!Craft::$app->getElements()->saveElement($entry, false)) {
+            $errors = implode(', ', $entry->getFirstErrors());
+            $result['warnings'][] = "Failed to save global CTA entry '{$title}': {$errors}";
+            Craft::warning("ContentIQImporter: global CTA entry save failed: {$errors}", __METHOD__);
+
+            return;
+        }
+
+        $globalSet->setFieldValue($ctaFieldHandle, [$entry->id]);
+
+        if (!Craft::$app->getElements()->saveElement($globalSet, false)) {
+            $errors = implode(', ', $globalSet->getFirstErrors());
+            $result['warnings'][] = "Failed to relate global CTA entry to '{$globalSetHandle}': {$errors}";
+            Craft::warning("ContentIQImporter: global CTA relation save failed: {$errors}", __METHOD__);
+        }
+    }
+
+    /**
+     * Whether the single globals-sync row is locked — mirrors
+     * SyncJob::_globalsLocked() exactly (same table, same missing-row-is-
+     * locked default) so the CTA global-routing gate always agrees with the
+     * Sync screen's globals consent, regardless of which entry point
+     * (SyncJob, CP upload, CLI, sidebar widget) is importing — see
+     * docs/globals.md.
+     *
+     * @return bool
+     */
+    private function _globalsLocked(): bool
+    {
+        $row = (new Query())
+            ->select(['locked'])
+            ->from('{{%contentiq_globals_sync}}')
+            ->one();
+
+        // craft\db\Query::one() returns null when no row matches — globals
+        // have never been consented to. Treat as locked (the safe default).
+        if ($row === null) {
+            return true;
+        }
+
+        return (bool)$row['locked'];
+    }
+
+    /**
+     * Builds the footerCallToAction.showGlobalCallToAction field value for a
+     * page whose CTA blocks this run resolved a lightswitch intent for — see
+     * _resolveCtaBlocks()'s decision table ($showGlobal is its tri-state
+     * return value narrowed to bool by the caller, which never calls this
+     * method at all for the null/"no CTA blocks" case).
+     *
+     * Read-modify-write is free here: craft\fields\ContentBlock's own save
+     * path (ContentBlock::_createContentBlockFromSerializedData()) fetches
+     * the entry's EXISTING nested content-block element and only overwrites
+     * the handles present in the 'fields' array returned below — every
+     * sibling field (notably callToActionLayout) is left exactly as the
+     * editor set it, so this deliberately omits every handle but
+     * showGlobalCallToAction rather than reading/re-writing it.
+     *
+     * Defensively probes both layers before writing — mirrors the 1.22.0
+     * staging-field lesson and _buildHeroInnerFields()'s heroStyle guard: an
+     * unrecognised handle inside a ContentBlock's nested 'fields' array
+     * throws yii\base\UnknownPropertyException, which Craft's own save path
+     * does NOT catch (only InvalidFieldException) — so this is load-bearing,
+     * not defensive dead code.
+     *   1. The outer field (config['footerCtaField'], default
+     *      'footerCallToAction') must exist on $ownerFieldLayout and be a
+     *      ContentBlock field.
+     *   2. Its own nested field layout must have the inner handle
+     *      (config['footerCtaShowGlobalField'], default 'showGlobalCallToAction').
+     * Either miss returns null (nothing written) — never a crash, per the
+     * plugin's "absent field ⇒ skip, don't fail" doctrine
+     * (docs/import-pipeline.md#field-layout-filtering-before-setfieldvalues).
+     * Whether it also warns is asymmetric on $showGlobal: turning the switch
+     * ON and finding nothing to turn on is worth a per-page warning (content
+     * that should have routed to the footer silently didn't) — turning it
+     * OFF and finding nothing is silent, because there's nothing to disable
+     * and collection children (case studies/team) routinely carry
+     * 'page'-source CTA blocks with no footerCallToAction field at all;
+     * warning on every one of those would be spam, not signal.
+     *
+     * Takes $config as a parameter (the caller's already-resolved _getConfig()
+     * result — same convention as _resolveSeoFields()) rather than calling
+     * _getConfig() itself, so this stays testable without a Craft bootstrap
+     * (see tests/run-transforms.php) — _getConfig() needs Craft::$app.
+     *
+     * @param \craft\models\FieldLayout|null $ownerFieldLayout The destination entry type's field layout.
+     * @param array $config Merged contentiq config (defaults + project overrides).
+     * @param array &$result Result array — a warning is appended only when $showGlobal
+     *                        is true and the field/handle is missing (see above).
+     * @param bool $showGlobal The lightswitch value to write — true (ON) when the
+     *                        page carried a 'global'-source CTA block this run,
+     *                        false (OFF) when it carried only 'page'-source ones.
+     * @return array<string, mixed>|null
+     */
+    private function _buildFooterGlobalCtaField(?FieldLayout $ownerFieldLayout, array $config, array &$result, bool $showGlobal): ?array
+    {
+        $footerCtaHandle  = $config['footerCtaField'] ?? 'footerCallToAction';
+        $showGlobalHandle = $config['footerCtaShowGlobalField'] ?? 'showGlobalCallToAction';
+
+        $footerCtaField = $ownerFieldLayout?->getFieldByHandle($footerCtaHandle);
+
+        if (!$footerCtaField instanceof ContentBlock) {
+            if ($showGlobal) {
+                $result['warnings'][] = "Field '{$footerCtaHandle}' not found on this entry type — global CTA lightswitch not set.";
+            }
+
+            return null;
+        }
+
+        $footerCtaInnerLayout = $footerCtaField->getFieldLayout();
+
+        if ($footerCtaInnerLayout?->getFieldByHandle($showGlobalHandle) === null) {
+            if ($showGlobal) {
+                $result['warnings'][] = "Field '{$showGlobalHandle}' not found on '{$footerCtaHandle}' — global CTA lightswitch not set.";
+            }
+
+            return null;
+        }
+
+        return [
+            $footerCtaHandle => [
+                'fields' => [
+                    $showGlobalHandle => $showGlobal,
+                ],
+            ],
+        ];
     }
 
     /**
@@ -2022,8 +2462,13 @@ class ImportService extends Component
 
     /**
      * Builds the block-driven portion of an entry's field values: Matrix field
-     * data from `blocks`, the hero ContentBlock field, and callToActionEntry
-     * creation/patching for call_to_action blocks.
+     * data from `blocks`, the hero ContentBlock field, and CTA routing (see
+     * _resolveCtaBlocks()) for call_to_action blocks — per-page
+     * callToActionEntry creation/patching for `fields.source === 'page'`
+     * blocks, footerCallToAction/global-entry routing for `'global'` ones
+     * (and footerCallToAction.showGlobalCallToAction forced OFF when only
+     * `'page'`-source blocks were found — see _resolveCtaBlocks()'s tri-state
+     * return value).
      *
      * Shared by standard pages and by collection children that carry a
      * non-empty `blocks[]` (the routing decision — whether to call this at all
@@ -2031,14 +2476,17 @@ class ImportService extends Component
      * with blocks/images/cardRefs/warnings/blockNotes taken from the actual
      * MatrixBuilder run, so the import/sync report reflects what was really
      * written rather than the _emptyResult() skeleton's placeholders.
+     * routingNotes is mutated separately, by _resolveCtaBlocks() below — see
+     * its docblock for why routing messages never land in blockNotes.
      *
-     * CTA entry creation/patching is skipped when $dryRun is true — a dry run
-     * must not write callToActionEntry rows (matches the page path's previous
-     * behaviour, where the whole CTA step sat after the dry-run early return).
+     * CTA routing is skipped when $dryRun is true — a dry run must not write
+     * callToActionEntry rows or the global set (matches the page path's
+     * previous behaviour, where the whole CTA step sat after the dry-run
+     * early return).
      *
      * @param array            $data              Decoded top-level JSON object for the page (or collection child).
      * @param bool             $dryRun            If true, skips image downloads and CTA entry writes.
-     * @param array            &$result           Result array, mutated with blocks/images/cardRefs/warnings/blockNotes.
+     * @param array            &$result           Result array, mutated with blocks/images/cardRefs/warnings/blockNotes/routingNotes.
      * @param FieldLayout|null $targetFieldLayout The destination entry type's field layout — drives the
      *                                             hero shape probe (§7.5; see _detectHeroShape()). Pages,
      *                                             homepage, and collection children each pass their own
@@ -2111,45 +2559,28 @@ class ImportService extends Component
             ? $this->_buildHeroField($heroBlock, $dryRun, $targetFieldLayout)
             : null;
 
-        // Resolve CTA blocks → create callToActionEntry entries and patch their
-        // IDs into the matrixData placeholders. Skipped on a dry run — no writes.
-        $matrixData = $built['matrixData'];
+        // Resolve CTA blocks — same routing as importPage() (see its step 10):
+        // 'page'-source blocks create/update a per-page callToActionEntry and
+        // patch the matrixData placeholder; 'global'-source blocks drop the
+        // placeholder entirely and route to the shared footer CTA instead.
+        // Skipped on a dry run — no writes.
+        $matrixData            = $built['matrixData'];
+        $blockKeyConsumption   = $built['blockKeyConsumption'] ?? [];
+        $footerGlobalCtaIntent = null;
 
         if (!$dryRun) {
-            $ctaIndex = 0;
-
-            // Stable ContentIQ page id + per-page claim set — same contract as
-            // the page path (see importPage() step 10 for why the claim set
-            // exists).
+            // Stable ContentIQ page id — same contract as the page path (see
+            // importPage() step 10).
             $pageId = isset($data['document']['id']) ? (int)$data['document']['id'] : null;
-            $claimedCtaElementIds = [];
 
-            foreach ($matrixData as $key => &$entry) {
-                if (empty($entry['_cta'])) {
-                    continue;
-                }
-
-                unset($entry['_cta']);
-
-                if (!isset($ctaBlocks[$ctaIndex])) {
-                    $ctaIndex++;
-                    continue;
-                }
-
-                $ctaEntryId = $this->_resolveCtaEntry(
-                    $ctaBlocks[$ctaIndex],
-                    $result,
-                    $dryRun,
-                    $pageId,
-                    $claimedCtaElementIds,
-                );
-                $ctaIndex++;
-
-                if ($ctaEntryId !== null) {
-                    $entry['fields']['chooseCallToAction'] = [$ctaEntryId];
-                }
-            }
-            unset($entry);
+            $footerGlobalCtaIntent = $this->_resolveCtaBlocks(
+                $matrixData,
+                $blockKeyConsumption,
+                $ctaBlocks,
+                $result,
+                $dryRun,
+                $pageId,
+            );
         }
 
         $matrixHandle = $config['matrixField'] ?? 'contentBlocks';
@@ -2157,6 +2588,9 @@ class ImportService extends Component
         $fieldValues = array_merge(
             [$matrixHandle => $matrixData],
             $heroData ?? [],
+            $footerGlobalCtaIntent !== null
+                ? ($this->_buildFooterGlobalCtaField($targetFieldLayout, $config, $result, $footerGlobalCtaIntent) ?? [])
+                : [],
         );
 
         // §7.4 — article/caseStudy gate content-block rendering behind a

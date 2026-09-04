@@ -104,8 +104,16 @@
                         </td>
                     </tr>
 
-                    {# Warnings and errors for this page #}
-                    {% if (page.warnings ?? [])|length or page.error ?? null %}
+                    {# Warnings, errors, blockNotes, and routingNotes for this page.
+                       blockNotes is payload-authored (ContentIQ's own block.notes);
+                       routingNotes is plugin-generated (e.g. CTA global-routing
+                       messages — see ImportService::_resolveCtaBlocks()). Both are
+                       informational, not actionable — rendered muted via .light,
+                       separately from .warning/.error, and never counted toward
+                       run status. #}
+                    {% set blockNotes = (page.blockNotes ?? '')|trim %}
+                    {% set routingNotes = (page.routingNotes ?? '')|trim %}
+                    {% if (page.warnings ?? [])|length or page.error ?? null or blockNotes != '' or routingNotes != '' %}
                         <tr>
                             <td colspan="6" style="padding-left:32px;">
                                 {% if page.error ?? null %}
@@ -114,6 +122,16 @@
                                 {% for warning in page.warnings ?? [] %}
                                     <div class="warning">{{ warning }}</div>
                                 {% endfor %}
+                                {% if blockNotes != '' %}
+                                    {% for note in blockNotes|split('\n\n') %}
+                                        <div class="light">{{ note }}</div>
+                                    {% endfor %}
+                                {% endif %}
+                                {% if routingNotes != '' %}
+                                    {% for note in routingNotes|split('\n\n') %}
+                                        <div class="light">{{ note }}</div>
+                                    {% endfor %}
+                                {% endif %}
                             </td>
                         </tr>
                     {% endif %}

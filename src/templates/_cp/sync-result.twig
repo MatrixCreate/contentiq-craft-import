@@ -43,6 +43,25 @@
                     {% for warning in otherWarnings %}
                         <span style="color:var(--warning-color); margin-left:6px;">— {{ warning }}</span>
                     {% endfor %}
+                    {# blockNotes (payload-authored, ContentIQ's own block.notes)
+                       and routingNotes (plugin-generated, e.g. CTA
+                       global-routing messages — see
+                       ImportService::_resolveCtaBlocks()) — both informational,
+                       not actionable, so rendered muted via .light rather than
+                       alongside the warning spans above, and never counted
+                       toward totalWarnings/run status. #}
+                    {% set blockNotes = (page.blockNotes ?? '')|trim %}
+                    {% if blockNotes != '' %}
+                        {% for note in blockNotes|split('\n\n') %}
+                            <div class="light" style="font-size:12px; margin-top:2px;">{{ note }}</div>
+                        {% endfor %}
+                    {% endif %}
+                    {% set routingNotes = (page.routingNotes ?? '')|trim %}
+                    {% if routingNotes != '' %}
+                        {% for note in routingNotes|split('\n\n') %}
+                            <div class="light" style="font-size:12px; margin-top:2px;">{{ note }}</div>
+                        {% endfor %}
+                    {% endif %}
                 </td>
                 <td><code style="font-size:12px;">{{ page.slug ?? '?' }}</code></td>
                 <td>
@@ -141,6 +160,20 @@
                 {% for warning in otherWarnings %}
                     <span style="color:var(--warning-color); margin-left:6px;">— {{ warning }}</span>
                 {% endfor %}
+                {# blockNotes/routingNotes — informational, not actionable; see
+                   pageRows() above for the same treatment. #}
+                {% set blockNotes = (page.blockNotes ?? '')|trim %}
+                {% if blockNotes != '' %}
+                    {% for note in blockNotes|split('\n\n') %}
+                        <div class="light" style="font-size:12px; margin-top:2px;">{{ note }}</div>
+                    {% endfor %}
+                {% endif %}
+                {% set routingNotes = (page.routingNotes ?? '')|trim %}
+                {% if routingNotes != '' %}
+                    {% for note in routingNotes|split('\n\n') %}
+                        <div class="light" style="font-size:12px; margin-top:2px;">{{ note }}</div>
+                    {% endfor %}
+                {% endif %}
             </td>
             <td><code style="font-size:12px;">{{ page.slug ?? '?' }}</code></td>
             <td>

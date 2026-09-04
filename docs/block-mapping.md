@@ -5,7 +5,7 @@ What this doc covers: how a ContentiQ page's `blocks[]` array becomes a Craft
 that Matrix — hero, cards, call-to-action, SEO). The declarative mapping
 table, the builder that walks it, the ProseMirror-to-HTML renderer, and the
 non-obvious rules for text columns, grouping, cards resolution, and the
-diff-aware write path. Verified against code 2026-08-24.
+diff-aware write path. Verified against code 2026-09-04.
 
 ---
 
@@ -398,10 +398,11 @@ integration-tested:
 ## CTA entry creation
 
 Call-to-action blocks pass through MatrixBuilder as bare placeholders (see
-"MatrixBuilder" above); `ImportService::_resolveCtaEntry()` does the real
-work after the entry is available, creating/updating a `callToActionEntry`
-in the `callsToAction` channel section and patching its id into
-`chooseCallToAction` on the placeholder.
+"MatrixBuilder" above); `ImportService::_resolveCtaBlocks()` routes each one
+by its ContentiQ `fields.source` label before either path below runs — see
+"Source routing" below. `_resolveCtaEntry()` does the per-page work, creating/
+updating a `callToActionEntry` in the `callsToAction` channel section and
+patching its id into `chooseCallToAction` on the placeholder.
 
 **Identity resolution has two tiers, not just title matching.** When both
 `document.id` (the page) and the CTA block's own `id` are present — a
@@ -417,7 +418,90 @@ adopting the first one's entry. Title/richText/buttons are extracted the
 same way regardless of identity tier: title from the first heading node
 (default `'Call to Action'`), richText from the non-button nodes, buttons
 from `ctaButton` nodes in `fields.nodes` (falling back to a flat
-`fields.buttons` array for legacy payloads).
+`fields.buttons` array for legacy payloads). The title/content-mapping logic
+itself (`_extractCtaTitle()`/`_buildCtaContentValues()`) is shared with the
+global path below rather than duplicated.
+
+### Source routing (`fields.source`: `'page'` | `'global'`)
+
+Every ContentiQ `call_to_action` block carries `fields.source`, which an
+absent key defaults to `'global'` — ContentiQ's own default
+(`app/Support/ProseMirrorBlockBuilder.php::serialiseCta()`), mirrored
+verbatim by the pure `ImportService::_ctaSource()` classifier rather than
+re-decided. `_resolveCtaBlocks()` (shared by `importPage()` and
+`_buildBlockFieldValues()` — see [import-pipeline.md](import-pipeline.md), so
+every entry point routes identically) walks the built `matrixData` and splits
+on this label:
+
+- **`'page'`** — exactly the pre-existing behaviour described above: an
+  inline `callToAction` Matrix block relating to a per-page entry, tracked in
+  `contentiq_cta_syncs`.
+- **`'global'`** — no inline Matrix block at all. The placeholder (and its
+  `blockKeyConsumption` entry, so `preserveBlockIdentity`'s
+  `_recordBlockSyncMap()` zip stays aligned — see its docblock) is dropped
+  from `matrixData` before the page saves. `_resolveGlobalCtaEntry()` writes
+  the single SHARED `callToActionEntry` and relates it on the `globalContent`
+  global set's `globalChooseCallToAction` field (handles:
+  `config['globalContentSet']`/`config['globalChooseCtaField']`) — gated on
+  globals consent, see [globals.md](globals.md). Identity is **not**
+  `contentiq_cta_syncs` (that table means per-page ownership) —
+  `globalChooseCallToAction`'s current relation is read fresh every call: a
+  live related entry is updated in place (title included, unlike the page
+  path's update branch, which never renames an already-matched entry); no
+  relation creates a new entry (same construction as the page path) and
+  relates it. Two `'global'`-labelled CTA blocks in one run therefore resolve
+  to **one** entry, last-processed wins.
+
+**The `footerCallToAction.showGlobalCallToAction` lightswitch is a single
+per-page decision** (handles: `config['footerCtaField']`/
+`config['footerCtaShowGlobalField']`, default
+`footerCallToAction`/`showGlobalCallToAction`), made once `_resolveCtaBlocks()`
+has classified every CTA block on the page — it's an aggregate over the whole
+page, not a property of any one block, and follows this table:
+
+| CTA blocks on the page this run                                | Lightswitch |
+|------------------------------------------------------------------|-------------|
+| ≥1 `'global'`-source (any `'page'`-source blocks alongside don't change it) | **ON** (`true`) — global wins when both are present |
+| 0 `'global'`-source, ≥1 `'page'`-source                          | **OFF** (`false`) — the page supplies its own CTA, so the shared footer one is disabled |
+| none at all                                                       | **untouched** — absent payload data never deletes |
+
+`_buildFooterGlobalCtaField()` writes the resolved value — read-modify-write
+is free (Craft's own `ContentBlock::_createContentBlockFromSerializedData()`
+fetches the entry's existing nested content-block and only overwrites handles
+present in the `'fields'` array, so `callToActionLayout` and every other
+sibling field is left untouched — only `showGlobalCallToAction` is ever
+included). Defensively probes both the outer field and its own nested field
+layout before writing (mirrors `_buildHeroInnerFields()`'s `heroStyle` guard
+— an unrecognised handle inside a `ContentBlock`'s nested `'fields'` array
+throws `yii\base\UnknownPropertyException`, which Craft's save path does
+**not** catch): either layer missing skips the write, never a crash — but the
+warning is asymmetric. Turning the switch **ON** and finding no field to turn
+on is worth a per-page warning (content that should route to the footer
+silently can't). Turning it **OFF** and finding no field is **silent** —
+there's nothing to disable, and collection children (case studies/team)
+routinely carry `'page'`-source CTA blocks with no `footerCallToAction` field
+at all; warning on every one of them would be spam, not signal.
+
+A `routingNotes` line records the routing on the page's result row either way:
+`'Call to Action → global footer CTA'` once per `'global'`-source block
+resolved (inside the loop, alongside the entry write), `'Page CTA → global
+footer CTA disabled'` once when the aggregate decision lands OFF (after the
+loop, since it's a page-level decision). Both notes are `routingNotes`-only,
+deliberately **not** `blockNotes` and **not** `warnings`. Never `blockNotes`:
+that key holds only ContentIQ's own payload-authored `block.notes` text, and
+`SyncJob`'s post-import auto-lock step / `CpController::actionWidgetSync()`
+persist it verbatim into `contentiq_entry_syncs.notes` — the "ContentIQ
+Notes" field the entry sidebar widget displays — which must never contain
+plugin-generated text. `routingNotes` is a separate, same-shape (`"\n\n"`-joined
+string) result key that nothing persists — it exists only in the run's result
+JSON. Never `warnings` either — routing is expected behaviour, not an
+actionable problem, and `warnings` drives run/page status (any non-empty
+`warnings` flips the run to `warnings`); since absent `fields.source` defaults
+to `'global'`, pushing the ON note into `warnings` too would stamp nearly
+every legacy sync as warning-laden. `result.twig` and `sync-result.twig` both
+render `routingNotes` (alongside `blockNotes`) as a neutral info line on each
+page's row (muted styling, separate from `.warning`), so the routing is still
+visible on every screen without ever reaching the persisted notes column.
 
 ---
 
@@ -509,7 +593,8 @@ elements, not the owner's own `content` column; join through
   doc's builders are called from: entry resolution, collection children,
   the empty-matrix guard, transactions.
 - [globals.md](globals.md) — the separate, non-per-page globals import
-  (offices, company info) this doc's block mapping has no part in.
+  (offices, company info) this doc's block mapping has no part in — except
+  the `'global'`-source CTA path above, which shares its consent gate.
 - [assets.md](assets.md) — `ImageImportService`, consumed by every `image`/
   `images` handler in this doc.
 - [cp-and-widget.md](cp-and-widget.md) — the sidebar sync widget and CP

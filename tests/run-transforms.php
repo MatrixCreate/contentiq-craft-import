@@ -619,6 +619,175 @@ $allThreeWarnings = callPrivate($importService, '_buildBlockOwnershipWarnings', 
 check('all three previously non-empty → three warnings', 3, count($allThreeWarnings));
 
 // -----------------------------------------------------------------------------
+// ImportService — CTA source routing (fields.source: 'page'|'global') and the
+// footerCallToAction.showGlobalCallToAction lightswitch decision it drives.
+//
+// _ctaSource() is the pure classify-a-block-payload decision this feature is
+// built on. _resolveCtaBlocks() itself needs a live Craft app for its
+// per-block CTA-entry writes (same gap _resolveCtaEntry()/
+// _resolveGlobalCtaEntry() already have — see PROGRESS.md), but its two
+// early-return-null ("untouched") paths — dry run, no CTA blocks at all —
+// never touch Craft and are covered directly below.
+// _buildFooterGlobalCtaField() is the ContentBlock existence guard that
+// mirrors _buildHeroInnerFields()'s heroStyle guard (the 1.22.0
+// staging-field lesson — an unrecognised handle inside a ContentBlock's
+// nested 'fields' array throws yii\base\UnknownPropertyException, uncaught
+// by Craft's own save path); its $showGlobal parameter's ON/OFF ×
+// field-present/field-missing matrix — including the OFF-side silent-skip
+// asymmetry — is exercised in full below. All of it uses the same
+// Reflection + craft-stubs approach as the hero-shape probe above.
+// -----------------------------------------------------------------------------
+echo "\nImportService — CTA source routing\n";
+
+check(
+    "absent fields.source → 'global' (ContentiQ's own default)",
+    'global',
+    callPrivate($importService, '_ctaSource', [['fields' => []]]),
+);
+check(
+    "fields.source: 'global' → 'global'",
+    'global',
+    callPrivate($importService, '_ctaSource', [['fields' => ['source' => 'global']]]),
+);
+check(
+    "fields.source: 'page' → 'page'",
+    'page',
+    callPrivate($importService, '_ctaSource', [['fields' => ['source' => 'page']]]),
+);
+check(
+    "unrecognised fields.source value → 'global' (conservative default)",
+    'global',
+    callPrivate($importService, '_ctaSource', [['fields' => ['source' => 'bananas']]]),
+);
+check(
+    "no 'fields' key at all → 'global'",
+    'global',
+    callPrivate($importService, '_ctaSource', [[]]),
+);
+
+// _resolveCtaBlocks()'s "untouched" (null) leg of the ON/OFF/untouched
+// decision table — both callers already gate the whole CTA step behind
+// !$dryRun, so the dry-run branch below is defensive only, but it's still
+// pure enough to assert directly.
+$ctaBlocksProbeResult = ['warnings' => []];
+$untouchedMatrixData          = [];
+$untouchedBlockKeyConsumption = [];
+check(
+    'dry run → untouched (null) regardless of ctaBlocks content',
+    null,
+    callPrivate($importService, '_resolveCtaBlocks', [
+        &$untouchedMatrixData, &$untouchedBlockKeyConsumption, [['fields' => ['source' => 'page']]], &$ctaBlocksProbeResult, true, null,
+    ]),
+);
+check(
+    'no CTA blocks at all → untouched (null)',
+    null,
+    callPrivate($importService, '_resolveCtaBlocks', [
+        &$untouchedMatrixData, &$untouchedBlockKeyConsumption, [], &$ctaBlocksProbeResult, false, null,
+    ]),
+);
+
+// _buildFooterGlobalCtaField() guard — config carries the (default) handles;
+// takes $config as a parameter rather than calling _getConfig() itself
+// specifically so it's testable here without a Craft::$app bootstrap. The
+// same three layout shapes are probed under both $showGlobal intents, since
+// the warn-vs-silent behaviour on a miss is the part that differs by intent.
+$footerCtaConfig = [
+    'footerCtaField'           => 'footerCallToAction',
+    'footerCtaShowGlobalField' => 'showGlobalCallToAction',
+];
+
+// --- ON ($showGlobal = true) — a miss is worth a per-page warning.
+$footerResultA = ['warnings' => []];
+check(
+    'ON + null owner field layout → nothing written',
+    null,
+    callPrivate($importService, '_buildFooterGlobalCtaField', [null, $footerCtaConfig, &$footerResultA, true]),
+);
+check('ON + null owner field layout → one warning', 1, count($footerResultA['warnings']));
+
+// Outer 'footerCallToAction' present but not a ContentBlock field (e.g. an
+// older/flat-shape fork) — same "skip, don't crash" outcome as a missing field.
+$footerResultB = ['warnings' => []];
+$notAContentBlockLayout = new \craft\models\FieldLayout(['footerCallToAction' => new class {}]);
+check(
+    "ON + 'footerCallToAction' not a ContentBlock instance → nothing written",
+    null,
+    callPrivate($importService, '_buildFooterGlobalCtaField', [$notAContentBlockLayout, $footerCtaConfig, &$footerResultB, true]),
+);
+check("ON + 'footerCallToAction' not a ContentBlock instance → one warning", 1, count($footerResultB['warnings']));
+
+// Outer field is a ContentBlock, but its OWN nested layout predates
+// 'showGlobalCallToAction' — the load-bearing guard this whole method exists
+// for (writing the handle anyway would throw UnknownPropertyException).
+$footerResultC = ['warnings' => []];
+$innerLayoutNoHandle = new \craft\models\FieldLayout([]);
+$layoutMissingInnerHandle = new \craft\models\FieldLayout([
+    'footerCallToAction' => new \craft\fields\ContentBlock($innerLayoutNoHandle),
+]);
+check(
+    "ON + ContentBlock present but missing 'showGlobalCallToAction' inner handle → nothing written",
+    null,
+    callPrivate($importService, '_buildFooterGlobalCtaField', [$layoutMissingInnerHandle, $footerCtaConfig, &$footerResultC, true]),
+);
+check("ON + missing inner handle → one warning naming it", true, str_contains($footerResultC['warnings'][0] ?? '', 'showGlobalCallToAction'));
+
+// Both layers present (current Craft Starter shape) — the lightswitch value
+// is returned, nested under the ContentBlock's own 'fields' shape, no warning.
+$footerResultD = ['warnings' => []];
+$innerLayoutWithHandle = new \craft\models\FieldLayout(['showGlobalCallToAction' => new class {}]);
+$layoutWithInnerHandle = new \craft\models\FieldLayout([
+    'footerCallToAction' => new \craft\fields\ContentBlock($innerLayoutWithHandle),
+]);
+$footerFieldValuesOn = callPrivate($importService, '_buildFooterGlobalCtaField', [$layoutWithInnerHandle, $footerCtaConfig, &$footerResultD, true]);
+check(
+    'ON + both layers present → showGlobalCallToAction: true nested under footerCallToAction.fields',
+    true,
+    ($footerFieldValuesOn['footerCallToAction']['fields']['showGlobalCallToAction'] ?? null) === true,
+);
+check('ON + both layers present → no warning', [], $footerResultD['warnings']);
+
+// --- OFF ($showGlobal = false) — the new page-source-CTA-only decision. Same
+// layout-guard logic, but a miss is SILENT: there's nothing to disable, and
+// collection children (case studies/team) routinely carry 'page'-source CTA
+// blocks with no footerCallToAction field at all — warning on every one of
+// them would be spam, not signal.
+$footerResultE = ['warnings' => []];
+check(
+    'OFF + null owner field layout → nothing written',
+    null,
+    callPrivate($importService, '_buildFooterGlobalCtaField', [null, $footerCtaConfig, &$footerResultE, false]),
+);
+check('OFF + null owner field layout → SILENT, no warning', [], $footerResultE['warnings']);
+
+$footerResultF = ['warnings' => []];
+check(
+    "OFF + 'footerCallToAction' not a ContentBlock instance → nothing written",
+    null,
+    callPrivate($importService, '_buildFooterGlobalCtaField', [$notAContentBlockLayout, $footerCtaConfig, &$footerResultF, false]),
+);
+check("OFF + 'footerCallToAction' not a ContentBlock instance → SILENT, no warning", [], $footerResultF['warnings']);
+
+$footerResultG = ['warnings' => []];
+check(
+    "OFF + ContentBlock present but missing 'showGlobalCallToAction' inner handle → nothing written",
+    null,
+    callPrivate($importService, '_buildFooterGlobalCtaField', [$layoutMissingInnerHandle, $footerCtaConfig, &$footerResultG, false]),
+);
+check('OFF + missing inner handle → SILENT, no warning', [], $footerResultG['warnings']);
+
+// Both layers present, OFF — the lightswitch value written is false (not
+// simply omitted), still with no warning (there's a field, and it wrote fine).
+$footerResultH = ['warnings' => []];
+$footerFieldValuesOff = callPrivate($importService, '_buildFooterGlobalCtaField', [$layoutWithInnerHandle, $footerCtaConfig, &$footerResultH, false]);
+check(
+    'OFF + both layers present → showGlobalCallToAction: false nested under footerCallToAction.fields',
+    true,
+    ($footerFieldValuesOff['footerCallToAction']['fields']['showGlobalCallToAction'] ?? null) === false,
+);
+check('OFF + both layers present → no warning', [], $footerResultH['warnings']);
+
+// -----------------------------------------------------------------------------
 // NodesRenderer — blockquote support (Gap 1: flat nodes[] shape; Gap 2: raw
 // ProseMirror content shape). NodesRenderer/UrlSafety are already required
 // above for the MatrixBuilder section.

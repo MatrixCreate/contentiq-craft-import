@@ -6,7 +6,7 @@ info, offices, branding, social networks, trust signals, scripts) into the
 sets — the per-run consent model that gates it, the field boundary the sync
 respects, offices idempotency, and the read-only URL-prefix drift check.
 
-Verified against code 2026-08-24.
+Verified against code 2026-09-04.
 
 ---
 
@@ -29,6 +29,19 @@ A globals import writes to three destinations:
 Every write is a **field-level merge**, not a wholesale replace of the
 global set. Only the specific handles this sync owns are ever touched — see
 "Sync-owned field boundary" below.
+
+**One other consumer of the same consent gate, outside this pipeline.**
+`ImportService`'s per-page CTA routing (`fields.source === 'global'` —
+[block-mapping.md](block-mapping.md#source-routing-fieldssource-page--global))
+writes the shared `callToActionEntry` and its
+`globalContent.globalChooseCallToAction` relation under the identical
+`contentiq_globals_sync.locked` gate this doc describes, via its own
+`ImportService::_globalsLocked()` (a read-only mirror of
+`SyncJob::_globalsLocked()` — same table, same missing-row-is-locked
+default). It is **not** part of `GlobalsImportService::import()` and doesn't
+touch the three destinations above — it's mentioned here because it's a
+second reader of the same lock, and "Why globals never travel via upload"
+below applies to it identically.
 
 ---
 
@@ -59,9 +72,22 @@ Mechanics:
   `CpController` around the `queue` table probe).
 - Net effect: consent lives for exactly one sync. The next sync's tree
   always shows the lightswitch unchecked again — nothing persists it.
+- `_setGlobalsLock()` runs before pass 1's page loop (see
+  [import-pipeline.md](import-pipeline.md#syncjobs-passes)), so the CTA
+  global-routing path's own read (`ImportService::_globalsLocked()`, called
+  once per `'global'`-source CTA block as pages import) always sees THIS
+  run's consent decision, not last run's — the same reason
+  `GlobalsImportService::import()` itself is safe to gate on the same row
+  later in the run.
 
 The upload/import path and the CLI import command never touch this table at
-all; they simply skip globals unconditionally (see below).
+all; they simply skip globals unconditionally (see below) — a
+`'global'`-source CTA block imported through either path finds the row
+exactly as the last sync left it (locked, unless a `SyncJob` run is unlocked
+and mid-flight elsewhere), so its global entry write is skipped and warned,
+though the page's own `footerCallToAction` lightswitch is still set
+(page-scoped, not gated by this row — see
+[block-mapping.md](block-mapping.md#source-routing-fieldssource-page--global)).
 
 ---
 
