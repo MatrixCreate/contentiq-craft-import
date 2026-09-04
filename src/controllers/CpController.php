@@ -591,6 +591,14 @@ class CpController extends Controller
     /**
      * Result screen — shows the outcome of a completed import run.
      *
+     * Sync runs are redirected to the purpose-built sync-result screen (Fix
+     * B-result): since the 1.22.0 sync overhaul, SyncJob stores its result as
+     * a shape-tagged object (`{pages, globals, ackWarning}`, see SyncJob.php),
+     * not the flat per-page array every other run type still stores. This
+     * legacy template iterates `run.result` directly and was never updated
+     * for that shape, so a sync run rendered here shows three garbage rows
+     * (one per top-level key) instead of the actual pages.
+     *
      * @param int $runId
      * @return Response
      */
@@ -603,6 +611,10 @@ class CpController extends Controller
 
         if ($run === null) {
             throw new \yii\web\NotFoundHttpException('Import run not found.');
+        }
+
+        if ($run['type'] === 'sync') {
+            return $this->redirect('contentiq-importer/sync/result/' . $runId);
         }
 
         $run['result'] = Json::decodeIfJson($run['result'] ?? '[]');

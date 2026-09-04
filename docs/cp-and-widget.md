@@ -47,7 +47,9 @@ transcription.
   permission instead).
 - **History** (`actionHistory`, `_cp/history.twig`) — lists
   `contentiq_import_runs` rows (single/batch/sync/widget imports), each
-  linking to its result screen.
+  linking to its result screen — a `sync`-type row links straight to
+  `contentiq-importer/sync/result/<id>` (`actionSyncResult`), every other
+  type to `contentiq-importer/result/<id>` (`actionResult`).
 - **Preview** (`actionPreview`, `_cp/preview.twig`) — the upload flow's
   dry-run step: shows what an uploaded JSON file would do, including a
   dry-run of any `globals` key it carries (display only — see
@@ -57,7 +59,14 @@ transcription.
   `tempFilename` field between preview and run — see `docs/assets.md`
   "Temp-file handling" for the path-traversal guard on that value.
 - **Result** (`actionResult`, `_cp/result.twig`) — the upload/CLI import's
-  result screen: per-page block-by-block breakdown.
+  result screen: per-page block-by-block breakdown. `run.result` here is
+  always the flat per-page array those entry points store — `actionResult()`
+  redirects a `sync`-type run (302) to the sync result screen below instead
+  of rendering it, because `SyncJob` stores a differently-shaped, wrapped
+  result (see "Sync report anatomy"). `result.twig` also unwraps
+  `run.result.pages` if present as a belt-and-braces fallback, matching
+  `sync-result.twig`'s existing `pages`/`result` fallback, in case anything
+  else ever links straight here with a wrapped result.
 - **Sync result** (`actionSyncResult`, `_cp/sync-result.twig`) — the sync
   run's result screen; see "Sync report anatomy" below.
 

@@ -600,6 +600,18 @@ class SyncJob extends BaseJob
      * semantics, just applied when the job actually runs instead of when the
      * controller pushes it.
      *
+     * Unlock is an upsert, not an UPDATE-only (Fix B-unlock): an entry that
+     * has never been through a successful sync — the Craft homepage Single
+     * is the standing example, since it pre-exists so findExistingEntry()
+     * matches it, but its contentiq_entry_syncs row is only ever created by
+     * the post-import auto-lock step (see "9." below) — has no row for an
+     * UPDATE to match. The unlock then silently no-ops, and the per-page
+     * lock check a few lines up in execute() (missing row => locked) skips
+     * the entry anyway, defeating the user's explicit unlock. Rows that
+     * already exist are updated in place; missing ones are inserted with
+     * locked=false and everything else null — the auto-lock step fills in
+     * synced_at/notes/contentiq_page_id once the entry actually imports.
+     *
      * @param int[]|null $unlockIds
      * @return void
      */
@@ -620,14 +632,44 @@ class SyncJob extends BaseJob
             ->update('{{%contentiq_entry_syncs}}', ['locked' => true])
             ->execute();
 
-        if (!empty($unlockIds)) {
-            $db->createCommand()
-                ->update(
-                    '{{%contentiq_entry_syncs}}',
-                    ['locked' => false],
-                    ['element_id' => $unlockIds],
-                )
-                ->execute();
+        if (empty($unlockIds)) {
+            return;
+        }
+
+        // $unlockIds arrives from a POST body (see CpController::actionRunSync())
+        // — cast to positive ints and drop junk before it ever reaches a query,
+        // then filter to ids that are real Craft entries so malformed POST data
+        // can't create an orphan sync row for an element that doesn't exist.
+        $candidateIds = array_values(array_unique(array_filter(
+            array_map('intval', $unlockIds),
+            static fn (int $id): bool => $id > 0,
+        )));
+
+        if (empty($candidateIds)) {
+            return;
+        }
+
+        $validIds = \craft\elements\Entry::find()->id($candidateIds)->status(null)->ids();
+
+        if (empty($validIds)) {
+            return;
+        }
+
+        foreach ($validIds as $elementId) {
+            $exists = (new Query())
+                ->from('{{%contentiq_entry_syncs}}')
+                ->where(['element_id' => $elementId])
+                ->exists();
+
+            if ($exists) {
+                $db->createCommand()
+                    ->update('{{%contentiq_entry_syncs}}', ['locked' => false], ['element_id' => $elementId])
+                    ->execute();
+            } else {
+                $db->createCommand()
+                    ->insert('{{%contentiq_entry_syncs}}', ['element_id' => $elementId, 'locked' => false])
+                    ->execute();
+            }
         }
     }
 

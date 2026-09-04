@@ -55,7 +55,12 @@
                             {% endif %}
                         </td>
                         <td class="thin">
-                            <a href="{{ url('contentiq-importer/result/' ~ run.id) }}" class="btn small">
+                            {# Sync runs go straight to the purpose-built sync-result
+                               screen — their stored result is a shape-tagged object
+                               ({pages, globals, ackWarning}), not the flat per-page
+                               array 'result.twig' renders. actionResult() redirects
+                               here anyway, but linking directly avoids the extra hop. #}
+                            <a href="{{ url(run.type == 'sync' ? 'contentiq-importer/sync/result/' ~ run.id : 'contentiq-importer/result/' ~ run.id) }}" class="btn small">
                                 {{ 'View'|t('contentiq-importer') }}
                             </a>
                         </td>
