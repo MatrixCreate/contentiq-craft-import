@@ -70,7 +70,6 @@ class ImportService extends Component
      *   images:        [{filename, reused}],
      *   pageAssets:    {created: int, reused: int, relocated: int, failed: int},
      *   pageFiles:     {created: int, reused: int, relocated: int, failed: int},
-     *   placeholdersDropped: int,
      *   warnings:      string[],
      *   error:         string|null,
      * }
@@ -82,15 +81,6 @@ class ImportService extends Component
      */
     public function importPage(array $data, bool $dryRun = false, bool $verbose = false): array
     {
-        // Placeholder-drop counter (NodesRenderer::render()/renderDocument()/
-        // extractHeading() — see its class docblock) is per-page state on a
-        // shared plugin-singleton service, so it must be reset here, before
-        // any of this page's rendering runs — including the collection-child
-        // branch (_importCollectionChild()), which importPage() dispatches to
-        // below. Mirrors MatrixBuilder's own $_warnings reset-at-start idiom,
-        // one level up.
-        ContentIQImporter::$plugin->nodes->resetPlaceholderCount();
-
         $result = $this->_emptyResult();
 
         try {
@@ -294,7 +284,6 @@ class ImportService extends Component
             // -----------------------------------------------------------------------
             if ($dryRun) {
                 $result['success'] = true;
-                $result['placeholdersDropped'] = ContentIQImporter::$plugin->nodes->getPlaceholderCount();
 
                 return $result;
             }
@@ -406,7 +395,6 @@ class ImportService extends Component
 
                     $result['entryId'] = $existing->id;
                     $result['success'] = true;
-                    $result['placeholdersDropped'] = ContentIQImporter::$plugin->nodes->getPlaceholderCount();
 
                     return $result;
                 }
@@ -454,10 +442,6 @@ class ImportService extends Component
 
             return $this->_fatal($result, 'Exception: ' . $e->getMessage());
         }
-
-        // Covers the 11b (new-entry) success path, which falls through to
-        // here rather than returning early like 11a's existing-entry branch.
-        $result['placeholdersDropped'] = ContentIQImporter::$plugin->nodes->getPlaceholderCount();
 
         return $result;
     }
@@ -922,7 +906,6 @@ class ImportService extends Component
             $result['skipped']      = true;
             $result['success']      = true;
             $result['sectionLabel'] = $contentType;
-            $result['placeholdersDropped'] = ContentIQImporter::$plugin->nodes->getPlaceholderCount();
             $result['warnings'][]   = "Content type '{$contentType}' has no mapping — page skipped. Map it under ContentiQ → Mappings (or add a content_types override in config/contentiq.php).";
             Craft::warning("ContentIQImporter: unmapped content_type '{$contentType}' for page '{$slug}' — skipped.", __METHOD__);
 
@@ -1070,7 +1053,6 @@ class ImportService extends Component
 
         if ($dryRun) {
             $result['success'] = true;
-            $result['placeholdersDropped'] = ContentIQImporter::$plugin->nodes->getPlaceholderCount();
 
             return $result;
         }
@@ -1091,7 +1073,6 @@ class ImportService extends Component
 
             $result['entryId'] = $existing->id;
             $result['success'] = true;
-            $result['placeholdersDropped'] = ContentIQImporter::$plugin->nodes->getPlaceholderCount();
 
             return $result;
         }
@@ -1118,7 +1099,6 @@ class ImportService extends Component
 
         $result['entryId'] = $entry->id;
         $result['success'] = true;
-        $result['placeholdersDropped'] = ContentIQImporter::$plugin->nodes->getPlaceholderCount();
 
         return $result;
     }
@@ -1177,11 +1157,6 @@ class ImportService extends Component
             // Matrix/hero/SEO/card image field.
             'pageAssets'    => $this->_emptyAssetCounts(),
             'pageFiles'     => $this->_emptyAssetCounts(),
-            // Bracketed-placeholder nodes (e.g. "[Product grid]") dropped
-            // from this page's rendered content — see
-            // NodesRenderer::getPlaceholderCount(); set from the counter at
-            // each return point below (mirrors 'success').
-            'placeholdersDropped' => 0,
         ];
     }
 
@@ -1210,10 +1185,6 @@ class ImportService extends Component
         Craft::error("ContentIQImporter: $message", __METHOD__);
         $result['success'] = false;
         $result['error']   = $message;
-        // Single choke point for every failure return in importPage() and
-        // _importCollectionChild() — captures whatever this page's rendering
-        // dropped before the failure, same as a success return would.
-        $result['placeholdersDropped'] = ContentIQImporter::$plugin->nodes->getPlaceholderCount();
 
         return $result;
     }

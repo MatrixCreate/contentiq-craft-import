@@ -1628,234 +1628,96 @@ check(
 );
 
 // -----------------------------------------------------------------------------
-// NodesRenderer — placeholder stripping (standalone bracketed strings like
-// "[Image gallery]", "[Product grid]", "[Testimonials]" — layout aides that
-// must never reach a richText field). Whole-node only:
-// NodesRenderer::PLACEHOLDER_PATTERN requires the ENTIRE trimmed text to be
-// one bracketed string, so a bracket occurring inside a sentence is left
-// completely untouched — that's what protects legitimate content like
-// "[sic]" mid-sentence, footnote markers, legal brackets, etc. Unconditional
-// — no config key, always on.
+// Bracketed placeholder text is CONTENT — it is written through to richText.
+//
+// ContentiQ authors leave standalone bracketed strings ("[Infographic 1]",
+// "[Client quote]", "[Product category grid]") in their copy as notes to the
+// CMS-side editor. They are content and must survive the import intact. The
+// ONE exception is the Collection Listing intro, below.
 // -----------------------------------------------------------------------------
-echo "\nNodesRenderer — placeholder stripping\n";
+echo "\nNodesRenderer — bracketed placeholders are kept\n";
 
 check(
-    'render(): "[Image gallery]" as a whole paragraph is dropped',
-    '',
+    'render(): a standalone bracketed paragraph is rendered, not dropped',
+    '<p>[Infographic 1]</p><p>Real copy.</p>',
     $nodesRenderer->render([
-        ['type' => 'paragraph', 'text' => '[Image gallery]'],
+        ['type' => 'paragraph', 'text' => '[Infographic 1]'],
+        ['type' => 'paragraph', 'text' => 'Real copy.'],
     ]),
 );
 
+// The Body Text path for collection children (the regression that prompted
+// this: [Infographic 1]/[Infographic 2] vanishing from a News entry).
 check(
-    'renderDocument(): "[Image gallery]" as a whole paragraph is dropped',
-    '',
+    'renderDocument(): a standalone bracketed paragraph survives the Body Text path',
+    '<p>[Infographic 1]</p><p>Real copy.</p>',
     $nodesRenderer->renderDocument([
-        ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => '[Image gallery]']]],
+        ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => '[Infographic 1]']]],
+        ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Real copy.']]],
     ]),
 );
 
 check(
-    'render(): "[Product grid]" as a heading is dropped',
-    '',
+    'render(): a bracketed list item is kept alongside its siblings',
+    '<ul><li>Real item</li><li>[Product category grid]</li></ul>',
     $nodesRenderer->render([
-        ['type' => 'heading', 'level' => 2, 'text' => '[Product grid]'],
+        ['type' => 'list', 'items' => ['Real item', '[Product category grid]']],
     ]),
 );
 
 check(
-    'renderDocument(): "[Product grid]" as a heading is dropped',
-    '',
-    $nodesRenderer->renderDocument([
-        ['type' => 'heading', 'attrs' => ['level' => 2], 'content' => [['type' => 'text', 'text' => '[Product grid]']]],
-    ]),
-);
-
-check(
-    'render(): "[Testimonials]" as a whole blockquote is dropped',
-    '',
+    'render(): a bracketed heading is kept',
+    '<h2>[Client quote]</h2>',
     $nodesRenderer->render([
-        ['type' => 'blockquote', 'text' => '[Testimonials]'],
+        ['type' => 'heading', 'level' => 2, 'text' => '[Client quote]'],
     ]),
 );
 
-// A placeholder as one list item — that item is dropped, siblings kept.
-check(
-    'render(): a placeholder list item is dropped, siblings kept',
-    '<ul><li>Real item one</li><li>Real item two</li></ul>',
-    $nodesRenderer->render([
-        [
-            'type'  => 'list',
-            'items' => ['Real item one', '[Product grid]', 'Real item two'],
-        ],
-    ]),
-);
-
-check(
-    'renderDocument(): a placeholder listItem is dropped, siblings kept',
-    '<ul><li>Real item one</li><li>Real item two</li></ul>',
-    $nodesRenderer->renderDocument([
-        [
-            'type'    => 'bulletList',
-            'content' => [
-                ['type' => 'listItem', 'content' => [['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Real item one']]]]],
-                ['type' => 'listItem', 'content' => [['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => '[Product grid]']]]]],
-                ['type' => 'listItem', 'content' => [['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Real item two']]]]],
-            ],
-        ],
-    ]),
-);
-
-// A list of ONLY placeholders — the whole list is dropped, no empty <ul></ul>.
-check(
-    'render(): a list of only placeholders is dropped entirely — no empty <ul>',
-    '',
-    $nodesRenderer->render([
-        [
-            'type'  => 'list',
-            'items' => ['[Product grid]', '[Case study listing]'],
-        ],
-    ]),
-);
-
-check(
-    'renderDocument(): a bulletList of only placeholder items is dropped entirely — no empty <ul>',
-    '',
-    $nodesRenderer->renderDocument([
-        [
-            'type'    => 'bulletList',
-            'content' => [
-                ['type' => 'listItem', 'content' => [['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => '[Product grid]']]]]],
-                ['type' => 'listItem', 'content' => [['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => '[Case study listing]']]]]],
-            ],
-        ],
-    ]),
-);
-
-// The anti-regression test that matters most: a bracket occurring INSIDE a
-// sentence must never be touched.
-check(
-    'render(): a bracket inside a sentence is completely untouched',
-    '<p>our range [see fig 3] is wide</p>',
-    $nodesRenderer->render([
-        ['type' => 'paragraph', 'text' => 'our range [see fig 3] is wide'],
-    ]),
-);
-
-check(
-    'renderDocument(): a bracket inside a sentence is completely untouched',
-    '<p>our range [see fig 3] is wide</p>',
-    $nodesRenderer->renderDocument([
-        ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'our range [see fig 3] is wide']]],
-    ]),
-);
-
-check(
-    'render(): a bracket inside a blockquote sentence is completely untouched',
-    '<blockquote><p>the study [ref. 12] found otherwise</p></blockquote>',
-    $nodesRenderer->render([
-        ['type' => 'blockquote', 'text' => 'the study [ref. 12] found otherwise'],
-    ]),
-);
-
-// The whole-node rule is unconditional, not a word list — a legitimate
-// "[sic]" that IS the entire node's text is dropped too, same as any other
-// bracketed placeholder. Asserted explicitly so it's never mistaken for a
-// regression later.
-check(
-    '"[sic]" alone as a whole paragraph IS dropped (whole-node rule, not a word list)',
-    '',
-    $nodesRenderer->render([
-        ['type' => 'paragraph', 'text' => '[sic]'],
-    ]),
-);
-
-// Bracketed text carried in content[] (inline nodes with marks), not just
-// the plain `text` string — marks must never rescue a placeholder.
-check(
-    'render(): a placeholder inside content[] (with a bold mark) is still dropped',
-    '',
-    $nodesRenderer->render([
-        [
-            'type'    => 'paragraph',
-            'text'    => '[Testimonials]',
-            'content' => [
-                ['type' => 'text', 'text' => '[Testimonials]', 'marks' => [['type' => 'bold']]],
-            ],
-        ],
-    ]),
-);
-
-// extractHeading(): a placeholder H1 must never become the lifted title — it's
-// dropped from the body like any other placeholder, and extraction keeps
-// scanning for the genuine H1.
-$extracted = $nodesRenderer->extractHeading([
-    ['type' => 'heading', 'attrs' => ['level' => 1], 'content' => [['type' => 'text', 'text' => '[Product grid]']]],
-    ['type' => 'heading', 'attrs' => ['level' => 1], 'content' => [['type' => 'text', 'text' => 'Real Title']]],
-    ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Body copy.']]],
-], 1);
-check('extractHeading(): a placeholder H1 is never lifted as the title', 'Real Title', $extracted['text']);
-check(
-    'extractHeading(): the placeholder H1 never reaches the rendered body',
-    '<p>Body copy.</p>',
-    $nodesRenderer->renderDocument($extracted['doc']),
-);
-
-// extractHeading(): when the ONLY H1-level heading is a placeholder, nothing
-// is extracted (no fake title), and the placeholder still never reaches the
-// rendered body once renderDocument() runs on the returned (here: untouched)
-// doc.
-$onlyPlaceholderDoc = [
-    ['type' => 'heading', 'attrs' => ['level' => 1], 'content' => [['type' => 'text', 'text' => '[Product grid]']]],
-    ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Body copy.']]],
+// extractHeading() must not treat a bracketed H1 as special either — it is a
+// real heading and a legitimate title candidate.
+$bracketDoc = [
+    ['type' => 'heading', 'attrs' => ['level' => 1], 'content' => [['type' => 'text', 'text' => '[Infographic 1]']]],
 ];
-$extractedOnlyPlaceholder = $nodesRenderer->extractHeading($onlyPlaceholderDoc, 1);
-check('extractHeading(): no real H1 present (only a placeholder) → nothing extracted', null, $extractedOnlyPlaceholder['text']);
 check(
-    'extractHeading(): the placeholder heading still never reaches the rendered body via renderDocument()',
-    '<p>Body copy.</p>',
-    $nodesRenderer->renderDocument($extractedOnlyPlaceholder['doc']),
+    'extractHeading(): a bracketed H1 is treated as an ordinary heading',
+    '[Infographic 1]',
+    $nodesRenderer->extractHeading($bracketDoc, 1)['text'] ?? null,
+);
+
+// The Text / Text & Media / Custom / Global block handlers all reach richText
+// through render(), so one assertion per handler proves the whole set.
+echo "\nMatrixBuilder — blocks keep bracketed placeholders\n";
+
+$keptNodes = [
+    ['type' => 'paragraph', 'text' => '[Infographic 2]'],
+    ['type' => 'paragraph', 'text' => 'Real copy.'],
+];
+
+check(
+    '_handleNodes(): keeps bracketed text (Text, Custom, Global, Image Gallery)',
+    '<p>[Infographic 2]</p><p>Real copy.</p>',
+    callPrivate($matrixBuilder, '_handleNodes', ['richText', $keptNodes])['richText'] ?? null,
+);
+
+check(
+    '_handleMediaNodes(): keeps bracketed text (Text & Media)',
+    '<p>[Infographic 2]</p><p>Real copy.</p>',
+    callPrivate($matrixBuilder, '_handleMediaNodes', ['richText', $keptNodes])['richText'] ?? null,
 );
 
 // -----------------------------------------------------------------------------
-// NodesRenderer — placeholder count (per-page counter threaded into the sync
-// report — see getPlaceholderCount()/resetPlaceholderCount()).
+// The ONE exception — Collection Listing intros.
+//
+// _handleCollectionListingNodes() runs its own narrow regex
+// (/^\[[^\[\]]*\b(listings?|grids?)\b[^\[\]]*\]$/i) because the rendered listing
+// occupies that space in Craft, so "[Blog Listing]" would sit as literal text
+// directly above the real listing. Vocabulary-limited on purpose: it only ever
+// matches the words "listing" and "grid", and only on this one block.
 // -----------------------------------------------------------------------------
-echo "\nNodesRenderer — placeholder count\n";
-
-$countingRenderer = new \matrixcreate\contentiqimporter\services\NodesRenderer();
-$countingRenderer->resetPlaceholderCount();
-check('resetPlaceholderCount(): starts at zero', 0, $countingRenderer->getPlaceholderCount());
-
-$countingRenderer->render([
-    ['type' => 'paragraph', 'text' => '[Image gallery]'],
-    ['type' => 'paragraph', 'text' => 'Real content.'],
-    ['type' => 'list', 'items' => ['Real item', '[Product grid]']],
-]);
-check('render(): counts one dropped paragraph + one dropped list item', 2, $countingRenderer->getPlaceholderCount());
-
-$countingRenderer->resetPlaceholderCount();
-$countingRenderer->renderDocument([
-    ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => '[Testimonials]']]],
-]);
-check('resetPlaceholderCount() zeroes the counter for the next page', 1, $countingRenderer->getPlaceholderCount());
-
-// -----------------------------------------------------------------------------
-// MatrixBuilder::_handleCollectionListingNodes() — superseded by the general
-// placeholder rule. NodesRenderer::render() now strips ALL standalone
-// bracketed strings (no vocabulary check), a strict superset of the old
-// narrow `/^\[[^\[\]]*\b(listings?|grids?)\b[^\[\]]*\]$/i` regex this method
-// used to run itself. These are the two examples from that regex's own
-// former docblock — still dropped under the general rule, with no
-// listing-specific filtering code left in MatrixBuilder at all (see
-// _handleCollectionListingNodes()'s current body — it's just a render() call).
-// Reuses $matrixBuilder/ContentIQImporter::$plugin (with the real
-// NodesRenderer) already set up above for the collection-child blocks[] tests.
-// -----------------------------------------------------------------------------
-echo "\nMatrixBuilder — collection listing placeholders (old narrow regex superseded)\n";
+echo "\nMatrixBuilder — collection listing intro placeholders (narrow regex)\n";
 
 check(
-    '_handleCollectionListingNodes(): "[Product grid]" is still dropped, real copy kept',
+    '_handleCollectionListingNodes(): "[Product grid]" is dropped, real copy kept',
     '<p>Real intro copy.</p>',
     callPrivate($matrixBuilder, '_handleCollectionListingNodes', [
         'introHtml',
@@ -1867,7 +1729,7 @@ check(
 );
 
 check(
-    '_handleCollectionListingNodes(): "[Case study listing]" is still dropped',
+    '_handleCollectionListingNodes(): "[Case study listing]" is dropped',
     '',
     callPrivate($matrixBuilder, '_handleCollectionListingNodes', [
         'introHtml',
@@ -1877,93 +1739,101 @@ check(
     ])['introHtml'] ?? null,
 );
 
+// A bracketed string WITHOUT the listing/grid vocabulary is content even here.
+check(
+    '_handleCollectionListingNodes(): "[Infographic 1]" carries no listing vocabulary, so it is kept',
+    '<p>[Infographic 1]</p>',
+    callPrivate($matrixBuilder, '_handleCollectionListingNodes', [
+        'introHtml',
+        [
+            ['type' => 'paragraph', 'text' => '[Infographic 1]'],
+        ],
+    ])['introHtml'] ?? null,
+);
+
 // -----------------------------------------------------------------------------
-// MatrixBuilder — the Custom block KEEPS bracketed placeholder text.
+// The second exception — Image Gallery richText.
 //
-// Custom content is free markup an editor typed by hand in ContentiQ, so a
-// standalone "[Client quote]" there is content they meant, not a layout aide
-// standing in for something the CMS renders. It is the one block exempt from
-// NodesRenderer's placeholder strip, via the 'customNodes' handler. The
-// contrast tests below run the SAME nodes through _handleNodes() (what global
-// and image_gallery use) to prove the exemption is per-handler and hasn't
-// leaked into every block.
+// Same rationale and same narrow shape as the Collection Listing intro above:
+// the rendered gallery occupies that space in Craft, so "[Image gallery]"
+// would sit as literal text directly above the real images. Vocabulary-limited
+// to "gallery"/"galleries" and scoped to this one block.
 // -----------------------------------------------------------------------------
-echo "\nMatrixBuilder — Custom block keeps placeholders\n";
+echo "\nMatrixBuilder — Image Gallery placeholders (narrow regex)\n";
 
-$customPlaceholderNodes = [
-    ['type' => 'paragraph', 'text' => '[Client quote]'],
-    ['type' => 'paragraph', 'text' => 'Real copy.'],
-];
-
+// Both casings occur in real AA data.
 check(
-    '_handleCustomNodes(): "[Client quote]" reaches richText as ordinary text',
-    '<p>[Client quote]</p><p>Real copy.</p>',
-    callPrivate($matrixBuilder, '_handleCustomNodes', ['richText', $customPlaceholderNodes])['richText'] ?? null,
-);
-
-check(
-    '_handleNodes(): the same nodes on any OTHER block still drop the placeholder',
-    '<p>Real copy.</p>',
-    callPrivate($matrixBuilder, '_handleNodes', ['richText', $customPlaceholderNodes])['richText'] ?? null,
-);
-
-check(
-    '_handleCustomNodes(): "[Product category grid]" as a whole paragraph is kept too',
-    '<p>[Product category grid]</p>',
-    callPrivate($matrixBuilder, '_handleCustomNodes', [
+    '_handleGalleryNodes(): "[Image gallery]" is dropped, real caption kept',
+    '<p>Real caption.</p>',
+    callPrivate($matrixBuilder, '_handleGalleryNodes', [
         'richText',
-        [['type' => 'paragraph', 'text' => '[Product category grid]']],
+        [
+            ['type' => 'paragraph', 'text' => '[Image gallery]'],
+            ['type' => 'paragraph', 'text' => 'Real caption.'],
+        ],
     ])['richText'] ?? null,
 );
 
-// A placeholder list item, and a list of ONLY placeholders — both survive on
-// Custom, where the strip's "drop the emptied list too" rule never runs.
 check(
-    '_handleCustomNodes(): a placeholder list item is kept alongside its siblings',
-    '<ul><li>Real item</li><li>[Product grid]</li></ul>',
-    callPrivate($matrixBuilder, '_handleCustomNodes', [
-        'richText',
-        [['type' => 'list', 'items' => ['Real item', '[Product grid]']]],
-    ])['richText'] ?? null,
-);
-
-// Non-array/empty input must behave exactly as _handleNodes() does.
-check(
-    '_handleCustomNodes(): a non-array value renders an empty string, as _handleNodes() does',
+    '_handleGalleryNodes(): "[Image Gallery]" (title case) is dropped too',
     '',
-    callPrivate($matrixBuilder, '_handleCustomNodes', ['richText', null])['richText'] ?? null,
+    callPrivate($matrixBuilder, '_handleGalleryNodes', [
+        'richText',
+        [['type' => 'paragraph', 'text' => '[Image Gallery]']],
+    ])['richText'] ?? null,
 );
 
-// The strip never runs on Custom, so nothing is counted into the per-page
-// tally the sync report and CLI show — "0 placeholders stripped" is correct
-// there, because none were.
-$customCountingRenderer = new \matrixcreate\contentiqimporter\services\NodesRenderer();
-$customCountingRenderer->resetPlaceholderCount();
-$customCountingRenderer->render($customPlaceholderNodes, false);
 check(
-    'render($nodes, false): kept placeholders are never added to the drop counter',
-    0,
-    $customCountingRenderer->getPlaceholderCount(),
+    '_handleGalleryNodes(): bare "[Gallery]" is dropped',
+    '',
+    callPrivate($matrixBuilder, '_handleGalleryNodes', [
+        'richText',
+        [['type' => 'paragraph', 'text' => '[Gallery]']],
+    ])['richText'] ?? null,
 );
 
-// The wiring itself — defaults.php must point the Custom block's 'nodes' key
-// at 'customNodes'. Without this assertion the exemption regresses silently:
-// every test above calls the handler directly and would still pass.
-$customBlockDefaults = require __DIR__ . '/../src/config/defaults.php';
+// Vocabulary-limited: a bracketed string without "gallery" is content.
 check(
-    "defaults.php: the custom block's 'nodes' key uses the 'customNodes' handler",
-    'customNodes',
-    $customBlockDefaults['custom']['outerFields']['nodes'][1] ?? null,
+    '_handleGalleryNodes(): "[Client quote]" carries no gallery vocabulary, so it is kept',
+    '<p>[Client quote]</p>',
+    callPrivate($matrixBuilder, '_handleGalleryNodes', [
+        'richText',
+        [['type' => 'paragraph', 'text' => '[Client quote]']],
+    ])['richText'] ?? null,
+);
+
+// Mid-sentence brackets are never touched, matching the listing handler.
+check(
+    '_handleGalleryNodes(): "gallery" inside a sentence is untouched',
+    '<p>See the [image gallery] below.</p>',
+    callPrivate($matrixBuilder, '_handleGalleryNodes', [
+        'richText',
+        [['type' => 'paragraph', 'text' => 'See the [image gallery] below.']],
+    ])['richText'] ?? null,
+);
+
+// Block-scoped: AA page 2730 (brookside) has "[Image gallery]" typed inside a
+// CUSTOM block. That is content and must survive — the strip is per-handler.
+check(
+    '_handleNodes(): "[Image gallery]" inside a Custom block is NOT stripped',
+    '<p>[Image gallery]</p>',
+    callPrivate($matrixBuilder, '_handleNodes', [
+        'richText',
+        [['type' => 'paragraph', 'text' => '[Image gallery]']],
+    ])['richText'] ?? null,
+);
+
+// Wiring: defaults.php must route the block through the new handler.
+$galleryDefaults = require __DIR__ . '/../src/config/defaults.php';
+check(
+    "defaults.php: image_gallery's 'nodes' key uses the 'galleryNodes' handler",
+    'galleryNodes',
+    $galleryDefaults['image_gallery']['outerFields']['nodes'][1] ?? null,
 );
 check(
-    "defaults.php: the global block still uses the stripping 'nodes' handler",
+    "defaults.php: the custom block still uses the plain 'nodes' handler",
     'nodes',
-    $customBlockDefaults['global']['outerFields']['nodes'][1] ?? null,
-);
-check(
-    "defaults.php: the image_gallery block still uses the stripping 'nodes' handler",
-    'nodes',
-    $customBlockDefaults['image_gallery']['outerFields']['nodes'][1] ?? null,
+    $galleryDefaults['custom']['outerFields']['nodes'][1] ?? null,
 );
 
 // -----------------------------------------------------------------------------

@@ -197,16 +197,11 @@ return [
         'innerMatrix' => null,
     ],
 
-    // The ONLY block that keeps bracketed placeholder text. Custom content is
-    // free markup typed by hand in ContentiQ's markup editor, so a standalone
-    // "[Client quote]" there is content the editor meant, not a layout aide —
-    // hence the 'customNodes' handler rather than 'nodes'. Every other block
-    // drops such nodes (NodesRenderer::PLACEHOLDER_PATTERN).
     'custom' => [
         'outerType'   => 'contentiqCustom',
         'outerFields' => [
-            'nodes'  => ['richText',        'customNodes'],  // all content nodes → CKEditor HTML, placeholders kept
-            'images' => ['contentiqImages', 'images'],       // optional multiple assets (up to 10)
+            'nodes'  => ['richText',        'nodes'],   // all content nodes → CKEditor HTML
+            'images' => ['contentiqImages', 'images'],  // optional multiple assets (up to 10)
         ],
         'innerMatrix' => null,
     ],
@@ -225,7 +220,11 @@ return [
             'source' => ['imageSource', 'gallerySource'],
             'images' => ['images',      'images'],  // reuses the same handler as 'custom' — no cap
             'folder' => ['assetFolder', 'assetFolder'],
-            'nodes'  => ['richText',    'nodes'],
+            // Intro/caption nodes → CKEditor HTML, minus bracketed gallery
+            // placeholders like "[Image gallery]" — the rendered gallery takes
+            // that space, so the placeholder text is dropped on import. Narrow
+            // and block-scoped, exactly like collection_listing below.
+            'nodes'  => ['richText',    'galleryNodes'],
         ],
         'innerMatrix' => null,
     ],

@@ -773,7 +773,6 @@ class MatrixBuilder extends Component
     ): array {
         return match ($handlerType) {
             'nodes'                  => $this->_handleNodes($craftHandle, $value),
-            'customNodes'            => $this->_handleCustomNodes($craftHandle, $value),
             'mediaNodes'             => $this->_handleMediaNodes($craftHandle, $value),
             'textMediaMedia'         => $this->_handleTextMediaMedia($value, $imageReport, $dryRun),
             'image'                  => $this->_handleImage($craftHandle, $value, $imageReport, $dryRun),
@@ -790,6 +789,7 @@ class MatrixBuilder extends Component
             'uspContent'             => $this->_handleUspContent($craftHandle, $value),
             'collectionSection'      => $this->_handleCollectionSection($craftHandle, $value),
             'collectionListingNodes' => $this->_handleCollectionListingNodes($craftHandle, $value),
+            'galleryNodes'           => $this->_handleGalleryNodes($craftHandle, $value),
             'gallerySource'          => $this->_handleGallerySource($craftHandle, $value),
             'assetFolder'            => $this->_handleAssetFolder($craftHandle, $value, $dryRun),
             default                  => $this->_handlePassThrough($craftHandle, $value),
@@ -806,35 +806,6 @@ class MatrixBuilder extends Component
     private function _handleNodes(string $handle, mixed $value): array
     {
         $html = ContentIQImporter::$plugin->nodes->render(is_array($value) ? $value : []);
-
-        return [$handle => $html];
-    }
-
-    /**
-     * Renders a ContentIQ nodes array to HTML, KEEPING bracketed placeholder
-     * text — the Custom block's `nodes` handler.
-     *
-     * Identical to _handleNodes() but for the second render() argument. Every
-     * other block treats a standalone bracketed string ("[Client quote]",
-     * "[Product category grid]") as a layout aide marking where the CMS will
-     * render something else, and drops it — see
-     * NodesRenderer::PLACEHOLDER_PATTERN. The Custom block is different: its
-     * content is free markup an editor typed by hand in ContentiQ, so those
-     * brackets are content the editor meant to keep, and they must reach
-     * richText verbatim.
-     *
-     * Because the strip never runs here, these nodes are also never counted
-     * into the per-page placeholder tally
-     * (NodesRenderer::getPlaceholderCount()) that the sync report and CLI
-     * show — which is correct: nothing was dropped.
-     *
-     * @param string $handle
-     * @param mixed  $value
-     * @return array<string, string>
-     */
-    private function _handleCustomNodes(string $handle, mixed $value): array
-    {
-        $html = ContentIQImporter::$plugin->nodes->render(is_array($value) ? $value : [], false);
 
         return [$handle => $html];
     }
@@ -1000,18 +971,14 @@ class MatrixBuilder extends Component
     }
 
     /**
-     * Renders Collection Listing intro nodes.
+     * Renders Collection Listing intro nodes, dropping bracketed listing
+     * placeholders first.
      *
      * ContentiQ authors mark where the listing sits with a paragraph like
-     * "[Blog Listing]", "[Team Listing]" or "[Listing Grid]" — the rendered
-     * listing takes that space in Craft, so it must never appear as literal
-     * text. This used to run its own narrow regex here
-     * (`/^\[[^\[\]]*\b(listings?|grids?)\b[^\[\]]*\]$/i`); that's now
-     * superseded by NodesRenderer's general, vocabulary-free placeholder rule
-     * (any node whose entire text is one bracketed string — see
-     * NodesRenderer::PLACEHOLDER_PATTERN), which is a strict superset and
-     * runs unconditionally inside render() itself. No separate filtering
-     * needed here any more — same shape as _handleNodes().
+     * "[Blog Listing]", "[Team Listing]" or "[Listing Grid]". The rendered
+     * listing takes that space in Craft, so any paragraph whose entire text is
+     * square-bracketed and contains the word "listing" or "grid" is dropped
+     * before the remaining nodes render to HTML.
      *
      * @param string $handle
      * @param mixed  $value
@@ -1020,6 +987,55 @@ class MatrixBuilder extends Component
     private function _handleCollectionListingNodes(string $handle, mixed $value): array
     {
         $nodes = is_array($value) ? $value : [];
+
+        $nodes = array_values(array_filter($nodes, function (mixed $node): bool {
+            if (!is_array($node) || ($node['type'] ?? '') !== 'paragraph') {
+                return true;
+            }
+
+            $text = is_scalar($node['text'] ?? null) ? trim((string)$node['text']) : '';
+
+            return !preg_match('/^\[[^\[\]]*\b(listings?|grids?)\b[^\[\]]*\]$/i', $text);
+        }));
+
+        return [$handle => ContentIQImporter::$plugin->nodes->render($nodes)];
+    }
+
+    /**
+     * Renders Image Gallery richText nodes, dropping bracketed gallery
+     * placeholders first.
+     *
+     * The mirror of _handleCollectionListingNodes(), for the same reason and
+     * with the same deliberately narrow shape. ContentiQ authors mark where
+     * the gallery sits with a paragraph like "[Image gallery]" or
+     * "[Gallery]"; the rendered gallery takes that space in Craft, so the
+     * placeholder would otherwise sit as literal text directly above the real
+     * images. Any paragraph whose entire text is square-bracketed and
+     * contains the word "gallery" (or "galleries") is dropped before the
+     * remaining nodes render to HTML.
+     *
+     * Vocabulary-limited and scoped to this ONE block on purpose. Bracketed
+     * text is content everywhere else — including a "[Image gallery]" an
+     * author typed inside a Custom block, which is not this handler and is
+     * written through verbatim. See docs/block-mapping.md.
+     *
+     * @param string $handle
+     * @param mixed  $value
+     * @return array<string, string>
+     */
+    private function _handleGalleryNodes(string $handle, mixed $value): array
+    {
+        $nodes = is_array($value) ? $value : [];
+
+        $nodes = array_values(array_filter($nodes, function (mixed $node): bool {
+            if (!is_array($node) || ($node['type'] ?? '') !== 'paragraph') {
+                return true;
+            }
+
+            $text = is_scalar($node['text'] ?? null) ? trim((string)$node['text']) : '';
+
+            return !preg_match('/^\[[^\[\]]*\b(galler(?:y|ies))\b[^\[\]]*\]$/i', $text);
+        }));
 
         return [$handle => ContentIQImporter::$plugin->nodes->render($nodes)];
     }
