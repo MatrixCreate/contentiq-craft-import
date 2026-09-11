@@ -83,6 +83,12 @@ class ImportService extends Component
     {
         $result = $this->_emptyResult();
 
+        // ContentIQ's own top-level `warnings[]` — see _mergeProducerWarnings().
+        // Applied first, before any validation/fatal-return branch below, so
+        // it survives on every path out of this method (success, skip, or
+        // fatal), on both dry runs and real runs.
+        $result['warnings'] = $this->_mergeProducerWarnings($data, $result['warnings']);
+
         try {
             // -----------------------------------------------------------------------
             // 1. Resolve config (once per process — cached after first call).
@@ -788,14 +794,22 @@ class ImportService extends Component
             $config       = $this->_getConfig();
             $assetTargets = $this->_preparePageAssetTargets($data, $config, $dryRun);
 
-            return $this->_importPageAssets($data, $assetTargets, $dryRun);
+            $assetsResult             = $this->_importPageAssets($data, $assetTargets, $dryRun);
+            $assetsResult['warnings'] = $this->_mergeProducerWarnings($data, $assetsResult['warnings']);
+
+            return $assetsResult;
         } catch (Throwable $e) {
             Craft::error('ContentIQImporter: locked-entry asset filing failed: ' . $e->getMessage(), __METHOD__);
 
             return [
                 'pageAssets' => $this->_emptyAssetCounts(),
                 'pageFiles'  => $this->_emptyAssetCounts(),
-                'warnings'   => ['Could not file page assets: ' . $e->getMessage()],
+                // ContentIQ's own top-level warnings[] still surface here —
+                // see _mergeProducerWarnings() — this is a locked-page result
+                // shown directly in the sync report (SyncJob/CpController/
+                // ImportController), and producer facts apply even when this
+                // narrower assets-only path itself throws.
+                'warnings'   => $this->_mergeProducerWarnings($data, ['Could not file page assets: ' . $e->getMessage()]),
             ];
         }
     }
@@ -896,6 +910,14 @@ class ImportService extends Component
     private function _importCollectionChild(array $data, string $contentType, array $config, bool $dryRun, array $result): array
     {
         $result['contentType'] = $contentType;
+
+        // ContentIQ's own top-level `warnings[]` — see _mergeProducerWarnings().
+        // $result generally already carries these (importPage(), this
+        // method's only caller, merges them before delegating here), but
+        // this method also merges its own copy so it behaves correctly if
+        // ever called directly — deduped, so this is a no-op when the
+        // caller already merged the same list.
+        $result['warnings'] = $this->_mergeProducerWarnings($data, $result['warnings']);
 
         $slug  = $result['slug'];
         $title = $result['title'];
@@ -1205,6 +1227,56 @@ class ImportService extends Component
         $result['error']   = $message;
 
         return $result;
+    }
+
+    /**
+     * Merges ContentIQ's own top-level `warnings: string[]` (always present
+     * on the wire, often empty — e.g. "Inline image 'foo/bar.jpg' could not
+     * be resolved and was omitted from Body Text.") into a page result's
+     * warnings, prefixed `ContentiQ: ` so they read as distinct from
+     * warnings this plugin raises itself.
+     *
+     * These are producer-side facts about what happened at export time, not
+     * an outcome of this import — so every per-page entry point applies this
+     * on BOTH dry runs and real runs, and as early as possible in its own
+     * pipeline (before any validation/fatal-return branch), so a warning
+     * still surfaces even when the page otherwise fails or is skipped.
+     *
+     * Read defensively: `$data['warnings']` missing or not itself an array
+     * (an older ContentiQ payload predating this key, or a malformed one)
+     * adds nothing — old payloads behave exactly as before this method
+     * existed. Non-string items (int, null, nested array, …) are dropped
+     * silently, never a fatal. Deduped against `$existingWarnings` by exact
+     * string match, so re-running this (e.g. importPage() merging once,
+     * then delegating to _importCollectionChild() which merges again) or a
+     * future ContentiQ version independently reporting something the
+     * plugin also warns about never shows the same line twice.
+     *
+     * @param array $data             Decoded top-level JSON object for a single page.
+     * @param array $existingWarnings The result's warnings so far.
+     * @return string[] $existingWarnings with any new, deduped, prefixed producer warnings appended.
+     */
+    private function _mergeProducerWarnings(array $data, array $existingWarnings): array
+    {
+        $producerWarnings = $data['warnings'] ?? null;
+
+        if (!is_array($producerWarnings)) {
+            return $existingWarnings;
+        }
+
+        foreach ($producerWarnings as $warning) {
+            if (!is_string($warning)) {
+                continue;
+            }
+
+            $prefixed = 'ContentiQ: ' . $warning;
+
+            if (!in_array($prefixed, $existingWarnings, true)) {
+                $existingWarnings[] = $prefixed;
+            }
+        }
+
+        return $existingWarnings;
     }
 
     /**

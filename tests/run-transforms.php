@@ -1986,6 +1986,86 @@ check(
 );
 
 // -----------------------------------------------------------------------------
+// ContentIQ producer warnings — the wire's top-level `warnings: string[]`
+// (always present, often empty) surfaced into a page result, prefixed
+// "ContentiQ: " — see ImportService::_mergeProducerWarnings().
+// -----------------------------------------------------------------------------
+echo "\nImportService — _mergeProducerWarnings() (ContentIQ top-level warnings[])\n";
+
+check(
+    '_mergeProducerWarnings(): two producer warnings both appear, prefixed',
+    [
+        "ContentiQ: Inline image 'foo/bar.jpg' could not be resolved and was omitted from Body Text.",
+        'ContentiQ: Something else the producer flagged.',
+    ],
+    callPrivate($importService, '_mergeProducerWarnings', [
+        [
+            'warnings' => [
+                "Inline image 'foo/bar.jpg' could not be resolved and was omitted from Body Text.",
+                'Something else the producer flagged.',
+            ],
+        ],
+        [],
+    ]),
+);
+
+check(
+    '_mergeProducerWarnings(): existing plugin-raised warnings are kept, producer warning appended after',
+    [
+        'Plugin-raised warning.',
+        "ContentiQ: Inline image 'foo/bar.jpg' could not be resolved and was omitted from Body Text.",
+    ],
+    callPrivate($importService, '_mergeProducerWarnings', [
+        ['warnings' => ["Inline image 'foo/bar.jpg' could not be resolved and was omitted from Body Text."]],
+        ['Plugin-raised warning.'],
+    ]),
+);
+
+// Old payloads without the key must behave exactly as today — nothing added,
+// the existing warnings array comes back unchanged.
+check(
+    '_mergeProducerWarnings(): payload without the "warnings" key is unchanged',
+    ['Plugin-raised warning.'],
+    callPrivate($importService, '_mergeProducerWarnings', [
+        ['document' => ['slug' => 'no-warnings-key']],
+        ['Plugin-raised warning.'],
+    ]),
+);
+
+// A non-array `warnings` value (malformed payload) is defensive-dropped, not fatal.
+check(
+    '_mergeProducerWarnings(): non-array "warnings" value is dropped, no fatal',
+    ['Plugin-raised warning.'],
+    callPrivate($importService, '_mergeProducerWarnings', [
+        ['warnings' => 'not-an-array'],
+        ['Plugin-raised warning.'],
+    ]),
+);
+
+// A `warnings` array containing non-string items drops just those items —
+// the string items alongside them are still merged, no fatal.
+check(
+    '_mergeProducerWarnings(): non-string items in the array are dropped, string siblings kept',
+    ['ContentiQ: A real warning.'],
+    callPrivate($importService, '_mergeProducerWarnings', [
+        ['warnings' => [123, null, ['nested' => 'array'], 'A real warning.', false]],
+        [],
+    ]),
+);
+
+// Dedup: an identical prefixed entry already present (e.g. importPage()
+// merging once, then _importCollectionChild() merging again for the same
+// page) is not duplicated.
+check(
+    '_mergeProducerWarnings(): dedupes against an identical existing entry',
+    ['ContentiQ: Duplicate warning.'],
+    callPrivate($importService, '_mergeProducerWarnings', [
+        ['warnings' => ['Duplicate warning.']],
+        ['ContentiQ: Duplicate warning.'],
+    ]),
+);
+
+// -----------------------------------------------------------------------------
 // Summary.
 // -----------------------------------------------------------------------------
 echo "\n" . ($failures === 0 ? "OK" : "FAILED") . ": {$passes} passed, {$failures} failed\n";
