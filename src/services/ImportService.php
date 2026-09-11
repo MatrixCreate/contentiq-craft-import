@@ -780,7 +780,7 @@ class ImportService extends Component
      *
      * @param array $data   Decoded top-level JSON object for a single page.
      * @param bool  $dryRun If true, reports would-be counts without downloading.
-     * @return array{pageAssets: array{created: int, reused: int, relocated: int, failed: int}, pageFiles: array{created: int, reused: int, relocated: int, failed: int}, warnings: string[]}
+     * @return array{pageAssets: array{created: int, reused: int, relocated: int, failed: int}, pageFiles: array{created: int, reused: int, relocated: int, failed: int}, warnings: string[], assetIds: array<string, int>}
      */
     public function importPageAssetsOnly(array $data, bool $dryRun = false): array
     {
@@ -940,6 +940,7 @@ class ImportService extends Component
         $result['pageAssets'] = $pageAssetsResult['pageAssets'];
         $result['pageFiles']  = $pageAssetsResult['pageFiles'];
         $result['warnings']   = array_merge($result['warnings'], $pageAssetsResult['warnings']);
+        $assetIds             = $pageAssetsResult['assetIds'];
 
         // ContentIQ is transitioning collection children from a raw `content`
         // ProseMirror document to structured `blocks[]`. Current wire contract
@@ -954,6 +955,22 @@ class ImportService extends Component
         $blocks    = $data['blocks'] ?? [];
         $hasBlocks = !empty($blocks);
 
+        // spec/INLINE-IMAGES-SPEC.md §3.2 — a real run only: any top-level
+        // inline image node in $content whose key never resolved to a Craft
+        // asset id (not among this page's assets[], or that item failed to
+        // import) is silently omitted by NodesRenderer::renderDocument()
+        // (pure/stateless — it raises no warnings of its own); surface it
+        // here instead, once per missing key. Skipped entirely on a dry run
+        // — assets aren't downloaded there (see _importPageAssets()), so
+        // $assetIds is always empty and every image node would "miss"
+        // trivially; that's expected silence, not something to warn about
+        // (mirrors _handleAssetFolder()'s documented dry-run silence).
+        if (!$dryRun) {
+            foreach ($this->_missingInlineImageKeys($content, $assetIds) as $missingKey) {
+                $result['warnings'][] = "Inline image '{$missingKey}' not found among imported assets; omitted from {$contentFieldHandle}.";
+            }
+        }
+
         // §7.6.1 — the target Matrix field for this content_type's blocks[],
         // needed both for the write below and for the guard-2 "was this
         // previously non-empty" warning check further down.
@@ -965,6 +982,7 @@ class ImportService extends Component
             $hasBlocks,
             $contentFieldHandle,
             $headingFieldHandle,
+            $assetIds,
         );
 
         // Whether the contentField write above carries non-empty Body Text —
@@ -1381,7 +1399,15 @@ class ImportService extends Component
      * with nothing to explain the gap between what ContentiQ sent and what
      * actually landed in Craft.
      *
-     * @return array{pageAssets: array{created: int, reused: int, relocated: int, failed: int}, pageFiles: array{created: int, reused: int, relocated: int, failed: int}, warnings: string[]}
+     * `assetIds` (spec/INLINE-IMAGES-SPEC.md §3.2) maps each imported/reused
+     * `assets[]` item's storage `key` to the Craft asset id `importFromField()`
+     * resolved it to — feeds `NodesRenderer::renderDocument()`'s inline-image
+     * arm in `_importCollectionChild()`. `files[]` items are never added (no
+     * `content`-payload node references a document). On a dry run `id` is
+     * always null (see `ImageImportService::_importAsset()`), so the map
+     * stays empty — no ids exist yet to hand to the renderer.
+     *
+     * @return array{pageAssets: array{created: int, reused: int, relocated: int, failed: int}, pageFiles: array{created: int, reused: int, relocated: int, failed: int}, warnings: string[], assetIds: array<string, int>}
      */
     private function _importPageAssets(array $data, array $targets, bool $dryRun): array
     {
@@ -1394,6 +1420,7 @@ class ImportService extends Component
         $pageAssets = $this->_emptyAssetCounts();
         $pageFiles  = $this->_emptyAssetCounts();
         $warnings   = $targets['warnings'];
+        $assetIds   = [];
 
         foreach ($data['assets'] ?? [] as $asset) {
             if (!is_array($asset) || empty($asset['url'])) {
@@ -1411,6 +1438,13 @@ class ImportService extends Component
 
                 if ($result !== null) {
                     $this->_tallyAssetResult($pageAssets, $result);
+
+                    // Record the key → Craft asset id mapping for the inline-image
+                    // renderer — see this method's docblock. $result['id'] is
+                    // always null on a dry run, so this is a no-op there.
+                    if (!empty($asset['key']) && $result['id'] !== null) {
+                        $assetIds[(string)$asset['key']] = (int)$result['id'];
+                    }
 
                     // A non-fatal, item-level context warning (a Step A
                     // self-heal drop, or a relocation whose physical file
@@ -1465,7 +1499,7 @@ class ImportService extends Component
             }
         }
 
-        return ['pageAssets' => $pageAssets, 'pageFiles' => $pageFiles, 'warnings' => $warnings];
+        return ['pageAssets' => $pageAssets, 'pageFiles' => $pageFiles, 'warnings' => $warnings, 'assetIds' => $assetIds];
     }
 
     /**
@@ -3172,6 +3206,45 @@ class ImportService extends Component
     }
 
     /**
+     * spec/INLINE-IMAGES-SPEC.md §3.2 — scans a raw ProseMirror doc's
+     * TOP-LEVEL nodes only (mirrors NodesRenderer::renderDocument()'s own
+     * top-level loop, and the same "top-level images only" scope — a
+     * nested image inside a list/blockquote is out of scope, same as the
+     * renderer, and is neither rendered nor warned about) for `image` nodes
+     * whose `attrs.key` is missing from `$assetIds`. Used by
+     * _importCollectionChild() to raise one warning per missing key on a
+     * real run — NodesRenderer itself is pure/stateless and raises none.
+     *
+     * @param array $doc      Raw ProseMirror doc or its content array — same shape renderDocument() accepts.
+     * @param array $assetIds Storage key => Craft asset id (from _importPageAssets()).
+     * @return string[] Missing storage keys, in document order.
+     */
+    private function _missingInlineImageKeys(array $doc, array $assetIds): array
+    {
+        $nodes = $doc['content'] ?? (isset($doc['type']) ? [] : $doc);
+
+        if (!is_array($nodes)) {
+            return [];
+        }
+
+        $missing = [];
+
+        foreach ($nodes as $node) {
+            if (!is_array($node) || ($node['type'] ?? '') !== 'image') {
+                continue;
+            }
+
+            $key = (string)($node['attrs']['key'] ?? '');
+
+            if ($key !== '' && !isset($assetIds[$key])) {
+                $missing[] = $key;
+            }
+        }
+
+        return $missing;
+    }
+
+    /**
      * §7.6/§7.6.1 (rulings O2/O4) — builds the contentField/headingField
      * portion of a collection child's field values.
      *
@@ -3202,6 +3275,9 @@ class ImportService extends Component
      * @param bool        $hasBlocks           Whether this collection child carries non-empty blocks[].
      * @param string      $contentFieldHandle
      * @param string|null $headingFieldHandle
+     * @param array       $assetIds            Storage key => Craft asset id, for
+     *                    NodesRenderer::renderDocument()'s inline-image arm
+     *                    (spec/INLINE-IMAGES-SPEC.md §3.2) — see _importPageAssets().
      * @return array<string, string>
      */
     private function _buildCollectionChildContentFields(
@@ -3209,11 +3285,12 @@ class ImportService extends Component
         bool $hasBlocks,
         string $contentFieldHandle,
         ?string $headingFieldHandle,
+        array $assetIds = [],
     ): array {
         if ($hasBlocks) {
             $fieldValues = [
                 $contentFieldHandle => !empty($content)
-                    ? ContentIQImporter::$plugin->nodes->renderDocument($content)
+                    ? ContentIQImporter::$plugin->nodes->renderDocument($content, $assetIds)
                     : '',
             ];
 
@@ -3235,7 +3312,7 @@ class ImportService extends Component
             }
         }
 
-        $fieldValues[$contentFieldHandle] = ContentIQImporter::$plugin->nodes->renderDocument($content);
+        $fieldValues[$contentFieldHandle] = ContentIQImporter::$plugin->nodes->renderDocument($content, $assetIds);
 
         return $fieldValues;
     }

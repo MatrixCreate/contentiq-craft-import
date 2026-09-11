@@ -1837,6 +1837,155 @@ check(
 );
 
 // -----------------------------------------------------------------------------
+// Inline images — spec/INLINE-IMAGES-SPEC.md §3.1/§3.2. NodesRenderer::
+// renderDocument()'s 'image' arm and ImportService::_missingInlineImageKeys().
+// -----------------------------------------------------------------------------
+echo "\nNodesRenderer — inline images (renderDocument 'image' arm)\n";
+
+check(
+    'renderDocument(): image with caption + credit',
+    '<figure class="image"><img src="{asset:42:url}" alt="A view of the lab"><figcaption>Lab bench (Jane Doe)</figcaption></figure>',
+    $nodesRenderer->renderDocument([
+        [
+            'type'  => 'image',
+            'attrs' => [
+                'key'     => 'proj/page/lab.jpg',
+                'src'     => 'https://signed.example.com/lab.jpg',
+                'alt'     => 'A view of the lab',
+                'caption' => 'Lab bench',
+                'credit'  => 'Jane Doe',
+            ],
+        ],
+    ], ['proj/page/lab.jpg' => 42]),
+);
+
+check(
+    'renderDocument(): image with caption only',
+    '<figure class="image"><img src="{asset:42:url}" alt="A view of the lab"><figcaption>Lab bench</figcaption></figure>',
+    $nodesRenderer->renderDocument([
+        [
+            'type'  => 'image',
+            'attrs' => [
+                'key'     => 'proj/page/lab.jpg',
+                'alt'     => 'A view of the lab',
+                'caption' => 'Lab bench',
+                'credit'  => null,
+            ],
+        ],
+    ], ['proj/page/lab.jpg' => 42]),
+);
+
+check(
+    'renderDocument(): image with credit only',
+    '<figure class="image"><img src="{asset:42:url}" alt="A view of the lab"><figcaption>Jane Doe</figcaption></figure>',
+    $nodesRenderer->renderDocument([
+        [
+            'type'  => 'image',
+            'attrs' => [
+                'key'     => 'proj/page/lab.jpg',
+                'alt'     => 'A view of the lab',
+                'caption' => null,
+                'credit'  => 'Jane Doe',
+            ],
+        ],
+    ], ['proj/page/lab.jpg' => 42]),
+);
+
+check(
+    'renderDocument(): image with neither caption nor credit → no <figcaption>',
+    '<figure class="image"><img src="{asset:42:url}" alt="A view of the lab"></figure>',
+    $nodesRenderer->renderDocument([
+        [
+            'type'  => 'image',
+            'attrs' => [
+                'key'     => 'proj/page/lab.jpg',
+                'alt'     => 'A view of the lab',
+                'caption' => null,
+                'credit'  => null,
+            ],
+        ],
+    ], ['proj/page/lab.jpg' => 42]),
+);
+
+check(
+    'renderDocument(): key not in map → figure omitted entirely',
+    '',
+    $nodesRenderer->renderDocument([
+        [
+            'type'  => 'image',
+            'attrs' => [
+                'key'     => 'proj/page/missing.jpg',
+                'alt'     => 'Missing',
+                'caption' => 'Missing',
+                'credit'  => null,
+            ],
+        ],
+    ], ['proj/page/lab.jpg' => 42]),
+);
+
+check(
+    'renderDocument(): empty alt → alt="" (not dropped, not "null")',
+    '<figure class="image"><img src="{asset:42:url}" alt=""><figcaption>Lab bench</figcaption></figure>',
+    $nodesRenderer->renderDocument([
+        [
+            'type'  => 'image',
+            'attrs' => [
+                'key'     => 'proj/page/lab.jpg',
+                'alt'     => '',
+                'caption' => 'Lab bench',
+                'credit'  => null,
+            ],
+        ],
+    ], ['proj/page/lab.jpg' => 42]),
+);
+
+// Existing-caller behaviour is unchanged: a doc with no image nodes renders
+// identically whether or not a caller passes an $assetIds map.
+$noImageDoc = [
+    ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Ordinary paragraph.']]],
+    ['type' => 'heading', 'attrs' => ['level' => 2], 'content' => [['type' => 'text', 'text' => 'A heading']]],
+];
+check(
+    'renderDocument(): no $assetIds argument — unchanged from before this change',
+    '<p>Ordinary paragraph.</p><h2>A heading</h2>',
+    $nodesRenderer->renderDocument($noImageDoc),
+);
+check(
+    'renderDocument(): a non-empty $assetIds map does not affect a doc with no image nodes',
+    '<p>Ordinary paragraph.</p><h2>A heading</h2>',
+    $nodesRenderer->renderDocument($noImageDoc, ['proj/page/lab.jpg' => 42]),
+);
+
+echo "\nImportService — _missingInlineImageKeys() (spec/INLINE-IMAGES-SPEC.md §3.2)\n";
+
+check(
+    '_missingInlineImageKeys(): a resolved key is not reported missing',
+    [],
+    callPrivate($importService, '_missingInlineImageKeys', [
+        [['type' => 'image', 'attrs' => ['key' => 'proj/page/lab.jpg']]],
+        ['proj/page/lab.jpg' => 42],
+    ]),
+);
+
+check(
+    '_missingInlineImageKeys(): an unresolved key is reported once',
+    ['proj/page/missing.jpg'],
+    callPrivate($importService, '_missingInlineImageKeys', [
+        [['type' => 'image', 'attrs' => ['key' => 'proj/page/missing.jpg']]],
+        ['proj/page/lab.jpg' => 42],
+    ]),
+);
+
+check(
+    '_missingInlineImageKeys(): a doc with no image nodes reports nothing',
+    [],
+    callPrivate($importService, '_missingInlineImageKeys', [
+        [['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'No images here.']]]],
+        [],
+    ]),
+);
+
+// -----------------------------------------------------------------------------
 // Summary.
 // -----------------------------------------------------------------------------
 echo "\n" . ($failures === 0 ? "OK" : "FAILED") . ": {$passes} passed, {$failures} failed\n";

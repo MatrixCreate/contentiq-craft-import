@@ -79,10 +79,24 @@ class NodesRenderer extends Component
      * strips them at export now, but this is skipped defensively here too, for
      * older app payloads and legacy full-content syncs.
      *
+     * `image` nodes (inline images — spec/INLINE-IMAGES-SPEC.md §3.1) render
+     * to a `<figure class="image"><img src="{asset:ID:url}" alt="…">
+     * [<figcaption>…</figcaption>]</figure>` when the node's `attrs.key`
+     * resolves via `$assetIds`; otherwise the node is silently omitted (no
+     * warning — this service is pure/stateless, so a missing-key warning is
+     * the caller's job, e.g. ImportService::_importCollectionChild()). The
+     * `src` is always a Craft reference tag, never the wire's signed URL —
+     * see the class-level "no external dependencies" note: this is still
+     * true, `{asset:ID:url}` is plain text `craft\htmlfield\HtmlField` parses
+     * on save, not a call into any package.
+     *
      * @param array|null $doc Raw ProseMirror doc ({type:'doc', content:[...]}) or its content array.
+     * @param array      $assetIds Storage key => Craft asset id, for resolving inline image
+     *                             nodes. Defaults empty so every pre-existing caller (no inline
+     *                             images support yet) stays byte-identical.
      * @return string
      */
-    public function renderDocument(?array $doc): string
+    public function renderDocument(?array $doc, array $assetIds = []): string
     {
         if (empty($doc)) {
             return '';
@@ -98,7 +112,7 @@ class NodesRenderer extends Component
         $html = '';
         foreach ($nodes as $node) {
             if (is_array($node)) {
-                $html .= $this->_renderDocNode($node);
+                $html .= $this->_renderDocNode($node, $assetIds);
             }
         }
 
@@ -223,9 +237,10 @@ class NodesRenderer extends Component
      * Unknown node types are silently skipped.
      *
      * @param array $node
+     * @param array $assetIds Storage key => Craft asset id, for the 'image' arm — see renderDocument().
      * @return string
      */
-    private function _renderDocNode(array $node): string
+    private function _renderDocNode(array $node, array $assetIds = []): string
     {
         $type = $node['type'] ?? '';
 
@@ -244,6 +259,18 @@ class NodesRenderer extends Component
             // visible next to the other node types.
             'horizontalRule' => '',
             'hardBreak'      => '<br>',
+            // Inline images (spec/INLINE-IMAGES-SPEC.md §3.1) are top-level
+            // only by design (Tiptap emits them as a block-level atom
+            // directly under the doc) — only the top-level dispatch from
+            // renderDocument()'s own loop passes $assetIds here. A nested
+            // occurrence (blockquote/list recursion below calls this method
+            // without $assetIds) resolves against the default empty map and
+            // is silently omitted, same as any other out-of-scope shape —
+            // deliberately NOT threaded into _renderDocBlockquote()/
+            // _renderDocList()/_renderListItem() to avoid adding recursion
+            // that goes looking for images where the wire contract says
+            // they never occur.
+            'image'          => $this->_renderDocImage($node, $assetIds),
             default          => '',
         };
     }
@@ -260,6 +287,54 @@ class NodesRenderer extends Component
         $level = max(1, min(6, $level));
 
         return "<h{$level}>" . $this->_renderInlineContent($node['content'] ?? []) . "</h{$level}>";
+    }
+
+    /**
+     * Renders a raw ProseMirror `image` node (inline images —
+     * spec/INLINE-IMAGES-SPEC.md §3.1) to a `<figure>`.
+     *
+     * `src` is always a Craft reference tag (`{asset:ID:url}`), resolved from
+     * `attrs.key` via `$assetIds` — never the wire's 24h signed URL (that
+     * would render for a day, then break, and would never establish the
+     * Craft asset relation `craftcms/ckeditor`'s `updateReferences()` needs).
+     * A key not present in `$assetIds` (not imported this run, or a dry run
+     * where no ids exist yet) silently omits the figure — no warning here,
+     * this service is pure/stateless; the caller (ImportService) raises the
+     * warning on a real run.
+     *
+     * `<figcaption>` text is the caption, with " (credit)" appended when
+     * credit is also non-empty; when caption is empty but credit is not, the
+     * credit stands alone. The `<figcaption>` element itself is omitted
+     * entirely when both are empty — never an empty element.
+     *
+     * @param array $node
+     * @param array $assetIds Storage key => Craft asset id.
+     * @return string
+     */
+    private function _renderDocImage(array $node, array $assetIds): string
+    {
+        $key = (string)($node['attrs']['key'] ?? '');
+
+        if ($key === '' || !isset($assetIds[$key])) {
+            return '';
+        }
+
+        $assetId = (int)$assetIds[$key];
+        $alt     = htmlspecialchars((string)($node['attrs']['alt'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $caption = trim((string)($node['attrs']['caption'] ?? ''));
+        $credit  = trim((string)($node['attrs']['credit'] ?? ''));
+
+        $captionText = match (true) {
+            $caption !== '' && $credit !== '' => "{$caption} ({$credit})",
+            $caption !== ''                   => $caption,
+            default                           => $credit,
+        };
+
+        $figcaption = $captionText !== ''
+            ? '<figcaption>' . htmlspecialchars($captionText, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</figcaption>'
+            : '';
+
+        return "<figure class=\"image\"><img src=\"{asset:{$assetId}:url}\" alt=\"{$alt}\">{$figcaption}</figure>";
     }
 
     /**
