@@ -646,6 +646,7 @@ class NodesRenderer extends Component
             'code'      => "<code>{$inner}</code>",
             'strike'    => "<s>{$inner}</s>",
             'underline' => "<u>{$inner}</u>",
+            'smaller'   => "<span class=\"smaller\">{$inner}</span>",
             'link'      => $this->_wrapLink($mark, $inner),
             default     => $inner,
         };

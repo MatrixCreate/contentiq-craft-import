@@ -2,6 +2,10 @@
 
 Capped rolling log — older entries roll off verbatim to `docs/_archive/`. Durable knowledge belongs in `docs/`, not accumulated here.
 
+## `smaller` inline mark → `<span class="smaller">` in CKEditor HTML (2026-09-11)
+
+`NodesRenderer::_wrapMark()` gained a `'smaller'` arm for ContentiQ's new heading-text mark, rendering `<span class="smaller">…</span>` alongside the existing bold/italic/underline/strike/link arms; every rich-text heading path (hero heading, cardTitle/itemTitle via `_handleHeading()`) already routes through it, and every plain-text path (`extractHeading()`/`_plainText()`, `_extractCtaTitle()`) already drops marks by construction, so neither needed a change. `tests/run-transforms.php` gained two cases (plain + stacked with bold), now 246 assertions (was 244), green. Not released — no version bump, no tag.
+
 ## Bracketed placeholder text is content again — general strip removed (2026-09-10, 1.28.0)
 
 Reverses the placeholder stripping shipped in 1.26.0. ContentiQ's authors leave standalone bracketed strings (`[Infographic 1]`, `[Client quote]`, `[Product category grid]`) in their copy as notes to the CMS-side editor; 1.26.0's vocabulary-free whole-node rule treated all of them as layout aides and dropped them before richText render. Ben's ruling: that text is content and must reach Craft. Reported against Altitude Aluminium's News entry `the-glazing-glossary-u-values-passivhaus-what-they-actually-mean`, where `[Infographic 1]`/`[Infographic 2]` sat inside a `Body Text` range and so vanished via the collection-child `renderDocument()` path.

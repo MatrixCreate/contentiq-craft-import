@@ -1591,6 +1591,42 @@ check(
 );
 
 // -----------------------------------------------------------------------------
+// NodesRenderer — 'smaller' mark renders as <span class="smaller"> for
+// CKEditor Styles (raw ProseMirror content path, same as other inline marks).
+// -----------------------------------------------------------------------------
+echo "\nNodesRenderer — smaller mark\n";
+
+check(
+    'heading: trailing run carries the smaller mark',
+    '<h1>Shop for hammers <span class="smaller">in Kent</span></h1>',
+    $nodesRenderer->renderDocument([
+        [
+            'type'    => 'heading',
+            'attrs'   => ['level' => 1],
+            'content' => [
+                ['type' => 'text', 'text' => 'Shop for hammers '],
+                ['type' => 'text', 'text' => 'in Kent', 'marks' => [['type' => 'smaller']]],
+            ],
+        ],
+    ]),
+);
+
+check(
+    'heading: smaller stacked with bold wraps both tags',
+    '<h1>Shop for hammers <strong><span class="smaller">in Kent</span></strong></h1>',
+    $nodesRenderer->renderDocument([
+        [
+            'type'    => 'heading',
+            'attrs'   => ['level' => 1],
+            'content' => [
+                ['type' => 'text', 'text' => 'Shop for hammers '],
+                ['type' => 'text', 'text' => 'in Kent', 'marks' => [['type' => 'bold'], ['type' => 'smaller']]],
+            ],
+        ],
+    ]),
+);
+
+// -----------------------------------------------------------------------------
 // NodesRenderer — horizontalRule is a ContentiQ layout aide and must NEVER
 // reach the CMS. The app now strips these at export, but renderDocument()
 // (the raw-ProseMirror collection-child path) skips them defensively too, for
