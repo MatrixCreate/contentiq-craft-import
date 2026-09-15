@@ -784,6 +784,7 @@ class MatrixBuilder extends Component
             'tableHtml'              => $this->_handleTableHtml($craftHandle, $value),
             'hyperButton'            => $this->_handleHyperButton($craftHandle, $value),
             'buttonLabel'            => $this->_handleButtonLabel($craftHandle, $value),
+            'cardButtonLink'         => $this->_handleCardButtonLink($craftHandle, $value),
             'faqNodes'               => $this->_handleFaqNodes($craftHandle, $value),
             'buttonNodes'            => $this->_handleButtonNodes($craftHandle, $value),
             'uspContent'             => $this->_handleUspContent($craftHandle, $value),
@@ -1384,16 +1385,53 @@ class MatrixBuilder extends Component
             return [$handle => []];
         }
 
-        $label = (string)($value['label'] ?? '');
-        $url   = (string)($value['url'] ?? '');
+        $label  = (string)($value['label'] ?? '');
+        $url    = (string)($value['url'] ?? '');
+        $target = $value['target'] ?? null;
 
         if ($label === '' && $url === '') {
             return [$handle => [], 'showLinkAsSeparateButton' => false];
         }
 
         return [
-            $handle => [$this->_buildActionButtonLink($label, $url)],
+            $handle => [$this->_buildActionButtonLink($label, $url, $target)],
             'showLinkAsSeparateButton' => true,
+        ];
+    }
+
+    /**
+     * Converts a ContentIQ card button object to the card entry type's Hyper
+     * link field value.
+     *
+     * Mirrors {@see _handleHyperButton()}, but targets the `card` entry
+     * type's `cardLink` field and its `showActionButton` lightswitch instead
+     * of `hyperButton`'s `showLinkAsSeparateButton` — the card entry type has
+     * no `actionButtonLabel` field, so a detected card's button can only
+     * round-trip through `cardLink` now. Buttons without a label AND a url
+     * are skipped (returns empty array), flipping `showActionButton` off so
+     * the entry doesn't render an empty button.
+     *
+     * @param string $handle
+     * @param mixed  $value
+     * @return array<string, mixed>
+     */
+    private function _handleCardButtonLink(string $handle, mixed $value): array
+    {
+        if (!is_array($value)) {
+            return [$handle => [], 'showActionButton' => false];
+        }
+
+        $label  = (string)($value['label'] ?? '');
+        $url    = (string)($value['url'] ?? '');
+        $target = $value['target'] ?? null;
+
+        if ($label === '' && $url === '') {
+            return [$handle => [], 'showActionButton' => false];
+        }
+
+        return [
+            $handle => [$this->_buildActionButtonLink($label, $url, $target)],
+            'showActionButton' => true,
         ];
     }
 
@@ -1527,8 +1565,9 @@ class MatrixBuilder extends Component
                 continue;
             }
 
-            $label = (string)($node['label'] ?? '');
-            $url   = (string)($node['url'] ?? '');
+            $label  = (string)($node['label'] ?? '');
+            $url    = (string)($node['url'] ?? '');
+            $target = $node['target'] ?? null;
 
             if ($label === '' && $url === '') {
                 continue;
@@ -1537,7 +1576,7 @@ class MatrixBuilder extends Component
             $actionButtonsData['new' . (++$btnCounter)] = [
                 'type'   => 'actionButton',
                 'fields' => [
-                    'actionButton' => [$this->_buildActionButtonLink($label, $url)],
+                    'actionButton' => [$this->_buildActionButtonLink($label, $url, $target)],
                 ],
             ];
         }
@@ -1786,20 +1825,16 @@ class MatrixBuilder extends Component
      *
      * Inert URLs (empty, null, '#', or a bare scheme) fall back to the
      * 'https://' placeholder so editors can set the destination in the CMS
-     * after import — see {@see LinkHelper::hyperInertUrl()}.
+     * after import — see {@see LinkHelper::hyperInertUrl()}. Thin wrapper
+     * around {@see LinkHelper::hyperUrlLink()}.
      *
-     * @param string $label Button text.
-     * @param string $url   Destination URL (may be empty).
-     * @return array<string, string>
+     * @param string $label  Button text.
+     * @param string $url    Destination URL (may be empty).
+     * @param mixed  $target The button's `target` value from the export (e.g. `'_blank'`, null).
+     * @return array<string, mixed>
      */
-    private function _buildActionButtonLink(string $label, string $url): array
+    private function _buildActionButtonLink(string $label, string $url, mixed $target = null): array
     {
-        return [
-            'type'      => 'verbb\\hyper\\links\\Url',
-            'handle'    => 'default-verbb-hyper-links-url',
-            'linkValue' => LinkHelper::hyperInertUrl($url),
-            'linkText'  => $label,
-            'linkClass' => 'btn btn-primary',
-        ];
+        return LinkHelper::hyperUrlLink($label, $url, $target);
     }
 }

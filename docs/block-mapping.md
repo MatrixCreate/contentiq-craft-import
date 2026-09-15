@@ -267,6 +267,20 @@ Cards import directly to `entryCards` (inner type `card`). ContentiQ's
 - **`children`** — the block references a parent page whose children should
   render as cards.
 
+**`detected` mode's button writes `cardLink` + `showActionButton`, not a
+label.** The target `card` entry type has no `actionButtonLabel` field —
+only `cardLink` (a verbb Hyper field, Entry and Url link types) and
+`showActionButton` (Lightswitch). `MatrixBuilder::_handleCardButtonLink()`
+converts a card's `{label, url}` button into a Hyper Url link array on
+`cardLink` and flips `showActionButton` on; a card with no real button
+(empty label and url) emits `cardLink: []` and leaves `showActionButton`
+off. A project whose `card` entry type still carries the older
+`actionButtonLabel` field can restore the label-only mapping via
+`blockOverrides`, pointing the cards block's `button` field at the
+`buttonLabel` handler instead. This mapping only ever writes a Hyper Url
+link — see "Hyper link fields" below for the pass-3 sweep that upgrades it to
+a live Entry link once its target has a Craft entry.
+
 **`pages`/`children` defer to pass 2.** These two modes carry no card items
 in the block itself — only refs (slugs/ids). MatrixBuilder records a
 deferred ref set per block (`result['cardRefs'][$blockIndex]`, in memory
@@ -536,13 +550,26 @@ ContentiQ exports one OG image, SEOmatic wants it in two slots.
 **Hyper link fields.** Every action button (hero, FAQ, price list,
 text-and-media, cards, CTA) writes the same Verbb Hyper shape (`type:
 'verbb\hyper\links\Url'`, `handle: 'default-verbb-hyper-links-url'`,
-`linkValue`, `linkText`, `linkClass: 'btn btn-primary'`), funnelled through
-`LinkHelper::hyperInertUrl()` (`src/helpers/LinkHelper.php`). It collapses
+`linkValue`, `linkText`, `linkClass: 'btn btn-primary'`, `newWindow`),
+built by the shared `LinkHelper::hyperUrlLink()` (`src/helpers/LinkHelper.php`).
+`linkValue` is funnelled through `LinkHelper::hyperInertUrl()`, which collapses
 every "no real destination yet" marker — `null`, `''`, `'#'`, a bare
 `'https://'`/`'http://'` scheme, or anything `UrlSafety::safeHref()` would
 itself neuter (disallowed schemes like `javascript:`) — to a single
 `'https://'` placeholder Hyper accepts, rather than rejecting `'#'` outright
-or carrying a stored-XSS payload through.
+or carrying a stored-XSS payload through. `newWindow` is written from the
+button's `target` (`LinkHelper::opensInNewWindow()` — true for `'_blank'`,
+case-insensitive/trimmed, or boolean `true`; false otherwise, always emitted
+so a re-sync can clear a previously set flag).
+
+**Url links written here don't stay Url links.** When the value ContentiQ
+sent was a root-relative page path (not the inert placeholder above), pass 3
+(the link sweep — [import-pipeline.md](import-pipeline.md#pass-3--link-sweep))
+upgrades it from a Hyper `Url` link to an `Entry` link once its target page
+has a Craft entry, after the whole run's pages are written. This applies to
+every button mapping in this doc that goes through `LinkHelper::hyperInertUrl()`
+— hero, FAQ, price list, text-and-media, cards' `cardLink`, CTA — not a
+separate mechanic per block type.
 
 ---
 

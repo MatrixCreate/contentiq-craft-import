@@ -74,6 +74,26 @@ class ImportController extends Controller
     private array $_lastCardRefs = [];
 
     /**
+     * ContentiQ page id from the most recent _runSinglePage call — threaded
+     * into _runBatch()'s post-pass row so ImportService::_writtenPages() can
+     * tell this page was genuinely written this run.
+     *
+     * @var int|null
+     */
+    private ?int $_lastContentiqPageId = null;
+
+    /**
+     * Whether the most recent _runSinglePage call took the locked-skip
+     * branch — nothing was written for that page, so runPostPasses()'s
+     * "genuinely written" predicate (ImportService::_writtenPages()) must
+     * see skippedLocked => true for it, the same as SyncJob/CpController's
+     * own locked-skip rows.
+     *
+     * @var bool
+     */
+    private bool $_lastSkippedLocked = false;
+
+    /**
      * Per-page results accumulated across the current invocation (single
      * page or batch) — same shape ImportService::importPage() returns.
      * Written to a contentiq_import_runs record at the end of the run (see
@@ -179,12 +199,24 @@ class ImportController extends Controller
         // Single-page format has 'document' and 'blocks' at the top level.
         $exitCode = $this->_runSinglePage($data, $importService);
 
-        // PASS 2: resolve deferred card references (single page — DB lookups only).
-        if (!$this->dryRun && $this->_lastEntryId !== null && !empty($this->_lastCardRefs)) {
-            $cardWarnings = $importService->resolveCardReferences(
-                [$this->_lastEntryId => array_values($this->_lastCardRefs)],
-                [],
-            );
+        // Post-passes: card references (pass 2) + link sweep (pass 3), single
+        // page — no in-run slug map, DB lookups only. Runs even with no card
+        // refs — the link sweep still needs to walk this page's links.
+        if (!$this->dryRun && $this->_lastEntryId !== null) {
+            $allCardRefs = !empty($this->_lastCardRefs)
+                ? [$this->_lastEntryId => array_values($this->_lastCardRefs)]
+                : [];
+
+            $pageResults = [[
+                'success'           => true,
+                'entryId'           => $this->_lastEntryId,
+                'contentiqPageId'   => $this->_lastContentiqPageId,
+                'skippedLocked'     => $this->_lastSkippedLocked,
+                'skippedDeselected' => false,
+                'skipped'           => false,
+            ]];
+
+            $cardWarnings = $importService->runPostPasses($allCardRefs, [], $pageResults);
             $this->_printCardRefWarnings($cardWarnings);
             $this->_mergeCardWarnings($cardWarnings);
         }
@@ -213,6 +245,7 @@ class ImportController extends Controller
         $exitCode      = ExitCode::OK;
         $slugToEntryId = [];
         $allCardRefs   = [];  // Deferred card ref sets keyed by entry ID, for pass 2
+        $pageResults   = [];  // Minimal per-page rows for runPostPasses()'s "genuinely written" predicate
 
         // Resolve section for structure positioning.
         $config        = Craft::$app->config->getConfigFromFile('contentiq');
@@ -238,6 +271,17 @@ class ImportController extends Controller
                 if (!empty($this->_lastCardRefs)) {
                     $allCardRefs[$this->_lastEntryId] = array_values($this->_lastCardRefs);
                 }
+
+                // Minimal row for runPostPasses()'s "genuinely written" predicate
+                // (ImportService::_writtenPages()).
+                $pageResults[] = [
+                    'success'           => true,
+                    'entryId'           => $this->_lastEntryId,
+                    'contentiqPageId'   => $this->_lastContentiqPageId,
+                    'skippedLocked'     => $this->_lastSkippedLocked,
+                    'skippedDeselected' => false,
+                    'skipped'           => false,
+                ];
             }
 
             // Handle hierarchy after import.
@@ -289,10 +333,12 @@ class ImportController extends Controller
             }
         }
 
-        // PASS 2: resolve deferred card references now the slug map is complete.
-        if (!$this->dryRun && !empty($allCardRefs)) {
-            $this->stdout("\nResolving card references…\n", Console::BOLD);
-            $cardWarnings = $importService->resolveCardReferences($allCardRefs, $slugToEntryId);
+        // Post-passes: card references (pass 2) + link sweep (pass 3), now the
+        // slug map is complete. Runs even with no card refs — the link sweep
+        // still needs to walk every page written this run.
+        if (!$this->dryRun) {
+            $this->stdout("\nRunning post-passes…\n", Console::BOLD);
+            $cardWarnings = $importService->runPostPasses($allCardRefs, $slugToEntryId, $pageResults);
             $this->_printCardRefWarnings($cardWarnings);
             $this->_mergeCardWarnings($cardWarnings);
         }
@@ -432,6 +478,15 @@ class ImportController extends Controller
      */
     private function _runSinglePage(array $data, $importService): int
     {
+        // Stable ContentIQ page id, set unconditionally (both the locked-skip
+        // branch and the real-import branch below need it) — mirrors how
+        // SyncJob/CpController thread document.id through to the ack/sweep
+        // predicate on their own result rows.
+        $this->_lastContentiqPageId = isset($data['document']['id']) ? (int)$data['document']['id'] : null;
+
+        // Reset every call — only the locked-skip branch below sets this true.
+        $this->_lastSkippedLocked = false;
+
         // Enforce entry locks unless --force. Missing sync row for an existing
         // entry is treated as locked (same default as the Sync UI / SyncJob) —
         // a hand-built entry colliding with a synced slug/section is never
@@ -471,8 +526,9 @@ class ImportController extends Controller
                         $this->warning($warning);
                     }
 
-                    $this->_lastEntryId  = $existingEntry->id;
-                    $this->_lastCardRefs = [];
+                    $this->_lastEntryId       = $existingEntry->id;
+                    $this->_lastCardRefs      = [];
+                    $this->_lastSkippedLocked = true;
 
                     // Fix D1: record the skip in the run's audit trail, same as
                     // the locked-skip branches in CpController/SyncJob.

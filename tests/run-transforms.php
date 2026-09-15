@@ -298,6 +298,45 @@ require __DIR__ . '/../src/helpers/LinkHelper.php';
 require __DIR__ . '/../src/services/NodesRenderer.php';
 require __DIR__ . '/../src/services/MatrixBuilder.php';
 
+// -----------------------------------------------------------------------------
+// LinkHelper::opensInNewWindow() / hyperUrlLink()
+//
+// opensInNewWindow() is the single source of truth for whether a ContentiQ
+// button's `target` should set Hyper's `newWindow` flag — '_blank' (any case,
+// untrimmed whitespace) or boolean true, everything else false. hyperUrlLink()
+// must always emit the `newWindow` key so a `false` on re-sync clears a
+// previously set flag (whole-page replace semantics).
+// -----------------------------------------------------------------------------
+echo "\nLinkHelper — opensInNewWindow() / hyperUrlLink()\n";
+
+use matrixcreate\contentiqimporter\helpers\LinkHelper;
+
+check('opensInNewWindow(): "_blank" is true', true, LinkHelper::opensInNewWindow('_blank'));
+check('opensInNewWindow(): " _BLANK " (mixed case, padded) is true', true, LinkHelper::opensInNewWindow(' _BLANK '));
+check('opensInNewWindow(): boolean true is true', true, LinkHelper::opensInNewWindow(true));
+check('opensInNewWindow(): null is false', false, LinkHelper::opensInNewWindow(null));
+check('opensInNewWindow(): empty string is false', false, LinkHelper::opensInNewWindow(''));
+check('opensInNewWindow(): "_self" is false', false, LinkHelper::opensInNewWindow('_self'));
+check('opensInNewWindow(): boolean false is false', false, LinkHelper::opensInNewWindow(false));
+
+check(
+    'hyperUrlLink(): target=_blank sets newWindow true, other keys unchanged',
+    [
+        'type'      => 'verbb\\hyper\\links\\Url',
+        'handle'    => 'default-verbb-hyper-links-url',
+        'linkValue' => 'https://example.com',
+        'linkText'  => 'Read more',
+        'linkClass' => 'btn btn-primary',
+        'newWindow' => true,
+    ],
+    LinkHelper::hyperUrlLink('Read more', 'https://example.com', '_blank'),
+);
+check(
+    'hyperUrlLink(): no target always emits newWindow false',
+    false,
+    LinkHelper::hyperUrlLink('Read more', 'https://example.com')['newWindow'] ?? null,
+);
+
 $fakeImages = new class {
     public function importFromField($value, $dryRun)
     {
@@ -443,6 +482,79 @@ check(
     isset($legacy['warnings'][0])
         && str_contains($legacy['warnings'][0], "'text'")
         && str_contains($legacy['warnings'][0], "'richText'"),
+);
+
+// -----------------------------------------------------------------------------
+// MatrixBuilder — cards block, detected mode, button → cardLink.
+//
+// The `card` entry type has no `actionButtonLabel` field — only `cardLink`
+// (verbb Hyper) and `showActionButton` (Lightswitch). A detected card's
+// {label, url} button must write a Hyper Url link array to `cardLink` and
+// flip `showActionButton` on; a card with no button must emit an empty
+// `cardLink` array and leave `showActionButton` off (never an omitted key —
+// see AGENTS.md's "phantom blocks" rule).
+// -----------------------------------------------------------------------------
+echo "\nMatrixBuilder — cards block detected mode button → cardLink\n";
+
+$cardsBuilder = new \matrixcreate\contentiqimporter\services\MatrixBuilder();
+$cardsBuilder->prepare(['blockOverrides' => []]);
+
+$cardsBuilt = $cardsBuilder->build([
+    [
+        'type'   => 'cards',
+        'fields' => [
+            'mode'  => 'detected',
+            'cards' => [
+                [
+                    'heading' => ['level' => 3, 'text' => 'With a button'],
+                    'button'  => ['label' => 'Read more', 'url' => '/about/team', 'target' => null],
+                ],
+                [
+                    'heading' => ['level' => 3, 'text' => 'No button'],
+                    'button'  => ['label' => '', 'url' => null],
+                ],
+                [
+                    'heading' => ['level' => 3, 'text' => 'New-tab button'],
+                    'button'  => ['label' => 'Read more', 'url' => '/about/team', 'target' => '_blank'],
+                ],
+            ],
+        ],
+    ],
+]);
+
+$cardEntries = $cardsBuilt['matrixData']['new1']['fields']['entryCards'] ?? [];
+
+check(
+    'card with a button: cardLink holds one Hyper Url link',
+    [[
+        'type'      => 'verbb\\hyper\\links\\Url',
+        'handle'    => 'default-verbb-hyper-links-url',
+        'linkValue' => '/about/team',
+        'linkText'  => 'Read more',
+        'linkClass' => 'btn btn-primary',
+        'newWindow' => false,
+    ]],
+    $cardEntries['new1']['fields']['cardLink'] ?? null,
+);
+check(
+    'card with a button: showActionButton is true',
+    true,
+    $cardEntries['new1']['fields']['showActionButton'] ?? null,
+);
+check(
+    'card without a button: cardLink is empty',
+    [],
+    $cardEntries['new2']['fields']['cardLink'] ?? null,
+);
+check(
+    'card without a button: showActionButton is false',
+    false,
+    $cardEntries['new2']['fields']['showActionButton'] ?? null,
+);
+check(
+    'card with target=_blank button: cardLink newWindow is true',
+    true,
+    $cardEntries['new3']['fields']['cardLink'][0]['newWindow'] ?? null,
 );
 
 // -----------------------------------------------------------------------------
@@ -731,7 +843,7 @@ $heroBlock = [
         'body'       => 'Body text.',
         'image'      => ['key' => 'k1', 'url' => 'https://example.com/hero.jpg', 'alt' => 'Hero'],
         'buttons'    => [
-            ['text' => 'Learn more', 'url' => 'https://example.com/learn'],
+            ['text' => 'Learn more', 'url' => 'https://example.com/learn', 'target' => '_blank'],
         ],
     ],
 ];
@@ -750,6 +862,11 @@ check(
     'flat shape: heroActionButtons carries the button',
     'https://example.com/learn',
     $flatHero['heroActionButtons']['new1']['fields']['actionButton'][0]['linkValue'] ?? null,
+);
+check(
+    'flat shape: heroActionButtons button carries newWindow from target=_blank',
+    true,
+    $flatHero['heroActionButtons']['new1']['fields']['actionButton'][0]['newWindow'] ?? null,
 );
 check('flat shape: no nested hero key written', false, array_key_exists('hero', $flatHero));
 check('flat shape: heroMobileImage absent (no mobile_image on the block)', false, array_key_exists('heroMobileImage', $flatHero));
@@ -2099,6 +2216,199 @@ check(
         ['warnings' => ['Duplicate warning.']],
         ['ContentiQ: Duplicate warning.'],
     ]),
+);
+
+// -----------------------------------------------------------------------------
+// LinkRewriter — root-relative links → entry reference tags. Craft's own
+// HtmlField::serializeValue() reference-tag rewrite only fires for hrefs
+// that start with the site's base URL; ContentiQ exports root-relative
+// hrefs, so this helper does the same job (plus the Hyper Url → Entry
+// upgrade) for those. Pure PHP, no Craft/Hyper dependency — resolution is
+// injected via $resolve.
+// -----------------------------------------------------------------------------
+echo "\nLinkRewriter — root-relative links → entry reference tags\n";
+
+require __DIR__ . '/../src/helpers/LinkRewriter.php';
+
+use matrixcreate\contentiqimporter\helpers\LinkRewriter;
+
+$resolve = fn(string $uri): ?int => ['' => 1, 'about/team' => 42, 'blog/hello-world' => 7][$uri] ?? null;
+$siteId  = 1;
+
+check('isRootRelativeHref(): "/" is root-relative', true, LinkRewriter::isRootRelativeHref('/'));
+check('isRootRelativeHref(): "/a/b" is root-relative', true, LinkRewriter::isRootRelativeHref('/a/b'));
+check('isRootRelativeHref(): "//cdn.example.com/x" (protocol-relative) is not', false, LinkRewriter::isRootRelativeHref('//cdn.example.com/x'));
+check('isRootRelativeHref(): "#top" (anchor) is not', false, LinkRewriter::isRootRelativeHref('#top'));
+check('isRootRelativeHref(): "" (empty) is not', false, LinkRewriter::isRootRelativeHref(''));
+check('isRootRelativeHref(): "mailto:a@b.c" is not', false, LinkRewriter::isRootRelativeHref('mailto:a@b.c'));
+check('isRootRelativeHref(): "tel:+44" is not', false, LinkRewriter::isRootRelativeHref('tel:+44'));
+check('isRootRelativeHref(): "https://x.y/z" is not', false, LinkRewriter::isRootRelativeHref('https://x.y/z'));
+check('isRootRelativeHref(): "{entry:1@1:url}" (existing reference tag) is not', false, LinkRewriter::isRootRelativeHref('{entry:1@1:url}'));
+check('isRootRelativeHref(): "relative/path" (no leading slash) is not', false, LinkRewriter::isRootRelativeHref('relative/path'));
+
+$homepage = LinkRewriter::rewriteHtml('<p><a href="/">Home</a></p>', $resolve, $siteId);
+check('rewriteHtml(): homepage "/" resolves via the empty uri', '<p><a href="{entry:1@1:url||/}">Home</a></p>', $homepage['html']);
+check('rewriteHtml(): homepage — resolved count', 1, $homepage['resolved']);
+check('rewriteHtml(): homepage — no unresolved', [], $homepage['unresolved']);
+
+$nested = LinkRewriter::rewriteHtml("<a class=\"x\" href='/about/team' target=\"_blank\">Team</a>", $resolve, $siteId);
+check(
+    'rewriteHtml(): nested path, single-quoted href, other attributes preserved in place',
+    "<a class=\"x\" href='{entry:42@1:url||/about/team}' target=\"_blank\">Team</a>",
+    $nested['html']
+);
+
+$queryFragment = LinkRewriter::rewriteHtml('<a href="/about/team?utm=1#staff">Team</a>', $resolve, $siteId);
+check(
+    'rewriteHtml(): query + fragment survive inside the fallback text',
+    '<a href="{entry:42@1:url||/about/team?utm=1#staff}">Team</a>',
+    $queryFragment['html']
+);
+
+$missing = LinkRewriter::rewriteHtml('<a href="/missing/page">Nope</a>', $resolve, $siteId);
+check('rewriteHtml(): unresolved href is left unchanged', '<a href="/missing/page">Nope</a>', $missing['html']);
+check('rewriteHtml(): unresolved href — resolved count', 0, $missing['resolved']);
+check('rewriteHtml(): unresolved href — unresolved list', ['/missing/page'], $missing['unresolved']);
+
+// Same missing path linked twice — the resolve() memo cache must not stop
+// it being recorded, but it must only appear once, in first-seen order.
+$mixed = LinkRewriter::rewriteHtml(
+    '<p><a href="/about/team">Team</a> <a href="/missing/page">Nope</a> <a href="/missing/page">Nope again</a></p>',
+    $resolve,
+    $siteId
+);
+check('rewriteHtml(): same missing path linked twice is listed once, in first-seen order', ['/missing/page'], $mixed['unresolved']);
+check('rewriteHtml(): mixed resolved+unresolved — resolved count', 1, $mixed['resolved']);
+
+// Anchors, protocol-relative, mailto, https, an already-rewritten reference
+// tag, and an <img src> (never touched — only <a href> is in scope) must
+// all pass through byte-identical.
+$untouched = '<p><a href="#top">Top</a> <a href="//cdn.example.com/x">CDN</a> <a href="mailto:a@b.c">Mail</a> '
+    . '<a href="https://x.y/z">Ext</a> <a href="{entry:1@1:url}">Ref</a></p><img src="/images/x.jpg">';
+$untouchedResult = LinkRewriter::rewriteHtml($untouched, $resolve, $siteId);
+check('rewriteHtml(): skipped hrefs and img src are byte-identical to the input', $untouched, $untouchedResult['html']);
+check('rewriteHtml(): nothing touched — resolved count', 0, $untouchedResult['resolved']);
+check('rewriteHtml(): nothing touched — unresolved list', [], $untouchedResult['unresolved']);
+
+// A hyphenated attribute that merely ends in "href" (data-href) is not an
+// href — the real href on the same tag is rewritten, the data attribute is not.
+$dataHref       = '<a data-href="/about/team" href="/about/team">Team</a>';
+$dataHrefResult = LinkRewriter::rewriteHtml($dataHref, $resolve, $siteId);
+check('rewriteHtml(): data-href is left alone while href is rewritten',
+    '<a data-href="/about/team" href="{entry:42@1:url||/about/team}">Team</a>', $dataHrefResult['html']);
+
+// A stray linkSiteId on the source Url link never overrides the resolved site.
+$siteOverride = LinkRewriter::upgradeHyperLink(
+    ['type' => 'verbb\\hyper\\links\\Url', 'handle' => 'default-verbb-hyper-links-url', 'linkValue' => '/about/team', 'linkSiteId' => 99],
+    $resolve, 'default-verbb-hyper-links-entry', $siteId,
+);
+check('upgradeHyperLink(): source linkSiteId cannot override the resolved site id', 1, $siteOverride['linkSiteId'] ?? null);
+
+$firstPass  = LinkRewriter::rewriteHtml('<p><a href="/about/team">Team</a></p>', $resolve, $siteId);
+$secondPass = LinkRewriter::rewriteHtml($firstPass['html'], $resolve, $siteId);
+check('rewriteHtml(): idempotent — re-running on its own output changes nothing', $firstPass['html'], $secondPass['html']);
+check('rewriteHtml(): idempotent — second pass resolves nothing further', 0, $secondPass['resolved']);
+
+check(
+    'upgradeHyperLink(): Url link upgraded to Entry, carried keys preserved in order',
+    [
+        'type'       => 'verbb\\hyper\\links\\Entry',
+        'handle'     => 'default-verbb-hyper-links-entry',
+        'linkValue'  => [42],
+        'linkSiteId' => 1,
+        'linkText'   => 'Read more',
+        'linkClass'  => 'btn btn-primary',
+        'newWindow'  => true,
+    ],
+    LinkRewriter::upgradeHyperLink(
+        [
+            'type'      => LinkRewriter::URL_LINK_TYPE,
+            'linkValue' => '/about/team',
+            'linkText'  => 'Read more',
+            'linkClass' => 'btn btn-primary',
+            'newWindow' => true,
+        ],
+        $resolve,
+        'default-verbb-hyper-links-entry',
+        $siteId
+    )
+);
+
+check(
+    'upgradeHyperLink(): already an Entry link — null',
+    null,
+    LinkRewriter::upgradeHyperLink(
+        ['type' => LinkRewriter::ENTRY_LINK_TYPE, 'linkValue' => [42]],
+        $resolve,
+        'default-verbb-hyper-links-entry',
+        $siteId
+    )
+);
+check(
+    'upgradeHyperLink(): absolute https:// value — null',
+    null,
+    LinkRewriter::upgradeHyperLink(
+        ['type' => LinkRewriter::URL_LINK_TYPE, 'linkValue' => 'https://x/y'],
+        $resolve,
+        'default-verbb-hyper-links-entry',
+        $siteId
+    )
+);
+check(
+    'upgradeHyperLink(): value with a query string — null',
+    null,
+    LinkRewriter::upgradeHyperLink(
+        ['type' => LinkRewriter::URL_LINK_TYPE, 'linkValue' => '/about/team?x=1'],
+        $resolve,
+        'default-verbb-hyper-links-entry',
+        $siteId
+    )
+);
+check(
+    'upgradeHyperLink(): unresolved path — null',
+    null,
+    LinkRewriter::upgradeHyperLink(
+        ['type' => LinkRewriter::URL_LINK_TYPE, 'linkValue' => '/missing'],
+        $resolve,
+        'default-verbb-hyper-links-entry',
+        $siteId
+    )
+);
+check(
+    'upgradeHyperLink(): linkValue given as an array still upgrades using its first scalar',
+    [
+        'type'       => 'verbb\\hyper\\links\\Entry',
+        'handle'     => 'default-verbb-hyper-links-entry',
+        'linkValue'  => [42],
+        'linkSiteId' => 1,
+    ],
+    LinkRewriter::upgradeHyperLink(
+        ['type' => LinkRewriter::URL_LINK_TYPE, 'linkValue' => ['/about/team']],
+        $resolve,
+        'default-verbb-hyper-links-entry',
+        $siteId
+    )
+);
+
+check(
+    'hyperLinkPath(): Url link with a root-relative path — returns the path',
+    '/about/team',
+    LinkRewriter::hyperLinkPath(['type' => LinkRewriter::URL_LINK_TYPE, 'linkValue' => '/about/team'])
+);
+check(
+    'hyperLinkPath(): Entry-typed link — null',
+    null,
+    LinkRewriter::hyperLinkPath(['type' => LinkRewriter::ENTRY_LINK_TYPE, 'linkValue' => [42]])
+);
+check(
+    'hyperLinkPath(): absolute https:// value — null',
+    null,
+    LinkRewriter::hyperLinkPath(['type' => LinkRewriter::URL_LINK_TYPE, 'linkValue' => 'https://x/y'])
+);
+check(
+    'hyperLinkPath(): value with a query string — null',
+    null,
+    LinkRewriter::hyperLinkPath(['type' => LinkRewriter::URL_LINK_TYPE, 'linkValue' => '/about/team?x=1'])
 );
 
 // -----------------------------------------------------------------------------

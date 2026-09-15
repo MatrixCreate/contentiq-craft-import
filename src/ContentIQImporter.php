@@ -20,6 +20,7 @@ use matrixcreate\contentiqimporter\services\ContentIQApiService;
 use matrixcreate\contentiqimporter\services\GlobalsImportService;
 use matrixcreate\contentiqimporter\services\ImageImportService;
 use matrixcreate\contentiqimporter\services\ImportService;
+use matrixcreate\contentiqimporter\services\LinkSweepService;
 use matrixcreate\contentiqimporter\services\MatrixBuilder;
 use matrixcreate\contentiqimporter\services\NodesRenderer;
 use yii\base\Event;
@@ -31,6 +32,7 @@ use yii\base\Event;
  * @property-read GlobalsImportService $globals
  * @property-read ImageImportService $images
  * @property-read ImportService $imports
+ * @property-read LinkSweepService $linkSweep
  * @property-read MatrixBuilder $matrixBuilder
  * @property-read NodesRenderer $nodes
  * @property-read Settings $settings
@@ -87,6 +89,7 @@ class ContentIQImporter extends Plugin
             'globals' => GlobalsImportService::class,
             'images' => ImageImportService::class,
             'imports' => ImportService::class,
+            'linkSweep' => LinkSweepService::class,
             'matrixBuilder' => MatrixBuilder::class,
             'nodes' => NodesRenderer::class,
         ]);

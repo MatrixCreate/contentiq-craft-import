@@ -163,7 +163,7 @@ return [
                 'heading' => ['cardTitle',         'heading'],     // {level,text} → <hN>
                 'body'    => ['cardText',          'nodes'],       // ContentNode[] → HTML via NodesRenderer
                 'image'   => ['cardImage',         'image'],
-                'button'  => ['actionButtonLabel', 'buttonLabel'], // {label,url} → label text only
+                'button'  => ['cardLink', 'cardButtonLink'], // {label,url} → Hyper link field + showActionButton
             ],
         ],
     ],

@@ -600,6 +600,51 @@ class ImportService extends Component
     }
 
     /**
+     * Runs the two deferred passes every import entry point needs after its
+     * page loop finishes and before ack/auto-lock: PASS 2 (card references,
+     * {@see resolveCardReferences()}) and PASS 3 (the link sweep,
+     * {@see \matrixcreate\contentiqimporter\services\LinkSweepService::sweep()}).
+     * This is the entry point callers should use — call `resolveCardReferences()`
+     * directly only from tests that stub the plugin container.
+     *
+     * The link sweep only ever considers elements genuinely written THIS run
+     * ({@see _writtenPages()}) — never a locked/skipped/deselected page, and
+     * never a page from an earlier run.
+     *
+     * @param array $allCardRefs   Deferred ref sets keyed by entryId; passed straight
+     *                             through to resolveCardReferences() — see its docblock.
+     * @param array $slugToEntryId In-run slug→entry ID map from pass 1.
+     * @param array $pageResults   This run's per-page result rows (the same shape
+     *                             importPage() returns, plus the skip flags and
+     *                             contentiqPageId each caller already threads through) —
+     *                             used only to derive the "genuinely written" set.
+     * @param bool  $dryRun        If true, resolve and warn but write nothing.
+     * @return array<int, string[]> Warnings keyed by owner entry ID.
+     */
+    public function runPostPasses(array $allCardRefs, array $slugToEntryId, array $pageResults, bool $dryRun = false): array
+    {
+        $warnings = $this->resolveCardReferences($allCardRefs, $slugToEntryId, $dryRun);
+
+        $written = $this->_writtenPages($pageResults);
+
+        $linkWarnings = ContentIQImporter::$plugin->linkSweep->sweep(
+            $written['entryIds'],
+            $written['pageIds'],
+            $dryRun,
+        );
+
+        foreach ($linkWarnings as $entryId => $entryWarnings) {
+            if (!isset($warnings[$entryId])) {
+                $warnings[$entryId] = [];
+            }
+
+            array_push($warnings[$entryId], ...$entryWarnings);
+        }
+
+        return $warnings;
+    }
+
+    /**
      * PASS 2: Resolves deferred card references in entryCards blocks.
      *
      * After all pages in a run are imported (so the slug→entry ID map is
@@ -621,7 +666,9 @@ class ImportService extends Component
      * Nested matrix blocks are elements, so each modified block is saved
      * directly; the owner entry is never re-saved.
      *
-     * Shared by every import entry point (SyncJob, CLI import, CP upload).
+     * Shared by every import entry point (SyncJob, CLI import, CP upload) —
+     * but callers should go through {@see runPostPasses()} rather than call
+     * this directly, so PASS 3's link sweep always runs alongside it.
      *
      * @param array $allCardRefs   Deferred ref sets keyed by entryId; each value is a LIST
      *                             of {blockIndex, mode, refs?|parent?, intro?, singlePageMode?}.
@@ -816,6 +863,42 @@ class ImportService extends Component
 
     // Private Methods
     // =========================================================================
+
+    /**
+     * Reduces a run's per-page result rows to the elements genuinely written
+     * THIS run — the twin of the ack predicate in SyncJob::execute() (see its
+     * "5b. Acknowledge..." block, ~SyncJob.php:454-464): success, not
+     * skippedLocked/skippedDeselected/skipped, a real entryId, and a
+     * contentiqPageId. Keep both predicates in sync — a page that shouldn't be
+     * ack'd shouldn't be link-swept either, for the same reason (nothing was
+     * actually written for it).
+     *
+     * @param array $pageResults This run's per-page result rows.
+     * @return array{entryIds: int[], pageIds: int[]}
+     */
+    private function _writtenPages(array $pageResults): array
+    {
+        $entryIds = [];
+        $pageIds  = [];
+
+        foreach ($pageResults as $result) {
+            if (($result['success'] ?? false)
+                && empty($result['skippedLocked'])
+                && empty($result['skippedDeselected'])
+                && empty($result['skipped'])
+                && ($result['entryId'] ?? null) !== null
+                && !empty($result['contentiqPageId'])
+            ) {
+                $entryIds[] = $result['entryId'];
+                $pageIds[]  = $result['contentiqPageId'];
+            }
+        }
+
+        return [
+            'entryIds' => array_values(array_unique($entryIds)),
+            'pageIds'  => array_values(array_unique($pageIds)),
+        ];
+    }
 
     /**
      * Loads the content_types routing map, per-slug replace at each layer:
@@ -2065,8 +2148,9 @@ class ImportService extends Component
 
             foreach ($buttons as $button) {
                 // ContentIQ hero buttons use 'text' for the display label.
-                $label = (string)($button['text'] ?? $button['label'] ?? '');
-                $url   = (string)($button['url'] ?? '');
+                $label  = (string)($button['text'] ?? $button['label'] ?? '');
+                $url    = (string)($button['url'] ?? '');
+                $target = $button['target'] ?? null;
 
                 if ($label === '' && $url === '') {
                     continue;
@@ -2076,13 +2160,7 @@ class ImportService extends Component
                     'type'   => 'actionButton',
                     'fields' => [
                         'actionButton' => [
-                            [
-                                'type'      => 'verbb\\hyper\\links\\Url',
-                                'handle'    => 'default-verbb-hyper-links-url',
-                                'linkValue' => LinkHelper::hyperInertUrl($url),
-                                'linkText'  => $label,
-                                'linkClass' => 'btn btn-primary',
-                            ],
+                            LinkHelper::hyperUrlLink($label, $url, $target),
                         ],
                     ],
                 ];
@@ -2566,20 +2644,15 @@ class ImportService extends Component
 
         foreach ($nodes as $node) {
             if (($node['type'] ?? '') === 'ctaButton') {
-                $label = (string)($node['label'] ?? '');
-                $url   = (string)($node['url'] ?? '');
+                $label  = (string)($node['label'] ?? '');
+                $url    = (string)($node['url'] ?? '');
+                $target = $node['target'] ?? null;
 
                 if ($label !== '' || $url !== '') {
                     $actionButtonsData['new' . (++$btnCounter)] = [
                         'type'   => 'actionButton',
                         'fields' => [
-                            'actionButton' => [[
-                                'type'      => 'verbb\\hyper\\links\\Url',
-                                'handle'    => 'default-verbb-hyper-links-url',
-                                'linkValue' => LinkHelper::hyperInertUrl($url),
-                                'linkText'  => $label,
-                                'linkClass' => 'btn btn-primary',
-                            ]],
+                            'actionButton' => [LinkHelper::hyperUrlLink($label, $url, $target)],
                         ],
                     ];
                 }
@@ -3070,8 +3143,9 @@ class ImportService extends Component
                 continue;
             }
 
-            $label = (string)($button['label'] ?? '');
-            $url   = (string)($button['url'] ?? '');
+            $label  = (string)($button['label'] ?? '');
+            $url    = (string)($button['url'] ?? '');
+            $target = $button['target'] ?? null;
 
             if ($label === '' && $url === '') {
                 continue;
@@ -3080,13 +3154,7 @@ class ImportService extends Component
             $matrixData['new' . (++$counter)] = [
                 'type'   => 'actionButton',
                 'fields' => [
-                    'actionButton' => [[
-                        'type'      => 'verbb\\hyper\\links\\Url',
-                        'handle'    => 'default-verbb-hyper-links-url',
-                        'linkValue' => LinkHelper::hyperInertUrl($url),
-                        'linkText'  => $label,
-                        'linkClass' => 'btn btn-primary',
-                    ]],
+                    'actionButton' => [LinkHelper::hyperUrlLink($label, $url, $target)],
                 ],
             ];
         }

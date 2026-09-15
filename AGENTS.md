@@ -52,6 +52,7 @@ Every area below has a doc with the binding traps and non-obvious behaviour. Rea
 | Globals/offices import, the consent lock | [docs/globals.md](docs/globals.md) | Consent is per-run only — never make it persist across syncs; office writes ignore per-entry locks entirely |
 | Image download, idempotency, SSRF/path-traversal guards | [docs/assets.md](docs/assets.md) | Sanitize the filename *before* the idempotency lookup, not after, or every sync duplicates the asset |
 | CP screens, the sync report, the sidebar widget | [docs/cp-and-widget.md](docs/cp-and-widget.md) | Sidebar content only works via `Entry::EVENT_DEFINE_SIDEBAR_HTML` — the field-layout-designer `BaseUiElement` approach silently doesn't reach the sidebar |
+| Link rewriting — root-relative hrefs/Hyper Url links → live entry references (`LinkSweepService`, pass 3) | [docs/import-pipeline.md](docs/import-pipeline.md#pass-3--link-sweep) | Post-passes run before ack + auto-lock and only touch elements genuinely written this run |
 
 ---
 
@@ -64,6 +65,7 @@ Every area below has a doc with the binding traps and non-obvious behaviour. Rea
 - Omit an inner-Matrix field key when a mode produces zero entries — emit the empty array, or a previous sync's blocks survive as phantoms
 - Flip `preserveBlockIdentity` to `true` for a project without running the live-validation checklist in [docs/block-mapping.md](docs/block-mapping.md#diff-aware-matrix-writes-preserveblockidentity) on a real Craft instance — it rewrites the core Matrix save path and has no integration test coverage
 - Call `ackPages()` for a page that wasn't genuinely written this run — the ack contract is what lets ContentiQ trust the pull actually happened
+- Run a post-pass (`runPostPasses()`) on anything but the written-this-run set, or after the ack/auto-lock step — the link sweep and card-reference resolution both depend on the same "genuinely written" guarantee the ack call relies on
 - Treat a missing `contentiq_entry_syncs` row as unlocked — the safe default everywhere it's checked (Sync screen, `SyncJob`, the sidebar widget) is locked
 - Apply Sync-screen lock/unlock or globals-consent selections at controller-request time — `SyncJob` defers both to job execution, so a queue worker that never runs never "leaks" an unlock against a sync that didn't happen
 - Assume `NodesRenderer::render()` and `renderDocument()` take the same node shapes — they're two independent paths (ContentiQ's own serialised blocks vs. raw ProseMirror for collection children) and conflating them silently mis-renders content

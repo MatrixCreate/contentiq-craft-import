@@ -473,6 +473,11 @@ class CpController extends Controller
                         'skipped'       => false,
                         'contentType'   => $pageData['document']['content_type'] ?? null,
                         'sectionLabel'  => null,
+                        // Tells runPostPasses()'s "genuinely written" predicate
+                        // (ImportService::_writtenPages()) to leave this page out
+                        // of the pass-3 link sweep — nothing was written for it.
+                        'skippedLocked' => true,
+                        'contentiqPageId' => isset($pageData['document']['id']) ? (int)$pageData['document']['id'] : null,
                     ];
                     $hasWarnings = true;
 
@@ -485,6 +490,13 @@ class CpController extends Controller
             }
 
             $result = $importService->importPage($pageData, dryRun: false);
+
+            // Thread the stable ContentIQ page id through to runPostPasses()'s
+            // "genuinely written" predicate (ImportService::_writtenPages()) —
+            // mirrors SyncJob's own $result['contentiqPageId'] assignment.
+            $result['contentiqPageId'] = isset($pageData['document']['id'])
+                ? (int)$pageData['document']['id']
+                : null;
 
             $slug       = $result['slug'] ?? '';
             $parentSlug = $pageData['document']['parent_slug'] ?? null;
@@ -545,8 +557,9 @@ class CpController extends Controller
             }
         }
 
-        // PASS 2: resolve deferred card references now the slug map is complete.
-        $cardWarnings = $importService->resolveCardReferences($allCardRefs, $slugToEntryId);
+        // Post-passes: card references (pass 2) + link sweep (pass 3), now the
+        // slug map is complete.
+        $cardWarnings = $importService->runPostPasses($allCardRefs, $slugToEntryId, $pageResults);
 
         foreach ($cardWarnings as $entryId => $warnings) {
             if (empty($warnings)) {
@@ -1203,15 +1216,32 @@ class CpController extends Controller
             ]);
         }
 
-        // PASS 2: resolve deferred card references (single page — DB lookups only).
-        if (!empty($result['cardRefs']) && ($result['entryId'] ?? null) !== null) {
-            $cardWarnings = ContentIQImporter::$plugin->imports->resolveCardReferences(
-                [$result['entryId'] => array_values($result['cardRefs'])],
-                [],
-            );
+        // Stable ContentIQ page id (when the fetched page carried one) — needed
+        // below for runPostPasses()'s "genuinely written" predicate as well as
+        // the contentiq_page_id mapping and the ack call further down.
+        $pageId = isset($data['document']['id']) ? (int)$data['document']['id'] : null;
 
-            foreach ($cardWarnings[$result['entryId']] ?? [] as $warning) {
-                Craft::warning("Widget sync card refs ({$slug}): {$warning}", __METHOD__);
+        // Post-passes: card references (pass 2) + link sweep (pass 3), single
+        // page — no in-run slug map, DB lookups only. $oneRow mirrors the row
+        // shape SyncJob/CpController batch build: $result plus the fields
+        // ImportService::_writtenPages() reads (contentiqPageId, and the three
+        // skip flags left as their already-correct default here — this is a
+        // real write, gated on the lock check above).
+        if (($result['entryId'] ?? null) !== null) {
+            $entryId     = $result['entryId'];
+            $allCardRefs = !empty($result['cardRefs']) ? [$entryId => array_values($result['cardRefs'])] : [];
+
+            $oneRow = $result + [
+                'contentiqPageId'   => $pageId,
+                'skippedLocked'     => false,
+                'skippedDeselected' => false,
+                'skipped'           => false,
+            ];
+
+            $postPassWarnings = ContentIQImporter::$plugin->imports->runPostPasses($allCardRefs, [], [$oneRow]);
+
+            foreach ($postPassWarnings[$entryId] ?? [] as $warning) {
+                Craft::warning("Widget sync post-passes ({$slug}): {$warning}", __METHOD__);
             }
         }
 
@@ -1230,8 +1260,6 @@ class CpController extends Controller
         // Record the ContentIQ page id → element_id mapping (when the fetched
         // page carried one) so findExistingEntry() can resolve this entry by
         // id on the next sync even if its slug changes.
-        $pageId = isset($data['document']['id']) ? (int)$data['document']['id'] : null;
-
         if ($pageId !== null) {
             $syncData['contentiq_page_id'] = $pageId;
         }

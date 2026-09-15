@@ -2,6 +2,18 @@
 
 Capped rolling log — older entries roll off verbatim to `docs/_archive/`. Durable knowledge belongs in `docs/`, not accumulated here.
 
+## Live entry links — pass 3 link sweep + detected-card cardLink (2026-09-15)
+
+New PASS 3, `LinkSweepService::sweep()` (`src/services/LinkSweepService.php`), upgrades the root-relative links ContentiQ exports (`<a href>` marks, hero/CTA/action-button and detected-mode card `Url` links) into live Craft entry references once every page in a run has an entry id — a CKEditor `href` becomes a `{entry:ID@SITEID:url||/original}` reference tag, a Hyper `Url` link becomes an `Entry` link. Runs immediately after PASS 2 (card references), inside one new shared entry point, `ImportService::runPostPasses()` (`src/services/ImportService.php:624`) — every caller (`SyncJob`, `CpController`'s batch import + widget sync, the CLI's `actionImport`/`_runBatch`) now goes through it instead of calling `resolveCardReferences()` directly. Scope is written-this-run only (`ImportService::_writtenPages()`, the same predicate the ack call uses) plus the run's page-scoped CTA entries; locked pages are never touched, re-checked defensively inside the sweep itself. Pure resolution/rewrite logic lives in `LinkRewriter` (`src/helpers/LinkRewriter.php`), covered by `tests/run-transforms.php` (285 assertions, up from prior count); the Craft-bound field walk in `LinkSweepService` has no automated coverage — live-validated only.
+
+Slice 1 of this change (already released groundwork): detected-mode Cards now write `cardLink` (a Hyper Url link, upgraded by the sweep) + `showActionButton` instead of the old label-only mapping.
+
+Docs updated in the same change: `docs/import-pipeline.md` (new "Pass 3 — link sweep" section + live-validation checklist, `runPostPasses()` established as the shared post-pass entry point across all five call sites), `docs/block-mapping.md` (Cards + Hyper sections note the pass-3 upgrade), `AGENTS.md` (new subsystem-table row + hard limit). Known follow-ups recorded in `docs/import-pipeline.md`, not fixed here: `resolveCardReferences()`'s single-page (D6) branch writes an `entry` field the starter card type doesn't have; `linkClass` isn't a real Hyper attribute so button classes are silently dropped; globals links aren't swept; cards still resolve by slug though the export sends `page.id`.
+
+Same batch: every Hyper button now honours ContentiQ's "Open in new tab" — `LinkHelper::hyperUrlLink()` is the single builder for the six button write sites and sets Hyper `newWindow` from the button's `target` (`'_blank'`), always as a boolean so a re-sync clears it.
+
+**Released 1.32.0 (2026-09-15)** after Ben's live smoke test on the Veluto project.
+
 ## `smaller` inline mark → `<span class="smaller">` in CKEditor HTML (2026-09-11)
 
 `NodesRenderer::_wrapMark()` gained a `'smaller'` arm for ContentiQ's new heading-text mark, rendering `<span class="smaller">…</span>` alongside the existing bold/italic/underline/strike/link arms; every rich-text heading path (hero heading, cardTitle/itemTitle via `_handleHeading()`) already routes through it, and every plain-text path (`extractHeading()`/`_plainText()`, `_extractCtaTitle()`) already drops marks by construction, so neither needed a change. `tests/run-transforms.php` gained two cases (plain + stacked with bold), now 246 assertions (was 244), green. Not released — no version bump, no tag.

@@ -45,4 +45,48 @@ class LinkHelper
 
         return $trimmed;
     }
+
+    /**
+     * Builds the serialized Hyper Url link the import writes for a ContentiQ button.
+     *
+     * @param  string      $label   Button text.
+     * @param  string      $url     Destination URL (may be empty — see {@see hyperInertUrl()}).
+     * @param  mixed       $target  The button's `target` value from the export (e.g. `'_blank'`, null).
+     * @return array<string, mixed>
+     */
+    public static function hyperUrlLink(string $label, string $url, mixed $target = null): array
+    {
+        return [
+            'type'       => 'verbb\\hyper\\links\\Url',
+            'handle'     => 'default-verbb-hyper-links-url',
+            'linkValue'  => self::hyperInertUrl($url),
+            'linkText'   => $label,
+            'linkClass'  => 'btn btn-primary',
+            'newWindow'  => self::opensInNewWindow($target),
+        ];
+    }
+
+    /**
+     * Whether a ContentiQ button's `target` value means "open in a new window".
+     *
+     * True for the string `'_blank'` (case-insensitive, trimmed) or boolean
+     * `true`; false for everything else (including null, missing, `'_self'`).
+     * Always resolves to a boolean — a `false` on re-sync must clear a
+     * previously set Hyper `newWindow` flag (whole-page replace semantics).
+     *
+     * @param  mixed  $target  The raw `target` value from the export.
+     * @return bool
+     */
+    public static function opensInNewWindow(mixed $target): bool
+    {
+        if ($target === true) {
+            return true;
+        }
+
+        if (is_string($target)) {
+            return strtolower(trim($target)) === '_blank';
+        }
+
+        return false;
+    }
 }

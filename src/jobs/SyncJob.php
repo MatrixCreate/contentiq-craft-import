@@ -421,10 +421,11 @@ class SyncJob extends BaseJob
 
             $this->setProgress($queue, 1);
 
-            // 5. PASS 2: Resolve deferred card references via the shared resolver.
-            //    Warnings land on the owning page's result row and count toward the
-            //    run status (previously pass-2 warnings never flipped $hasWarnings).
-            $cardWarnings = $importService->resolveCardReferences($allCardRefs, $slugToEntryId);
+            // 5. Post-passes: card references (pass 2) + link sweep (pass 3) via
+            //    the shared runPostPasses(). Warnings land on the owning page's
+            //    result row and count toward the run status (previously pass-2
+            //    warnings never flipped $hasWarnings).
+            $cardWarnings = $importService->runPostPasses($allCardRefs, $slugToEntryId, $pageResults);
 
             foreach ($cardWarnings as $entryId => $warnings) {
                 if (empty($warnings)) {
