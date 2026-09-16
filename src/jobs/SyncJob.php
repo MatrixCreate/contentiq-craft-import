@@ -371,6 +371,12 @@ class SyncJob extends BaseJob
                             } else {
                                 $structures->appendToRoot($structureId, $entry);
                             }
+
+                            // afterMoveInStructure() queues its own URI write rather than
+                            // performing it inline — since this sync is itself a queue job,
+                            // that queued write lands after this run finishes. Force it now
+                            // so $entry->uri is correct for PASS 4's redirect sweep below.
+                            $importService->refreshUri($entry);
                         } catch (\Throwable $e) {
                             $result['warnings'][] = 'Could not update structure position: ' . $e->getMessage();
                         }

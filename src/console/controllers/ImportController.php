@@ -83,6 +83,19 @@ class ImportController extends Controller
     private ?int $_lastContentiqPageId = null;
 
     /**
+     * `document.legacy_url` from the most recent _runSinglePage call —
+     * threaded into the pageResults rows in actionImport()/_runBatch() so
+     * ImportService::_writtenPages() can carry it through to PASS 4
+     * ({@see \matrixcreate\contentiqimporter\services\RedirectService::sweep()}).
+     * Set unconditionally at the top of _runSinglePage(), same expression
+     * importPage() itself uses for $result['legacyUrl'] — correct for both
+     * the locked-skip branch and the real-import branch.
+     *
+     * @var string|null
+     */
+    private ?string $_lastLegacyUrl = null;
+
+    /**
      * Whether the most recent _runSinglePage call took the locked-skip
      * branch — nothing was written for that page, so runPostPasses()'s
      * "genuinely written" predicate (ImportService::_writtenPages()) must
@@ -211,6 +224,7 @@ class ImportController extends Controller
                 'success'           => true,
                 'entryId'           => $this->_lastEntryId,
                 'contentiqPageId'   => $this->_lastContentiqPageId,
+                'legacyUrl'         => $this->_lastLegacyUrl,
                 'skippedLocked'     => $this->_lastSkippedLocked,
                 'skippedDeselected' => false,
                 'skipped'           => false,
@@ -278,6 +292,7 @@ class ImportController extends Controller
                     'success'           => true,
                     'entryId'           => $this->_lastEntryId,
                     'contentiqPageId'   => $this->_lastContentiqPageId,
+                    'legacyUrl'         => $this->_lastLegacyUrl,
                     'skippedLocked'     => $this->_lastSkippedLocked,
                     'skippedDeselected' => false,
                     'skipped'           => false,
@@ -483,6 +498,11 @@ class ImportController extends Controller
         // SyncJob/CpController thread document.id through to the ack/sweep
         // predicate on their own result rows.
         $this->_lastContentiqPageId = isset($data['document']['id']) ? (int)$data['document']['id'] : null;
+
+        // Stable ContentIQ legacy URL, set unconditionally for the same
+        // reason as _lastContentiqPageId above — see importPage()'s own
+        // $result['legacyUrl'] assignment, which uses this same expression.
+        $this->_lastLegacyUrl = $data['document']['legacy_url'] ?? null;
 
         // Reset every call — only the locked-skip branch below sets this true.
         $this->_lastSkippedLocked = false;

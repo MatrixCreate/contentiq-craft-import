@@ -882,6 +882,41 @@ class ImportService extends Component
         }
     }
 
+    /**
+     * Public entry point onto the same URI-regeneration Craft call
+     * {@see _refreshUri()} performs internally, for callers that position an
+     * entry in a structure themselves AFTER this service has already saved
+     * it — currently `SyncJob` and `CpController`, immediately following
+     * `Structures::append()`/`appendToRoot()`.
+     *
+     * Craft's own `Entry::afterMoveInStructure()` calls
+     * `updateElementSlugAndUri($this, true, true, true)` — the trailing
+     * `true` QUEUES the URI write as a separate `UpdateElementSlugsAndUris`
+     * job rather than performing it inline. Because the sync itself runs as
+     * a queue job, that queued write lands strictly after the current run
+     * finishes, leaving `$entry->uri` empty for anything later in THIS run
+     * that reads it — PASS 4's legacy-redirect sweep chief among them (see
+     * `RedirectService::sweep()`). This method forces the write inline
+     * instead: element only, other sites yes, descendants no, not queued.
+     *
+     * Failures are swallowed and logged rather than surfaced to a page
+     * result — unlike {@see _refreshUri()}, callers here have no `$result`
+     * array in scope at the point they call this (it's inside their own
+     * structure-positioning `try`/`catch`, keyed to a different warning
+     * message) — a missing URI is a front-end inconvenience, never a reason
+     * to fail a sync.
+     *
+     * @param Entry $entry The entry just positioned in a structure.
+     */
+    public function refreshUri(Entry $entry): void
+    {
+        try {
+            Craft::$app->getElements()->updateElementSlugAndUri($entry, true, false, false);
+        } catch (Throwable $e) {
+            Craft::error("ContentIQImporter: could not refresh URI for entry {$entry->id}: " . $e->getMessage(), __METHOD__);
+        }
+    }
+
     // Private Methods
     // =========================================================================
 
@@ -897,6 +932,13 @@ class ImportService extends Component
      * `legacyUrls` carries every written page's `legacyUrl` (possibly null) —
      * {@see \matrixcreate\contentiqimporter\services\RedirectService::sweep()}
      * is the one that filters out the empty ones, not this method.
+     *
+     * IMPORTANT: rows in $pageResults MUST be the unmodified {@see importPage()}
+     * result (or a superset built with `$result + [...]`/direct key assignment
+     * on `$result`) — never a hand-built array with only the skip flags and
+     * entryId. PASS 3/PASS 4 read keys straight off these rows (`legacyUrl`
+     * here; `cardRefs` is read by the caller before this method runs) that only
+     * `importPage()` itself populates — a hand-rebuilt row silently drops them.
      *
      * @param array $pageResults This run's per-page result rows.
      * @return array{entryIds: int[], pageIds: int[], legacyUrls: array<int, ?string>}

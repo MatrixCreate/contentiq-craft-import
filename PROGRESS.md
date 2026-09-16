@@ -2,6 +2,22 @@
 
 Capped rolling log — older entries roll off verbatim to `docs/_archive/`. Durable knowledge belongs in `docs/`, not accumulated here.
 
+## Pass 4 live-fix on Veluto: URI timing, Retour Short Links, both slash forms, CLI rows (2026-09-16, 1.33.1)
+
+First live run of 1.33.0's redirect pass on veluto.test wrote five rows that all pointed at `/` and were invisible in Retour's Redirects list. Three causes, all confirmed by reading vendor code, plus one found by audit:
+
+**URI timing.** `SyncJob` and `CpController` position each page with `Structures::append()/appendToRoot()` after `importPage()`; Craft's `Entry::afterMoveInStructure()` then calls `updateElementSlugAndUri($this, true, true, true)` — the fourth argument QUEUES the URI write as a separate job. The sync is itself a queue job, so at post-pass time every new page's `uri` was still empty and `entryUriToPath('')` returned `/`. The old "pages get their URI for free from structure positioning" claim in AGENTS.md and `docs/import-pipeline.md` was wrong and is corrected. Fix: new public `ImportService::refreshUri()` (inline `updateElementSlugAndUri($entry, true, false, false)`) called by both call sites right after the append, and `RedirectService::sweep()` now refuses to write a redirect for an entry with no URI (one inline refresh attempt, then a page warning and skip). New AGENTS.md hard limit covers reading `$entry->uri` in the same run as a structure move.
+
+**Retour Short Links.** Retour's CP table lists only rows with `associatedElementId = 0`; non-zero rows are its Short Links feature. 1.33.0 set it to the entry id, so every row was filed under Short Links. The key is no longer sent; a re-sync upserts the existing rows in place (Retour keys on parsed source + site), no manual cleanup.
+
+**Both slash forms.** Ben's ruling after testing `…/old-kitchens` vs `…/old-kitchens/`: Retour matches the raw request path literally and Craft does not canonicalise a slash-less request, so each legacy URL now writes two exact-match rows (`/old-kitchens/` and `/old-kitchens`, both → `/kitchens/`) via new pure `sourceVariants()`; root and file-like paths stay one row; the same-path skip still compares the canonical form and skips all variants. Nginx canonicalisation was considered and rejected as per-host and easy to forget.
+
+**CLI rows.** `ImportController` hand-built minimal page-result rows for `runPostPasses()` without `legacyUrl`, so command-line syncs never created redirects. Now threads `_lastLegacyUrl` through both CLI sites; new AGENTS.md hard limit against hand-built result rows. Audit of every other row builder (SyncJob, CP batch, widget) found them passing the full `importPage()` result already.
+
+`tests/run-transforms.php` now 323 assertions (was 319). `sweep()` itself remains Craft/Retour-bound, validated live on Veluto: five pages → correct nested destinations (`/kitchens/modern/` etc.), rows visible in Retour's Redirects list, re-sync idempotent.
+
+**Released 1.33.1 (2026-09-16)** after Ben's live test on Veluto.
+
 ## Original publication date → postDate, legacy URL → Retour redirects (2026-09-16)
 
 Two ContentiQ `document` keys that every export already carried but the importer ignored. `document.original_publication_date` (`YYYY-MM-DD`, any page type — it is not collection-gated on the ContentiQ side) now sets the entry's `postDate` at all four save sites (page/homepage create + update in `importPage()`, collection-child create + update in `_importCollectionChild()`) via a new `_applyPostDate()`; overwritten on every re-sync, untouched when the date is null or the toggle is off, page warning on an unparseable value. Config `postDate => ['pages' => true, 'collections' => true]`, defaults in `_getConfig()`, mirrored explicitly in craft-starter's `config/contentiq.php`.

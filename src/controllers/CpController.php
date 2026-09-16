@@ -540,6 +540,11 @@ class CpController extends Controller
                         } else {
                             $structures->appendToRoot($structureId, $entry);
                         }
+
+                        // afterMoveInStructure() queues its own URI write rather than
+                        // performing it inline — force it now so $entry->uri is correct
+                        // for PASS 4's redirect sweep below (see ImportService::refreshUri()).
+                        $importService->refreshUri($entry);
                     } catch (\Throwable $e) {
                         $result['warnings'][] = 'Could not update structure position: ' . $e->getMessage();
                     }

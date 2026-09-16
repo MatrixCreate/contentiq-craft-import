@@ -2495,6 +2495,27 @@ check(
 );
 
 check(
+    'sourceVariants(): ordinary path — both slash forms, slash form first',
+    ['/old-kitchens/', '/old-kitchens'],
+    RedirectService::sourceVariants('/old-kitchens/')
+);
+check(
+    'sourceVariants(): root — one form only',
+    ['/'],
+    RedirectService::sourceVariants('/')
+);
+check(
+    'sourceVariants(): file-like path (no trailing slash by construction) — one form only',
+    ['/roofing.html'],
+    RedirectService::sourceVariants('/roofing.html')
+);
+check(
+    'sourceVariants(): nested path — both slash forms, slash form first',
+    ['/a/b/', '/a/b'],
+    RedirectService::sourceVariants('/a/b/')
+);
+
+check(
     'legacyUrlHadQuery(): URL with a query string — true',
     true,
     RedirectService::legacyUrlHadQuery('https://old-site.example.com/x?a=1')

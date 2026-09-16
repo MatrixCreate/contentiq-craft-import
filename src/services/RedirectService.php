@@ -35,6 +35,28 @@ use yii\base\Component;
  * destination already has an outbound redirect of its own and, if so, warns
  * that the two will chain rather than silently deleting either one.
  *
+ * `saveRedirect()`'s config array never sets `associatedElementId` — it's
+ * left at the model's own default (0) deliberately. Retour treats a non-zero
+ * `associatedElementId` as a "Short Link" and hides it from the CP Redirects
+ * list (`TablesController::actionRedirectTableData()` filters
+ * `associatedElementId = 0`); setting it to the owner entry's id would make
+ * every redirect this pass creates invisible in Retour's own UI.
+ *
+ * `sweep()` also guards against reading `$entry->uri` before it's been
+ * written: {@see \matrixcreate\contentiqimporter\services\ImportService::refreshUri()}
+ * is normally called by `SyncJob`/`CpController` right after structure
+ * positioning, but as a belt-and-braces check `sweep()` retries the same
+ * inline `updateElementSlugAndUri()` call once itself before skipping a page
+ * with an empty URI — see "URI-timing trap" in docs/import-pipeline.md.
+ *
+ * Every page gets TWO Retour rows per redirect, not one — see
+ * {@see sourceVariants()}. Retour exact-matches `redirectSrcUrl` against the
+ * raw request path with no slash normalisation of its own, and Craft does
+ * not canonicalise a slash-less inbound request before Retour's 404 handler
+ * sees it, so both `/old-kitchens/` and `/old-kitchens` are saved as separate
+ * rows. The destination (`redirectDestUrl`) stays a single trailing-slash
+ * form either way — it's Craft's own canonical URL, not raw user input.
+ *
  * @author Matrix Create <hello@matrixcreate.com>
  * @since 1.33.0
  */
@@ -68,10 +90,12 @@ class RedirectService extends Component
      *      pass stops there.
      *   4. Per page — source path (`legacyUrlToPath()`) must parse; a page
      *      whose current source path already matches its Craft destination
-     *      is skipped silently (the common case: scrapers fill `legacy_url`
-     *      from the page's own current URL).
+     *      is skipped silently, ALL source variants included (the common
+     *      case: scrapers fill `legacy_url` from the page's own current URL).
      *
      * Never deletes an existing Retour redirect — see the class docblock.
+     * Writes TWO source rows per page (trailing-slash and slash-less) — see
+     * {@see sourceVariants()} and the class docblock.
      *
      * @param array<int, ?string> $written Owner entry id => `legacyUrl` (or null),
      *                                     already filtered to elements genuinely
@@ -130,6 +154,26 @@ class RedirectService extends Component
                 continue;
             }
 
+            // Structure positioning (SyncJob/CpController) queues its own URI write via
+            // afterMoveInStructure() rather than performing it inline, and this pass runs
+            // in the same run — normally ImportService::refreshUri() already forced it, but
+            // belt-and-braces here: a null/empty uri (homepage is fine as '__home__') gets
+            // one inline refresh attempt before we give up, so a same-run race never writes
+            // '/' as every page's redirect destination.
+            if (($entry->uri === null || $entry->uri === '') && $entry->uri !== '__home__') {
+                try {
+                    Craft::$app->getElements()->updateElementSlugAndUri($entry, true, false, false);
+                } catch (Throwable) {
+                    // Swallowed — the empty-uri check below still catches it and skips
+                    // this page's redirect with a warning rather than building one from '/'.
+                }
+
+                if ($entry->uri === null || $entry->uri === '') {
+                    $warn("Entry {$entry->id} has no URI yet — legacy redirect skipped.");
+                    continue;
+                }
+            }
+
             $destPath = self::entryUriToPath((string)$entry->uri);
 
             // The common case — scrapers fill legacy_url from the page's own
@@ -144,40 +188,57 @@ class RedirectService extends Component
 
             // Advisory only — read-only, never deletes anything (see the
             // class docblock for why checkForRedirectLoop is off below).
+            // Once per page, not per source variant below — it's about the
+            // shared destination, not the source path.
             $chainedDest = $this->_existingRedirectDestination($destPath, $entry->siteId);
 
             if ($chainedDest !== null) {
                 $warn("Retour already redirects {$destPath} \u{2192} {$chainedDest}; legacy redirect {$sourcePath} \u{2192} {$destPath} will chain — review in Retour.");
             }
 
+            // Retour matches redirectSrcUrl against the raw request path literally,
+            // and Craft does not canonicalise an inbound slash-less request before
+            // it reaches Retour's 404 handler — so both slash forms of the source
+            // are written as separate exact-match rows. See sourceVariants().
+            $sourceVariants = self::sourceVariants($sourcePath);
+
             if ($dryRun) {
-                $warn("Would create redirect: {$sourcePath} \u{2192} {$destPath}");
+                foreach ($sourceVariants as $variant) {
+                    $warn("Would create redirect: {$variant} \u{2192} {$destPath}");
+                }
                 continue;
             }
 
-            try {
-                // checkForRedirectLoop is deliberately false — Retour's own
-                // loop prevention silently DELETES any existing redirect
-                // whose redirectSrcUrl equals our redirectDestUrl, unscoped
-                // to ownership. See the class docblock.
-                $saved = \nystudio107\retour\Retour::$plugin->redirects->saveRedirect([
-                    'id'                  => 0,
-                    'siteId'              => $entry->siteId,
-                    'associatedElementId' => $entry->id,
-                    'enabled'             => true,
-                    'redirectSrcUrl'      => $sourcePath,
-                    'redirectSrcMatch'    => 'pathonly',
-                    'redirectMatchType'   => 'exactmatch',
-                    'redirectDestUrl'     => $destPath,
-                    'redirectHttpCode'    => $httpCode,
-                ], checkForRedirectLoop: false);
-            } catch (Throwable $e) {
-                $warn("Could not create redirect from '{$sourcePath}': " . $e->getMessage());
-                continue;
-            }
+            foreach ($sourceVariants as $variant) {
+                try {
+                    // checkForRedirectLoop is deliberately false — Retour's own
+                    // loop prevention silently DELETES any existing redirect
+                    // whose redirectSrcUrl equals our redirectDestUrl, unscoped
+                    // to ownership. See the class docblock.
+                    // associatedElementId is deliberately omitted — it defaults to 0 on
+                    // the model, and Retour's own Redirects-list query
+                    // (TablesController::actionRedirectTableData()) filters on
+                    // associatedElementId = 0 to hide "Short Links"; a non-zero value here
+                    // would make our redirect invisible in the CP Redirects list. See the
+                    // class docblock.
+                    $saved = \nystudio107\retour\Retour::$plugin->redirects->saveRedirect([
+                        'id'                => 0,
+                        'siteId'            => $entry->siteId,
+                        'enabled'           => true,
+                        'redirectSrcUrl'    => $variant,
+                        'redirectSrcMatch'  => 'pathonly',
+                        'redirectMatchType' => 'exactmatch',
+                        'redirectDestUrl'   => $destPath,
+                        'redirectHttpCode'  => $httpCode,
+                    ], checkForRedirectLoop: false);
+                } catch (Throwable $e) {
+                    $warn("Could not create redirect from '{$variant}': " . $e->getMessage());
+                    continue;
+                }
 
-            if (!$saved) {
-                $warn("Could not create redirect from '{$sourcePath}' — Retour rejected it.");
+                if (!$saved) {
+                    $warn("Could not create redirect from '{$variant}' — Retour rejected it.");
+                }
             }
         }
 
@@ -253,6 +314,46 @@ class RedirectService extends Component
         }
 
         return $path . '/';
+    }
+
+    /**
+     * Expands a {@see legacyUrlToPath()} canonical (trailing-slash) source path
+     * into the distinct `redirectSrcUrl` values `sweep()` actually saves.
+     *
+     * Ben's ruling: Retour matches `redirectSrcUrl` against the raw request
+     * path literally (see {@see legacyUrlToPath()}'s docblock), and Craft does
+     * NOT canonicalise an inbound `/old-kitchens` request to `/old-kitchens/`
+     * before routing reaches Retour's 404 handler — so a trailing-slash-only
+     * redirect silently misses any inbound link/bookmark that omits the
+     * slash. Both forms are written as separate exact-match rows to cover
+     * either.
+     *
+     * Three shapes, slash form always first:
+     *   - Root (`/`) — one form only; there's no slash-less variant of the root.
+     *   - File-like (`/roofing.html`, no trailing slash by construction — see
+     *     {@see legacyUrlToPath()}) — one form only; appending a slash would
+     *     produce a path a real request never sends.
+     *   - Everything else — both `{path}/` and `{path}` (trailing slash
+     *     stripped).
+     *
+     * Pure — no Craft dependency — so it's unit-testable standalone (see
+     * `tests/run-transforms.php`).
+     *
+     * @param string $canonicalPath The trailing-slash canonical form returned
+     *                               by {@see legacyUrlToPath()}.
+     * @return string[] Distinct `redirectSrcUrl` values to save, slash form first.
+     */
+    public static function sourceVariants(string $canonicalPath): array
+    {
+        if ($canonicalPath === '/') {
+            return ['/'];
+        }
+
+        if (!str_ends_with($canonicalPath, '/')) {
+            return [$canonicalPath];
+        }
+
+        return [$canonicalPath, rtrim($canonicalPath, '/')];
     }
 
     /**
