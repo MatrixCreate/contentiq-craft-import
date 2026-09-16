@@ -158,7 +158,6 @@ class SyncJob extends BaseJob
             $sectionHandle = $config['section'] ?? 'pages';
             $section       = Craft::$app->entries->getSectionByHandle($sectionHandle);
             $structureId   = $section?->structureId;
-            $structures    = Craft::$app->getStructures();
 
             // Build slug → entry ID map for hierarchy and card ref resolution.
             $slugToEntryId = [];
@@ -340,6 +339,12 @@ class SyncJob extends BaseJob
                 $slug       = $result['slug'] ?? '';
                 $isHomepage = (bool)($pageData['document']['is_homepage'] ?? false);
 
+                // Thread ContentIQ's own sibling order through to the auto-lock
+                // step below, which persists it into contentiq_entry_syncs so
+                // future syncs can position this page's siblings correctly even
+                // on a run that doesn't re-import this page itself.
+                $result['sortOrder'] = (int)($pageData['document']['sort_order'] ?? 0);
+
                 // Collection children are routed to their own section and have no Craft
                 // parent (their collection parent is excluded from export) — skip the
                 // Pages structure positioning / parent resolution for them entirely.
@@ -347,39 +352,42 @@ class SyncJob extends BaseJob
                     $entry = \craft\elements\Entry::find()->id($entryId)->status(null)->one();
 
                     if ($entry !== null) {
-                        try {
-                            if ($parentSlug !== null && $parentSlug !== '') {
-                                // Try current-batch map first, then fall back to a Craft query
-                                // so re-imports correctly place children under existing parents.
-                                $parentId = $slugToEntryId[$parentSlug] ?? null;
+                        $parentId = null;
 
-                                if ($parentId === null) {
-                                    $parentEntry = \craft\elements\Entry::find()
-                                        ->section($sectionHandle)
-                                        ->slug($parentSlug)
-                                        ->status(null)
-                                        ->one();
-                                    $parentId = $parentEntry?->id;
-                                }
+                        if ($parentSlug !== null && $parentSlug !== '') {
+                            // Try current-batch map first, then fall back to a Craft query
+                            // so re-imports correctly place children under existing parents.
+                            $parentId = $slugToEntryId[$parentSlug] ?? null;
 
-                                if ($parentId !== null) {
-                                    $structures->append($structureId, $entry, $parentId);
-                                } else {
-                                    $structures->appendToRoot($structureId, $entry);
-                                    $result['warnings'][] = "Parent slug '{$parentSlug}' not found — entry saved at root level.";
-                                }
-                            } else {
-                                $structures->appendToRoot($structureId, $entry);
+                            if ($parentId === null) {
+                                $parentEntry = \craft\elements\Entry::find()
+                                    ->section($sectionHandle)
+                                    ->slug($parentSlug)
+                                    ->status(null)
+                                    ->one();
+                                $parentId = $parentEntry?->id;
                             }
 
-                            // afterMoveInStructure() queues its own URI write rather than
-                            // performing it inline — since this sync is itself a queue job,
-                            // that queued write lands after this run finishes. Force it now
-                            // so $entry->uri is correct for PASS 4's redirect sweep below.
-                            $importService->refreshUri($entry);
-                        } catch (\Throwable $e) {
-                            $result['warnings'][] = 'Could not update structure position: ' . $e->getMessage();
+                            if ($parentId === null) {
+                                $result['warnings'][] = "Parent slug '{$parentSlug}' not found — entry saved at root level.";
+                            }
                         }
+
+                        // positionInStructure() moveBefore()s/append()s/appendToRoot()s
+                        // as needed, then refreshes the URI inline (afterMoveInStructure()
+                        // queues its own write rather than performing it — since this sync
+                        // is itself a queue job, that queued write would land after this
+                        // run finishes, leaving $entry->uri empty for PASS 4's redirect
+                        // sweep below). Failures are caught internally and appended to
+                        // $result['warnings'].
+                        $importService->positionInStructure(
+                            entry: $entry,
+                            parentId: $parentId,
+                            structureId: $structureId,
+                            sortOrder: $result['sortOrder'],
+                            contentiqPageId: $contentiqPageId,
+                            warnings: $result['warnings'],
+                        );
                     }
                 }
 
@@ -566,10 +574,17 @@ class SyncJob extends BaseJob
                 // Record the ContentIQ page id → element_id mapping (when the
                 // page carried one) so findExistingEntry() can resolve this
                 // entry by id on the next sync even if its slug changes.
+                // sort_order persists ContentIQ's own sibling order so a
+                // future sync that doesn't re-import this page can still
+                // position its siblings correctly — see
+                // ImportService::positionInStructure(). 0 is a legitimate
+                // first-sibling value, so this is always written (not
+                // guarded behind !empty(), unlike contentiq_page_id above).
                 $syncData = [
-                    'locked'    => true,
-                    'synced_at' => $now,
-                    'notes'     => $result['blockNotes'] ?? '',
+                    'locked'     => true,
+                    'synced_at'  => $now,
+                    'notes'      => $result['blockNotes'] ?? '',
+                    'sort_order' => $result['sortOrder'] ?? 0,
                 ];
 
                 if (!empty($result['contentiqPageId'])) {

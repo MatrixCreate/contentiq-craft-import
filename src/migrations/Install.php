@@ -96,6 +96,7 @@ class Install extends Migration
             'synced_at'         => $this->dateTime()->null(),
             'notes'             => $this->text(),
             'contentiq_page_id' => $this->integer()->null(),
+            'sort_order'        => $this->integer()->null(),
             'PRIMARY KEY([[element_id]])',
         ]);
 

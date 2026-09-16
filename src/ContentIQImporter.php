@@ -72,7 +72,7 @@ class ContentIQImporter extends Plugin
     /**
      * @var string
      */
-    public string $schemaVersion = '1.2.0';
+    public string $schemaVersion = '1.3.0';
 
     // Public Methods
     // =========================================================================

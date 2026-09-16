@@ -426,7 +426,6 @@ class CpController extends Controller
         $sectionHandle = $config['section'] ?? 'pages';
         $section       = Craft::$app->entries->getSectionByHandle($sectionHandle);
         $structureId   = $section?->structureId;
-        $structures    = Craft::$app->getStructures();
 
         foreach ($pages as $pageData) {
             // Enforce entry locks server-side — the upload path previously
@@ -498,6 +497,13 @@ class CpController extends Controller
                 ? (int)$pageData['document']['id']
                 : null;
 
+            // ContentIQ's own per-parent sibling order — passed to
+            // positionInStructure() below. This upload path has no
+            // contentiq_entry_syncs upsert step of its own (unlike SyncJob's
+            // auto-lock step), so it isn't persisted here, only used for
+            // this run's own positioning.
+            $result['sortOrder'] = (int)($pageData['document']['sort_order'] ?? 0);
+
             $slug       = $result['slug'] ?? '';
             $parentSlug = $pageData['document']['parent_slug'] ?? null;
             $entryId    = $result['entryId'] ?? null;
@@ -516,38 +522,40 @@ class CpController extends Controller
                 $entry = Entry::find()->id($entryId)->status(null)->one();
 
                 if ($entry !== null) {
-                    try {
-                        if ($parentSlug !== null && $parentSlug !== '') {
-                            // Try current-batch map first, then fall back to a Craft query
-                            // so re-imports correctly place children under existing parents.
-                            $parentId = $slugToEntryId[$parentSlug] ?? null;
+                    $parentId = null;
 
-                            if ($parentId === null) {
-                                $parentEntry = Entry::find()
-                                    ->section($sectionHandle)
-                                    ->slug($parentSlug)
-                                    ->status(null)
-                                    ->one();
-                                $parentId = $parentEntry?->id;
-                            }
+                    if ($parentSlug !== null && $parentSlug !== '') {
+                        // Try current-batch map first, then fall back to a Craft query
+                        // so re-imports correctly place children under existing parents.
+                        $parentId = $slugToEntryId[$parentSlug] ?? null;
 
-                            if ($parentId !== null) {
-                                $structures->append($structureId, $entry, $parentId);
-                            } else {
-                                $structures->appendToRoot($structureId, $entry);
-                                $result['warnings'][] = "Parent slug '{$parentSlug}' not found — entry saved at root level.";
-                            }
-                        } else {
-                            $structures->appendToRoot($structureId, $entry);
+                        if ($parentId === null) {
+                            $parentEntry = Entry::find()
+                                ->section($sectionHandle)
+                                ->slug($parentSlug)
+                                ->status(null)
+                                ->one();
+                            $parentId = $parentEntry?->id;
                         }
 
-                        // afterMoveInStructure() queues its own URI write rather than
-                        // performing it inline — force it now so $entry->uri is correct
-                        // for PASS 4's redirect sweep below (see ImportService::refreshUri()).
-                        $importService->refreshUri($entry);
-                    } catch (\Throwable $e) {
-                        $result['warnings'][] = 'Could not update structure position: ' . $e->getMessage();
+                        if ($parentId === null) {
+                            $result['warnings'][] = "Parent slug '{$parentSlug}' not found — entry saved at root level.";
+                        }
                     }
+
+                    // positionInStructure() moveBefore()s/append()s/appendToRoot()s
+                    // as needed, then refreshes the URI inline — force it now so
+                    // $entry->uri is correct for PASS 4's redirect sweep below (see
+                    // ImportService::refreshUri()). Failures are caught internally
+                    // and appended to $result['warnings'].
+                    $importService->positionInStructure(
+                        entry: $entry,
+                        parentId: $parentId,
+                        structureId: $structureId,
+                        sortOrder: $result['sortOrder'],
+                        contentiqPageId: $result['contentiqPageId'],
+                        warnings: $result['warnings'],
+                    );
                 }
             }
 
@@ -1260,7 +1268,18 @@ class CpController extends Controller
             ->where(['element_id' => $elementId])
             ->exists();
 
-        $syncData = ['synced_at' => $now, 'notes' => $notes, 'locked' => true];
+        // sort_order keeps this entry's stored ContentIQ sibling order current
+        // even though the widget sync itself never repositions anything — a
+        // later batch sync reads it via ImportService::positionInStructure()
+        // to place THIS entry's siblings correctly. 0 is a legitimate
+        // first-sibling value, so it's always written, not guarded behind
+        // !empty() like contentiq_page_id below.
+        $syncData = [
+            'synced_at'  => $now,
+            'notes'      => $notes,
+            'locked'     => true,
+            'sort_order' => (int)($data['document']['sort_order'] ?? 0),
+        ];
 
         // Record the ContentIQ page id → element_id mapping (when the fetched
         // page carried one) so findExistingEntry() can resolve this entry by

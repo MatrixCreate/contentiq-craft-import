@@ -90,6 +90,15 @@ php craft contentiq-importer/import --file=export.json --force
 - `--verbose` (`-v`) — logs each block and image as it's processed.
 - `--force` — bypasses the entry-lock check. By default a locked entry is skipped (a missing lock row also counts as locked); `--force` overrides that so the CLI can write over it.
 
+### Structure-order repair (one-time)
+
+```bash
+php craft contentiq-importer/structure/reorder
+php craft contentiq-importer/structure/reorder --dry-run
+```
+
+A one-time catch-up for sites that were syncing before ContentiQ's per-parent sibling order (`document.sort_order`) was persisted — repositions every already-synced page to match it, without writing content, acknowledging pages, or touching locks. `--dry-run` reports what would move and writes nothing. It never relocates a page whose `parent_slug` doesn't resolve to a Craft entry — that page is skipped, not moved to root (unlike a normal sync's import path). See [docs/import-pipeline.md](docs/import-pipeline.md#hierarchy--parentchild-positioning-for-structure-pages) for how positioning works day-to-day.
+
 ## How it fits with ContentiQ
 
 This plugin is a **pull-only** consumer of ContentiQ's export API — Craft never receives a push, and every sync is initiated from this side (a CP button, the CLI, or the sidebar widget). A sync overwrites an entry's content wholesale (**whole-page replace**), not a field-by-field merge; the only defence against a re-sync clobbering hand-edits is per-entry locking. After a successful write, this plugin sends an explicit **acknowledgement** back to ContentiQ (`POST /api/v1/pages/ack`) for the pages it actually wrote — that's the only thing that mutates ContentiQ's own state. See [docs/integration.md](docs/integration.md) for the full wire contract.

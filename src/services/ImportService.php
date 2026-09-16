@@ -13,6 +13,7 @@ use craft\models\FieldLayout;
 use matrixcreate\contentiqimporter\ContentIQImporter;
 use matrixcreate\contentiqimporter\helpers\AssetFolderPath;
 use matrixcreate\contentiqimporter\helpers\LinkHelper;
+use matrixcreate\contentiqimporter\helpers\StructureOrder;
 use Throwable;
 use yii\base\Component;
 
@@ -914,6 +915,107 @@ class ImportService extends Component
             Craft::$app->getElements()->updateElementSlugAndUri($entry, true, false, false);
         } catch (Throwable $e) {
             Craft::error("ContentIQImporter: could not refresh URI for entry {$entry->id}: " . $e->getMessage(), __METHOD__);
+        }
+    }
+
+    /**
+     * Positions a page in its section's Structure using ContentIQ's own
+     * per-parent sibling order, replacing the "always append" behaviour that
+     * previously made any page written in a later, partial sync land LAST
+     * among its siblings.
+     *
+     * `$parentId` must already be resolved by the caller (null → root level,
+     * including the "parent slug not found" fallback — that warning is the
+     * caller's responsibility, unchanged from before this method existed).
+     * This method:
+     *
+     *   1. Loads the entry's current siblings under `$parentId` (root level
+     *      when null), in structure order, excluding the entry itself.
+     *   2. Fetches those siblings' stored `(sort_order, contentiq_page_id)`
+     *      from `contentiq_entry_syncs` in one query.
+     *   3. Uses the pure {@see StructureOrder::insertBeforeId()} to find the
+     *      first sibling that should come after this page.
+     *   4. `moveBefore()`s the entry there, or falls back to the existing
+     *      `append()`/`appendToRoot()` when no sibling sorts after it (i.e.
+     *      this page belongs at the end).
+     *   5. Calls {@see refreshUri()} immediately after the move — same
+     *      position relative to the move as the pre-existing inline call
+     *      this replaces (see refreshUri()'s own docblock for why the order
+     *      matters).
+     *
+     * A sibling with a null stored `sort_order` (a Craft-only entry, or one
+     * that predates the column) is skipped by `insertBeforeId()` rather than
+     * sorted first — it keeps its existing place instead of being shoved to
+     * the front on every sync.
+     *
+     * Failures are caught and appended to `$warnings` by reference rather
+     * than thrown — the same try/catch → warning pattern `SyncJob` and
+     * `CpController` used inline before this method existed, so one bad
+     * structure move never aborts the rest of a batch sync.
+     *
+     * @param Entry    $entry           The entry to position (already saved this run).
+     * @param int|null $parentId        The resolved parent entry id, or null for root level.
+     * @param int      $structureId     The section's Structure id.
+     * @param int      $sortOrder       This page's `document.sort_order`.
+     * @param int|null $contentiqPageId This page's `document.id`, for tie-breaking against siblings.
+     * @param string[] $warnings        Reference to the caller's warnings array — appended to on failure.
+     */
+    public function positionInStructure(
+        Entry $entry,
+        ?int $parentId,
+        int $structureId,
+        int $sortOrder,
+        ?int $contentiqPageId,
+        array &$warnings,
+    ): void {
+        try {
+            $structures = Craft::$app->getStructures();
+
+            $siblingsQuery = Entry::find()
+                ->structureId($structureId)
+                ->status(null)
+                ->andWhere(['not', ['elements.id' => $entry->id]])
+                ->orderBy(['structureelements.lft' => SORT_ASC]);
+
+            if ($parentId !== null) {
+                $siblingsQuery->descendantOf($parentId)->descendantDist(1);
+            } else {
+                $siblingsQuery->level(1);
+            }
+
+            $siblingIds = $siblingsQuery->ids();
+
+            $syncRows = empty($siblingIds)
+                ? []
+                : (new Query())
+                    ->select(['element_id', 'sort_order', 'contentiq_page_id'])
+                    ->from('{{%contentiq_entry_syncs}}')
+                    ->where(['element_id' => $siblingIds])
+                    ->indexBy('element_id')
+                    ->all();
+
+            $siblings = array_map(
+                fn(int $siblingId): array => [
+                    'id'        => $siblingId,
+                    'sortOrder' => isset($syncRows[$siblingId]['sort_order']) ? (int)$syncRows[$siblingId]['sort_order'] : null,
+                    'pageId'    => isset($syncRows[$siblingId]['contentiq_page_id']) ? (int)$syncRows[$siblingId]['contentiq_page_id'] : null,
+                ],
+                $siblingIds,
+            );
+
+            $beforeId = StructureOrder::insertBeforeId($siblings, $sortOrder, $contentiqPageId);
+
+            if ($beforeId !== null) {
+                $structures->moveBefore($structureId, $entry, $beforeId);
+            } elseif ($parentId !== null) {
+                $structures->append($structureId, $entry, $parentId);
+            } else {
+                $structures->appendToRoot($structureId, $entry);
+            }
+
+            $this->refreshUri($entry);
+        } catch (Throwable $e) {
+            $warnings[] = 'Could not update structure position: ' . $e->getMessage();
         }
     }
 

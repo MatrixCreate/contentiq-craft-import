@@ -2553,6 +2553,95 @@ check(
 );
 
 // -----------------------------------------------------------------------------
+// StructureOrder::insertBeforeId() — ContentIQ sibling-order positioning.
+// -----------------------------------------------------------------------------
+echo "\nStructureOrder — insertBeforeId()\n";
+
+require __DIR__ . '/../src/helpers/StructureOrder.php';
+
+use matrixcreate\contentiqimporter\helpers\StructureOrder;
+
+check(
+    'insertBeforeId(): empty siblings — append (null)',
+    null,
+    StructureOrder::insertBeforeId([], sortOrder: 5, pageId: 100)
+);
+
+check(
+    'insertBeforeId(): all siblings sort lower — append (null)',
+    null,
+    StructureOrder::insertBeforeId(
+        siblings: [
+            ['id' => 1, 'sortOrder' => 1, 'pageId' => 10],
+            ['id' => 2, 'sortOrder' => 2, 'pageId' => 20],
+        ],
+        sortOrder: 5,
+        pageId: 100
+    )
+);
+
+check(
+    'insertBeforeId(): first sibling that sorts higher wins',
+    2,
+    StructureOrder::insertBeforeId(
+        siblings: [
+            ['id' => 1, 'sortOrder' => 1, 'pageId' => 10],
+            ['id' => 2, 'sortOrder' => 5, 'pageId' => 20],
+            ['id' => 3, 'sortOrder' => 9, 'pageId' => 30],
+        ],
+        sortOrder: 3,
+        pageId: 100
+    )
+);
+
+check(
+    'insertBeforeId(): tie on sortOrder, sibling pageId higher — sorts after target',
+    null,
+    StructureOrder::insertBeforeId(
+        siblings: [['id' => 1, 'sortOrder' => 5, 'pageId' => 50]],
+        sortOrder: 5,
+        pageId: 100
+    )
+);
+
+check(
+    'insertBeforeId(): tie on sortOrder, sibling pageId lower — sorts before target',
+    1,
+    StructureOrder::insertBeforeId(
+        siblings: [['id' => 1, 'sortOrder' => 5, 'pageId' => 150]],
+        sortOrder: 5,
+        pageId: 100
+    )
+);
+
+check(
+    'insertBeforeId(): null-sortOrder sibling ignored even when it sits between candidates',
+    3,
+    StructureOrder::insertBeforeId(
+        siblings: [
+            ['id' => 1, 'sortOrder' => 1, 'pageId' => 10],
+            ['id' => 2, 'sortOrder' => null, 'pageId' => null],
+            ['id' => 3, 'sortOrder' => 9, 'pageId' => 30],
+        ],
+        sortOrder: 5,
+        pageId: 100
+    )
+);
+
+check(
+    'insertBeforeId(): target lower than every sibling — first sibling id',
+    1,
+    StructureOrder::insertBeforeId(
+        siblings: [
+            ['id' => 1, 'sortOrder' => 5, 'pageId' => 50],
+            ['id' => 2, 'sortOrder' => 9, 'pageId' => 90],
+        ],
+        sortOrder: 1,
+        pageId: 10
+    )
+);
+
+// -----------------------------------------------------------------------------
 // Summary.
 // -----------------------------------------------------------------------------
 echo "\n" . ($failures === 0 ? "OK" : "FAILED") . ": {$passes} passed, {$failures} failed\n";

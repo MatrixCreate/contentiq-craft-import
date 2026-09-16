@@ -2,6 +2,18 @@
 
 Capped rolling log — older entries roll off verbatim to `docs/_archive/`. Durable knowledge belongs in `docs/`, not accumulated here.
 
+## Structure order follows the ContentiQ sitemap (2026-09-16, 1.34.0)
+
+Pages were positioned with `Structures::append()/appendToRoot()` on every run, so any page written in a later, partial sync landed LAST among its siblings and Craft's Pages structure drifted from the ContentiQ sitemap. Every export `document` already carried `sort_order` (per-parent, ties by page id) and `parent_slug`; nothing read them.
+
+Ben's ruling: remember each entry's ContentiQ order and insert by it. `contentiq_entry_syncs` gained a nullable `sort_order` column (Install.php + `m260916_120000_add_sort_order_to_entry_syncs`, `schemaVersion` 1.2.0 → 1.3.0), written unconditionally (0 is legitimate) by the SyncJob auto-lock upsert and the widget upsert. New `ImportService::positionInStructure()` replaces both inline positioning blocks (SyncJob + `CpController::actionRunImport()`): siblings under the resolved parent (root = `level(1)`, else `descendantOf()->descendantDist(1)`, ordered by `structureelements.lft`, entry itself excluded), their stored `(sort_order, contentiq_page_id)` fetched in one query, and pure `StructureOrder::insertBeforeId()` (`src/helpers/StructureOrder.php`, 7 cases in `tests/run-transforms.php`) picks the first strictly-greater sibling for `moveBefore()`, else append. Craft-only entries with no stored value are ignored and keep their place. The 1.33.1 inline `refreshUri()` still follows the move. The sidebar widget's single-page sync never positioned entries and still doesn't.
+
+New one-time repair for existing sites: `php craft contentiq-importer/structure/reorder [--dry-run]` (`src/console/controllers/StructureController.php`) fetches the whole export through `ContentIQApiService`, backfills `sort_order` by UPDATE only (an insert would flip an implicitly-locked entry to unlocked), repositions via the same method, and never writes content, acks or locks. Review caught the one defect: an unresolvable `parent_slug` was silently relocating a subtree to root — the repair now SKIPs such pages with a printed reason (the import path keeps its save-at-root-with-warning behaviour deliberately). On a first run every sibling has null sort_order so the dry-run predicts "everything to the end in export order"; the real run converges because it backfills as it goes.
+
+Live-verified on veluto.test: migration applied, repair moved 26 pages and Craft's structure matched the ContentiQ sitemap exactly (nested children included); re-runs report 26 unchanged; Ben's fresh syncs after sitemap reordering landed pages in the right slot.
+
+**Released 1.34.0 (2026-09-16).** Deploy tail per site: `composer update`, `craft migrate/up --plugin=contentiq-importer`, then one `structure/reorder` run to clear existing drift.
+
 ## Pass 4 live-fix on Veluto: URI timing, Retour Short Links, both slash forms, CLI rows (2026-09-16, 1.33.1)
 
 First live run of 1.33.0's redirect pass on veluto.test wrote five rows that all pointed at `/` and were invisible in Retour's Redirects list. Three causes, all confirmed by reading vendor code, plus one found by audit:
