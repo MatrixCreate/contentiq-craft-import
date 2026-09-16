@@ -7,6 +7,7 @@ use craft\base\FieldInterface;
 use craft\db\Query;
 use craft\elements\Entry;
 use craft\fields\ContentBlock;
+use craft\helpers\DateTimeHelper;
 use craft\helpers\Db;
 use craft\models\FieldLayout;
 use matrixcreate\contentiqimporter\ContentIQImporter;
@@ -124,6 +125,13 @@ class ImportService extends Component
             // 'page'-source CTA identity can key on (page_id, block_id) instead of
             // title alone (see _resolveCtaEntry()).
             $pageId = isset($data['document']['id']) ? (int)$data['document']['id'] : null;
+
+            // Threaded straight onto the result so runPostPasses()'s PASS 4
+            // (RedirectService::sweep()) can read it back without re-fetching
+            // the page — set once here, before the collection-child dispatch
+            // below, so it covers that path too (_importCollectionChild()
+            // receives this same $result array).
+            $result['legacyUrl'] = $data['document']['legacy_url'] ?? null;
 
             // -----------------------------------------------------------------------
             // 2a. Collection children carry a content_type and a raw `content` field
@@ -378,6 +386,7 @@ class ImportService extends Component
                     if (!$isHomepage) {
                         $existing->title = $title;
                     }
+                    $this->_applyPostDate($existing, $data, (bool)($config['postDate']['pages'] ?? true), $result);
                     $existing->setFieldValues($filteredValues);
 
                     if (!Craft::$app->getElements()->saveElement($existing, false)) {
@@ -412,6 +421,7 @@ class ImportService extends Component
                 $entry->siteId    = Craft::$app->getSites()->getPrimarySite()->id;
                 $entry->title     = $title;
                 $entry->slug      = $slug;
+                $this->_applyPostDate($entry, $data, (bool)($config['postDate']['pages'] ?? true), $result);
 
                 $filteredValues = $this->_filterToValidFields($fieldValues, $entryType->getFieldLayout(), $result);
                 $result['seoFieldCount'] = $this->_countSeoFields($filteredValues, $config);
@@ -600,16 +610,18 @@ class ImportService extends Component
     }
 
     /**
-     * Runs the two deferred passes every import entry point needs after its
+     * Runs the three deferred passes every import entry point needs after its
      * page loop finishes and before ack/auto-lock: PASS 2 (card references,
-     * {@see resolveCardReferences()}) and PASS 3 (the link sweep,
-     * {@see \matrixcreate\contentiqimporter\services\LinkSweepService::sweep()}).
+     * {@see resolveCardReferences()}), PASS 3 (the link sweep,
+     * {@see \matrixcreate\contentiqimporter\services\LinkSweepService::sweep()}),
+     * and PASS 4 (legacy-URL redirects,
+     * {@see \matrixcreate\contentiqimporter\services\RedirectService::sweep()}).
      * This is the entry point callers should use — call `resolveCardReferences()`
      * directly only from tests that stub the plugin container.
      *
-     * The link sweep only ever considers elements genuinely written THIS run
-     * ({@see _writtenPages()}) — never a locked/skipped/deselected page, and
-     * never a page from an earlier run.
+     * PASS 3 and PASS 4 only ever consider elements genuinely written THIS
+     * run ({@see _writtenPages()}) — never a locked/skipped/deselected page,
+     * and never a page from an earlier run.
      *
      * @param array $allCardRefs   Deferred ref sets keyed by entryId; passed straight
      *                             through to resolveCardReferences() — see its docblock.
@@ -625,6 +637,16 @@ class ImportService extends Component
     {
         $warnings = $this->resolveCardReferences($allCardRefs, $slugToEntryId, $dryRun);
 
+        $merge = static function (array &$into, array $additions): void {
+            foreach ($additions as $entryId => $entryWarnings) {
+                if (!isset($into[$entryId])) {
+                    $into[$entryId] = [];
+                }
+
+                array_push($into[$entryId], ...$entryWarnings);
+            }
+        };
+
         $written = $this->_writtenPages($pageResults);
 
         $linkWarnings = ContentIQImporter::$plugin->linkSweep->sweep(
@@ -632,14 +654,13 @@ class ImportService extends Component
             $written['pageIds'],
             $dryRun,
         );
+        $merge($warnings, $linkWarnings);
 
-        foreach ($linkWarnings as $entryId => $entryWarnings) {
-            if (!isset($warnings[$entryId])) {
-                $warnings[$entryId] = [];
-            }
-
-            array_push($warnings[$entryId], ...$entryWarnings);
-        }
+        $redirectWarnings = ContentIQImporter::$plugin->redirects->sweep(
+            $written['legacyUrls'],
+            $dryRun,
+        );
+        $merge($warnings, $redirectWarnings);
 
         return $warnings;
     }
@@ -870,16 +891,21 @@ class ImportService extends Component
      * "5b. Acknowledge..." block, ~SyncJob.php:454-464): success, not
      * skippedLocked/skippedDeselected/skipped, a real entryId, and a
      * contentiqPageId. Keep both predicates in sync — a page that shouldn't be
-     * ack'd shouldn't be link-swept either, for the same reason (nothing was
-     * actually written for it).
+     * ack'd shouldn't be link-swept (or legacy-URL-redirected) either, for the
+     * same reason (nothing was actually written for it).
+     *
+     * `legacyUrls` carries every written page's `legacyUrl` (possibly null) —
+     * {@see \matrixcreate\contentiqimporter\services\RedirectService::sweep()}
+     * is the one that filters out the empty ones, not this method.
      *
      * @param array $pageResults This run's per-page result rows.
-     * @return array{entryIds: int[], pageIds: int[]}
+     * @return array{entryIds: int[], pageIds: int[], legacyUrls: array<int, ?string>}
      */
     private function _writtenPages(array $pageResults): array
     {
-        $entryIds = [];
-        $pageIds  = [];
+        $entryIds   = [];
+        $pageIds    = [];
+        $legacyUrls = [];
 
         foreach ($pageResults as $result) {
             if (($result['success'] ?? false)
@@ -889,14 +915,16 @@ class ImportService extends Component
                 && ($result['entryId'] ?? null) !== null
                 && !empty($result['contentiqPageId'])
             ) {
-                $entryIds[] = $result['entryId'];
-                $pageIds[]  = $result['contentiqPageId'];
+                $entryIds[]                     = $result['entryId'];
+                $pageIds[]                       = $result['contentiqPageId'];
+                $legacyUrls[$result['entryId']] = $result['legacyUrl'] ?? null;
             }
         }
 
         return [
-            'entryIds' => array_values(array_unique($entryIds)),
-            'pageIds'  => array_values(array_unique($pageIds)),
+            'entryIds'   => array_values(array_unique($entryIds)),
+            'pageIds'    => array_values(array_unique($pageIds)),
+            'legacyUrls' => $legacyUrls,
         ];
     }
 
@@ -1184,6 +1212,7 @@ class ImportService extends Component
             $filtered = $this->_filterToValidFields($fieldValues, $existing->getFieldLayout(), $result);
             $result['seoFieldCount'] = $this->_countSeoFields($filtered, $config);
             $existing->title = $title;
+            $this->_applyPostDate($existing, $data, (bool)($config['postDate']['collections'] ?? true), $result);
             $existing->setFieldValues($filtered);
 
             if (!Craft::$app->getElements()->saveElement($existing, false)) {
@@ -1206,6 +1235,7 @@ class ImportService extends Component
         $entry->siteId    = Craft::$app->getSites()->getPrimarySite()->id;
         $entry->title     = $title;
         $entry->slug      = $slug;
+        $this->_applyPostDate($entry, $data, (bool)($config['postDate']['collections'] ?? true), $result);
 
         $filtered = $this->_filterToValidFields($fieldValues, $entryType->getFieldLayout(), $result);
         $result['seoFieldCount'] = $this->_countSeoFields($filtered, $config);
@@ -1254,6 +1284,53 @@ class ImportService extends Component
     }
 
     /**
+     * Applies `document.original_publication_date` to `$entry->postDate`,
+     * gated on the `postDate.pages`/`postDate.collections` config toggle
+     * (`$enabled`, resolved by the caller — importPage() passes the 'pages'
+     * key, _importCollectionChild() passes 'collections').
+     *
+     * Overwrites unconditionally on both create and update when a value is
+     * set — whole-page replace, same as every other field this pipeline
+     * writes (see AGENTS.md). The toggle off, or a null/empty date, leaves
+     * `postDate` completely untouched: a brand-new entry keeps Craft's own
+     * "now" stamp, an existing entry keeps whatever it already had.
+     *
+     * Parses with `DateTimeHelper::toDateTime($raw, true)` — the second
+     * argument makes a bare `YYYY-MM-DD` (no time/timezone) resolve to
+     * midnight in Craft's own system timezone rather than UTC. An
+     * unparseable string is reported as a page warning and `postDate` is
+     * left untouched rather than guessed at.
+     *
+     * @param Entry $entry   The entry about to be saved (existing or new).
+     * @param array $data    Decoded top-level JSON object for a single page.
+     * @param bool  $enabled The resolved postDate.pages/postDate.collections toggle.
+     * @param array &$result Result array, mutated to add a warning on an unparseable date.
+     * @return void
+     */
+    private function _applyPostDate(Entry $entry, array $data, bool $enabled, array &$result): void
+    {
+        if (!$enabled) {
+            return;
+        }
+
+        $raw = $data['document']['original_publication_date'] ?? null;
+
+        if (!is_string($raw) || trim($raw) === '') {
+            return;
+        }
+
+        $parsed = DateTimeHelper::toDateTime($raw, true);
+
+        if ($parsed === false) {
+            $result['warnings'][] = "Could not parse original_publication_date '{$raw}' — postDate left unchanged.";
+
+            return;
+        }
+
+        $entry->postDate = $parsed;
+    }
+
+    /**
      * Returns an empty result skeleton.
      *
      * @return array
@@ -1275,6 +1352,9 @@ class ImportService extends Component
             'skipped'       => false,
             'contentType'   => null,
             'sectionLabel'  => null,
+            // ContentiQ's old-site URL for this page (RedirectService's PASS
+            // 4 source) — see importPage()'s early-set legacyUrl assignment.
+            'legacyUrl'     => null,
             // Page-level assets[]/files[] filing counts — see
             // _importPageAssets()/importPageAssetsOnly(). Untouched by any
             // Matrix/hero/SEO/card image field.
@@ -1418,6 +1498,24 @@ class ImportService extends Component
             'footerCtaShowGlobalField' => 'showGlobalCallToAction',  // Lightswitch nested inside it
             'globalContentSet'         => 'globalContent',           // Global set holding the relation
             'globalChooseCtaField'     => 'globalChooseCallToAction', // Entries field on that global set
+            // document.original_publication_date -> Craft postDate, per page
+            // kind. Overwrites on both create and update (whole-page replace
+            // — see AGENTS.md); a null/empty date or a false toggle leaves
+            // postDate completely untouched. See _applyPostDate() and
+            // docs/import-pipeline.md.
+            'postDate' => [
+                'pages'       => true,
+                'collections' => true,
+            ],
+            // document.legacy_url -> Retour static redirects, PASS 4 of
+            // runPostPasses(). Requires nystudio107/craft-retour installed
+            // AND enabled on the target site — never a composer dependency
+            // of this plugin (see AGENTS.md). See RedirectService::sweep()
+            // and docs/import-pipeline.md.
+            'redirects' => [
+                'enabled'  => true,
+                'httpCode' => 301,
+            ],
         ];
 
         $projectConfig = Craft::$app->getConfig()->getConfigFromFile('contentiq');

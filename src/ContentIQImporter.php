@@ -23,6 +23,7 @@ use matrixcreate\contentiqimporter\services\ImportService;
 use matrixcreate\contentiqimporter\services\LinkSweepService;
 use matrixcreate\contentiqimporter\services\MatrixBuilder;
 use matrixcreate\contentiqimporter\services\NodesRenderer;
+use matrixcreate\contentiqimporter\services\RedirectService;
 use yii\base\Event;
 
 /**
@@ -35,6 +36,7 @@ use yii\base\Event;
  * @property-read LinkSweepService $linkSweep
  * @property-read MatrixBuilder $matrixBuilder
  * @property-read NodesRenderer $nodes
+ * @property-read RedirectService $redirects
  * @property-read Settings $settings
  *
  * @author Matrix Create <hello@matrixcreate.com>
@@ -92,6 +94,7 @@ class ContentIQImporter extends Plugin
             'linkSweep' => LinkSweepService::class,
             'matrixBuilder' => MatrixBuilder::class,
             'nodes' => NodesRenderer::class,
+            'redirects' => RedirectService::class,
         ]);
 
         $this->_registerCpRoutes();

@@ -2412,6 +2412,126 @@ check(
 );
 
 // -----------------------------------------------------------------------------
+// RedirectService — pure legacy-URL → path normalisation (PASS 4). The rest
+// of RedirectService::sweep() talks to Craft/Retour directly and has no
+// standalone coverage here — same gap LinkSweepService's own field walk has,
+// for the same reason (no live Craft test harness in this repo).
+// -----------------------------------------------------------------------------
+echo "\nRedirectService — legacy URL path normalisation\n";
+
+require __DIR__ . '/../src/services/RedirectService.php';
+
+use matrixcreate\contentiqimporter\services\RedirectService;
+
+check(
+    'legacyUrlToPath(): absolute URL with a path — scheme/host dropped, trailing slash added',
+    '/parent/child/',
+    RedirectService::legacyUrlToPath('https://old-site.example.com/parent/child')
+);
+check(
+    'legacyUrlToPath(): query string and fragment dropped, trailing slash added',
+    '/parent/child/',
+    RedirectService::legacyUrlToPath('https://old-site.example.com/parent/child?utm=1#frag')
+);
+check(
+    'legacyUrlToPath(): bare domain (no path) normalises to "/"',
+    '/',
+    RedirectService::legacyUrlToPath('https://old-site.example.com')
+);
+check(
+    'legacyUrlToPath(): domain with trailing slash stays "/"',
+    '/',
+    RedirectService::legacyUrlToPath('https://old-site.example.com/')
+);
+check(
+    'legacyUrlToPath(): root-relative input passes through with a leading slash, trailing slash added',
+    '/parent/child/',
+    RedirectService::legacyUrlToPath('/parent/child')
+);
+check(
+    'legacyUrlToPath(): empty string — null',
+    null,
+    RedirectService::legacyUrlToPath('')
+);
+check(
+    'legacyUrlToPath(): whitespace-only string — null',
+    null,
+    RedirectService::legacyUrlToPath('   ')
+);
+check(
+    'legacyUrlToPath(): already-trailing-slash input stays canonical',
+    '/about-us/',
+    RedirectService::legacyUrlToPath('https://old-site.example.com/about-us/')
+);
+check(
+    'legacyUrlToPath(): repeated trailing slashes collapsed to one',
+    '/a/b/',
+    RedirectService::legacyUrlToPath('https://old-site.example.com/a/b//')
+);
+check(
+    'legacyUrlToPath(): root path with repeated slashes still normalises to "/", not "//"',
+    '/',
+    RedirectService::legacyUrlToPath('https://old-site.example.com///')
+);
+check(
+    'legacyUrlToPath(): query string dropped AND trailing slash added together',
+    '/about-us/',
+    RedirectService::legacyUrlToPath('https://old-site.example.com/about-us/?ref=1')
+);
+check(
+    'legacyUrlToPath(): file-like last segment (.html) never gets a trailing slash',
+    '/roofing.html',
+    RedirectService::legacyUrlToPath('https://old-site.example.com/roofing.html')
+);
+check(
+    'legacyUrlToPath(): file-like last segment (.php) with a query string — extension kept, no trailing slash, query dropped',
+    '/index.php',
+    RedirectService::legacyUrlToPath('https://old-site.example.com/index.php?x=1')
+);
+check(
+    'legacyUrlToPath(): multi-segment path already carrying a trailing slash stays exactly that',
+    '/blog/2019/post/',
+    RedirectService::legacyUrlToPath('https://old-site.example.com/blog/2019/post/')
+);
+
+check(
+    'legacyUrlHadQuery(): URL with a query string — true',
+    true,
+    RedirectService::legacyUrlHadQuery('https://old-site.example.com/x?a=1')
+);
+check(
+    'legacyUrlHadQuery(): URL with no query string — false',
+    false,
+    RedirectService::legacyUrlHadQuery('https://old-site.example.com/x')
+);
+check(
+    'legacyUrlHadQuery(): fragment only, no query — false',
+    false,
+    RedirectService::legacyUrlHadQuery('https://old-site.example.com/x#frag')
+);
+
+check(
+    'entryUriToPath(): "__home__" — root',
+    '/',
+    RedirectService::entryUriToPath('__home__')
+);
+check(
+    'entryUriToPath(): empty string — root',
+    '/',
+    RedirectService::entryUriToPath('')
+);
+check(
+    'entryUriToPath(): plain uri gets leading AND trailing slash',
+    '/services/roofing/',
+    RedirectService::entryUriToPath('services/roofing')
+);
+check(
+    'entryUriToPath(): already-slashed uri stays canonical',
+    '/services/roofing/',
+    RedirectService::entryUriToPath('/services/roofing/')
+);
+
+// -----------------------------------------------------------------------------
 // Summary.
 // -----------------------------------------------------------------------------
 echo "\n" . ($failures === 0 ? "OK" : "FAILED") . ": {$passes} passed, {$failures} failed\n";

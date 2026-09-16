@@ -37,10 +37,12 @@ return [
                                              // is also true. See docs/assets.md.
     'matrixField'         => 'contentBlocks',
     'seoField'            => 'seo',
+    'postDate'            => ['pages' => true, 'collections' => true], // document.original_publication_date -> Craft postDate
+    'redirects'           => ['enabled' => true, 'httpCode' => 301],   // document.legacy_url -> Retour static redirects (requires nystudio107/craft-retour)
 ];
 ```
 
-All keys are optional — the values above are the defaults. See [docs/integration.md](docs/integration.md#config-surface) for the full config surface, including `blockOverrides`, `content_types`, `slugMap`, and the diff-aware `preserveBlockIdentity` flag.
+All keys are optional — the values above are the defaults. See [docs/integration.md](docs/integration.md#config-surface) for the full config surface, including `blockOverrides`, `content_types`, `slugMap`, `postDate`, `redirects`, and the diff-aware `preserveBlockIdentity` flag.
 
 Add API credentials to `.env`:
 

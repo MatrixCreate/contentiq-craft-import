@@ -53,6 +53,7 @@ Every area below has a doc with the binding traps and non-obvious behaviour. Rea
 | Image download, idempotency, SSRF/path-traversal guards | [docs/assets.md](docs/assets.md) | Sanitize the filename *before* the idempotency lookup, not after, or every sync duplicates the asset |
 | CP screens, the sync report, the sidebar widget | [docs/cp-and-widget.md](docs/cp-and-widget.md) | Sidebar content only works via `Entry::EVENT_DEFINE_SIDEBAR_HTML` — the field-layout-designer `BaseUiElement` approach silently doesn't reach the sidebar |
 | Link rewriting — root-relative hrefs/Hyper Url links → live entry references (`LinkSweepService`, pass 3) | [docs/import-pipeline.md](docs/import-pipeline.md#pass-3--link-sweep) | Post-passes run before ack + auto-lock and only touch elements genuinely written this run |
+| Legacy-URL redirects — ContentiQ `document.legacy_url` → Retour static redirect (`RedirectService`, pass 4) | [docs/import-pipeline.md](docs/import-pipeline.md#pass-4--legacy-url-redirects) | Retour is optional and never a composer dependency; the pass never deletes a redirect (Retour's `checkForRedirectLoop` would — keep it `false`); both paths in trailing-slash form |
 
 ---
 
