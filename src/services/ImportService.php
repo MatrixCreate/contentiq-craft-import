@@ -115,6 +115,48 @@ class ImportService extends Component
     }
 
     /**
+     * Exports the run-scoped state that must survive a job boundary — just
+     * the "first global CTA block wins" flag (see
+     * $_globalCtaResolvedThisRun). ImportPagesJob persists this into
+     * `run.state` at the end of every batch and restores it (via
+     * {@see restoreRunState()}) at the start of the next, so the claim made
+     * by a global CTA block on page 1 of batch 1 is still honoured by page 1
+     * of batch 2 — without this, every batch after the first would let its
+     * own first 'global' CTA block re-claim and rewrite the shared entry.
+     *
+     * $_globalCtaEntryId is deliberately NOT included here — it's a memo of
+     * "what does the global set currently relate", cheap to recompute, and
+     * recomputing it fresh every batch (rather than trusting a value carried
+     * from an earlier batch) is exactly what lets a page processed later in
+     * the run see an entry a global CTA block related earlier in the SAME
+     * run. See CRAFT-IMPORT-QUEUE-SPEC.md §3.4.
+     *
+     * @return array{globalCtaClaimed: bool}
+     */
+    public function exportRunState(): array
+    {
+        return ['globalCtaClaimed' => $this->_globalCtaResolvedThisRun];
+    }
+
+    /**
+     * Restores run-scoped state previously persisted by
+     * {@see exportRunState()}.
+     *
+     * Must be called AFTER {@see beginRun()} — beginRun() unconditionally
+     * resets $_globalCtaResolvedThisRun to false, which would otherwise
+     * immediately discard whatever this method just restored.
+     *
+     * @param array $state A run's `state` blob (or the slice of it this
+     *   method cares about) — an absent `globalCtaClaimed` key restores
+     *   `false`, matching a run's very first batch.
+     * @return void
+     */
+    public function restoreRunState(array $state): void
+    {
+        $this->_globalCtaResolvedThisRun = (bool)($state['globalCtaClaimed'] ?? false);
+    }
+
+    /**
      * Runs the full import pipeline for a single ContentIQ page export.
      *
      * Returns a result array consumed by ImportController for output rendering.
