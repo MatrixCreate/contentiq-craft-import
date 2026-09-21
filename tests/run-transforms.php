@@ -2858,6 +2858,124 @@ check(
 );
 
 // -----------------------------------------------------------------------------
+// SyncPlanner::plan() — batched sync pipeline, W1 (pure planning step).
+// -----------------------------------------------------------------------------
+echo "\nSyncPlanner — plan()\n";
+
+require __DIR__ . '/../src/services/SyncPlanner.php';
+
+use matrixcreate\contentiqimporter\services\SyncPlanner;
+
+$planner = new SyncPlanner();
+
+$batchEnvelope = [
+    'pages' => [
+        ['document' => ['id' => 1, 'slug' => '', 'parent_slug' => null, 'depth' => 0, 'is_homepage' => true, 'content_type' => null]],
+        ['document' => ['id' => 2, 'slug' => 'about', 'parent_slug' => '', 'depth' => 1, 'is_homepage' => false, 'content_type' => null]],
+        ['document' => ['id' => 3, 'slug' => 'team', 'parent_slug' => 'about', 'depth' => 2, 'is_homepage' => false, 'content_type' => 'collection']],
+    ],
+    'globals'   => ['company' => ['name' => 'Acme']],
+    'pulled_at' => '2026-09-21T10:00:00Z',
+];
+
+$batchPlan = $planner->plan($batchEnvelope);
+
+check('plan(): batch envelope — shape', 'batch', $batchPlan['shape']);
+check('plan(): batch envelope — 3 planned pages', 3, count($batchPlan['pages']));
+
+check(
+    'plan(): batch envelope — position/slug/parent_slug/depth/is_homepage in export order',
+    [
+        ['position' => 0, 'slug' => '',      'parent_slug' => null,    'depth' => 0, 'is_homepage' => true],
+        ['position' => 1, 'slug' => 'about', 'parent_slug' => '',      'depth' => 1, 'is_homepage' => false],
+        ['position' => 2, 'slug' => 'team',  'parent_slug' => 'about', 'depth' => 2, 'is_homepage' => false],
+    ],
+    array_map(
+        fn(array $p) => [
+            'position'    => $p['position'],
+            'slug'        => $p['slug'],
+            'parent_slug' => $p['parent_slug'],
+            'depth'       => $p['depth'],
+            'is_homepage' => $p['is_homepage'],
+        ],
+        $batchPlan['pages']
+    )
+);
+
+check(
+    'plan(): batch envelope — contentiq_page_id/content_type carried through from document',
+    [1, null, 2, null, 3, 'collection'],
+    [
+        $batchPlan['pages'][0]['contentiq_page_id'], $batchPlan['pages'][0]['content_type'],
+        $batchPlan['pages'][1]['contentiq_page_id'], $batchPlan['pages'][1]['content_type'],
+        $batchPlan['pages'][2]['contentiq_page_id'], $batchPlan['pages'][2]['content_type'],
+    ]
+);
+
+check('plan(): batch envelope — blank slug on the homepage is not malformed', 'pending', $batchPlan['pages'][0]['status']);
+check('plan(): batch envelope — payload preserved untouched for a pending page', $batchEnvelope['pages'][1], $batchPlan['pages'][1]['payload']);
+check('plan(): batch envelope — globals passed through untouched', ['company' => ['name' => 'Acme']], $batchPlan['globals']);
+check('plan(): batch envelope — state.homepageSlug seeded from the is_homepage page', '', $batchPlan['state']['homepageSlug']);
+check('plan(): batch envelope — state.pulledAt seeded from pulled_at', '2026-09-21T10:00:00Z', $batchPlan['state']['pulledAt']);
+
+$dupEnvelope = [
+    'pages' => [
+        ['document' => ['id' => 10, 'slug' => 'services', 'is_homepage' => false]],
+        ['document' => ['id' => 11, 'slug' => 'services', 'is_homepage' => false]],
+        ['document' => ['id' => 12, 'slug' => 'services', 'is_homepage' => false]],
+    ],
+];
+
+$dupPlan = $planner->plan($dupEnvelope);
+
+check(
+    'plan(): duplicate slug flagged on the 2nd and later occurrence only, first stays false',
+    [false, true, true],
+    array_map(fn(array $p) => $p['duplicate_slug'], $dupPlan['pages'])
+);
+
+$singleEnvelope = ['document' => ['id' => 5, 'slug' => 'contact', 'is_homepage' => false]];
+$singlePlan     = $planner->plan($singleEnvelope);
+
+check('plan(): single-page envelope — shape', 'single', $singlePlan['shape']);
+check('plan(): single-page envelope — 1 planned page', 1, count($singlePlan['pages']));
+check('plan(): single-page envelope — slug carried through', 'contact', $singlePlan['pages'][0]['slug']);
+check('plan(): single-page envelope — globals absent is null, not an empty array', null, $singlePlan['globals']);
+check('plan(): single-page envelope — state.homepageSlug is null when no page is_homepage', null, $singlePlan['state']['homepageSlug']);
+
+$exportedAtEnvelope = ['document' => ['id' => 6, 'slug' => 'x', 'is_homepage' => false], 'exported_at' => '2026-01-01T00:00:00Z'];
+$exportedAtPlan     = $planner->plan($exportedAtEnvelope);
+
+check('plan(): state.pulledAt falls back to exported_at when pulled_at is absent', '2026-01-01T00:00:00Z', $exportedAtPlan['state']['pulledAt']);
+
+$malformedEnvelope = [
+    'pages' => [
+        ['document' => ['id' => 1, 'slug' => 'home', 'is_homepage' => true]],
+        'not-an-object',
+        ['document' => ['id' => 2, 'slug' => 'contact']],
+    ],
+];
+
+$malformedPlan = $planner->plan($malformedEnvelope);
+
+check('plan(): non-array page entry — skippedMalformed count', 1, $malformedPlan['skippedMalformed']);
+check('plan(): non-array page entry — planned status skipped_malformed', 'skipped_malformed', $malformedPlan['pages'][1]['status']);
+check('plan(): non-array page entry — payload null', null, $malformedPlan['pages'][1]['payload']);
+check('plan(): non-array page entry — one warning recorded', 1, count($malformedPlan['warnings']));
+
+$missingSlugEnvelope = [
+    'pages' => [
+        ['document' => ['id' => 1, 'slug' => '', 'is_homepage' => false]],
+    ],
+];
+
+$missingSlugPlan = $planner->plan($missingSlugEnvelope);
+
+check('plan(): missing document.slug (non-homepage) — planned status skipped_malformed', 'skipped_malformed', $missingSlugPlan['pages'][0]['status']);
+check('plan(): missing document.slug — skippedMalformed count', 1, $missingSlugPlan['skippedMalformed']);
+check('plan(): missing document.slug — one warning recorded', 1, count($missingSlugPlan['warnings']));
+
+// -----------------------------------------------------------------------------
 // Summary.
 // -----------------------------------------------------------------------------
 echo "\n" . ($failures === 0 ? "OK" : "FAILED") . ": {$passes} passed, {$failures} failed\n";

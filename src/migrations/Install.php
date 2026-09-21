@@ -21,6 +21,7 @@ class Install extends Migration
     public function safeUp(): bool
     {
         $this->_createImportRunsTable();
+        $this->_createSyncPagesTable();
         $this->_createEntrySyncsTable();
         $this->_createOfficeSyncsTable();
         $this->_createGlobalsSyncTable();
@@ -42,6 +43,7 @@ class Install extends Migration
         $this->dropTableIfExists('{{%contentiq_globals_sync}}');
         $this->dropTableIfExists('{{%contentiq_office_syncs}}');
         $this->dropTableIfExists('{{%contentiq_entry_syncs}}');
+        $this->dropTableIfExists('{{%contentiq_sync_pages}}');
         $this->dropTableIfExists('{{%contentiq_import_runs}}');
 
         return true;
@@ -58,17 +60,27 @@ class Install extends Migration
     private function _createImportRunsTable(): void
     {
         $this->createTable('{{%contentiq_import_runs}}', [
-            'id'          => $this->primaryKey(),
-            'importedBy'  => $this->integer()->null(),
-            'filename'    => $this->string(255)->notNull(),
-            'type'        => $this->string(10)->notNull()->defaultValue('single'),
-            'pageCount'   => $this->integer()->notNull()->defaultValue(0),
-            'imageCount'  => $this->integer()->notNull()->defaultValue(0),
-            'status'      => $this->string(20)->notNull()->defaultValue('success'),
-            'result'      => $this->longText()->null(),
-            'dateCreated' => $this->dateTime()->notNull(),
-            'dateUpdated' => $this->dateTime()->notNull(),
-            'uid'         => $this->uid(),
+            'id'           => $this->primaryKey(),
+            'importedBy'   => $this->integer()->null(),
+            'filename'     => $this->string(255)->notNull(),
+            'type'         => $this->string(10)->notNull()->defaultValue('single'),
+            'source'       => $this->string(16)->notNull()->defaultValue('api'),
+            'pageCount'    => $this->integer()->notNull()->defaultValue(0),
+            'imageCount'   => $this->integer()->notNull()->defaultValue(0),
+            'status'       => $this->string(20)->notNull()->defaultValue('success'),
+            'phase'        => $this->string(16)->notNull()->defaultValue('done'),
+            'step'         => $this->string(16)->null(),
+            'options'      => $this->text()->null(),
+            'globals'      => $this->mediumText()->null(),
+            'state'        => $this->text()->null(),
+            'result'       => $this->longText()->null(),
+            'error'        => $this->text()->null(),
+            'heartbeat'    => $this->dateTime()->null(),
+            'queueJobId'   => $this->integer()->null(),
+            'dateFinished' => $this->dateTime()->null(),
+            'dateCreated'  => $this->dateTime()->notNull(),
+            'dateUpdated'  => $this->dateTime()->notNull(),
+            'uid'          => $this->uid(),
         ]);
 
         $this->addForeignKey(
@@ -81,6 +93,53 @@ class Install extends Migration
         );
 
         $this->createIndex(null, '{{%contentiq_import_runs}}', ['dateCreated']);
+        $this->createIndex(null, '{{%contentiq_import_runs}}', ['phase']);
+    }
+
+    /**
+     * Creates the contentiq_sync_pages table — one row per page in a run,
+     * the checkpoint a resumed run reads instead of re-decoding the whole
+     * export. See SyncPlanner and SyncRunService.
+     *
+     * @return void
+     */
+    private function _createSyncPagesTable(): void
+    {
+        $this->createTable('{{%contentiq_sync_pages}}', [
+            'id'                => $this->primaryKey(),
+            'run_id'            => $this->integer()->notNull(),
+            'position'          => $this->integer()->notNull(),
+            'contentiq_page_id' => $this->integer()->null(),
+            'slug'              => $this->string(255)->notNull()->defaultValue(''),
+            'parent_slug'       => $this->string(255)->null(),
+            'depth'             => $this->integer()->notNull()->defaultValue(0),
+            'is_homepage'       => $this->boolean()->notNull()->defaultValue(false),
+            'content_type'      => $this->string(64)->null(),
+            'duplicate_slug'    => $this->boolean()->notNull()->defaultValue(false),
+            'payload'           => $this->mediumText()->null(),
+            'status'            => $this->string(24)->notNull()->defaultValue('pending'),
+            'entry_id'          => $this->integer()->null(),
+            'result'            => $this->mediumText()->null(),
+            'postpass_done'     => $this->boolean()->notNull()->defaultValue(false),
+            'acked_at'          => $this->dateTime()->null(),
+            'locked_at'         => $this->dateTime()->null(),
+            'dateCreated'       => $this->dateTime()->notNull(),
+            'dateUpdated'       => $this->dateTime()->notNull(),
+            'uid'               => $this->uid(),
+        ]);
+
+        $this->addForeignKey(
+            null,
+            '{{%contentiq_sync_pages}}',
+            'run_id',
+            '{{%contentiq_import_runs}}',
+            'id',
+            'CASCADE',
+        );
+
+        $this->createIndex(null, '{{%contentiq_sync_pages}}', ['run_id', 'position']);
+        $this->createIndex(null, '{{%contentiq_sync_pages}}', ['run_id', 'status']);
+        $this->createIndex(null, '{{%contentiq_sync_pages}}', ['run_id', 'slug']);
     }
 
     /**

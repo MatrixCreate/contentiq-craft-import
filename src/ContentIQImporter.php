@@ -24,6 +24,9 @@ use matrixcreate\contentiqimporter\services\LinkSweepService;
 use matrixcreate\contentiqimporter\services\MatrixBuilder;
 use matrixcreate\contentiqimporter\services\NodesRenderer;
 use matrixcreate\contentiqimporter\services\RedirectService;
+use matrixcreate\contentiqimporter\services\SyncLockService;
+use matrixcreate\contentiqimporter\services\SyncPlanner;
+use matrixcreate\contentiqimporter\services\SyncRunService;
 use yii\base\Event;
 
 /**
@@ -34,9 +37,12 @@ use yii\base\Event;
  * @property-read ImageImportService $images
  * @property-read ImportService $imports
  * @property-read LinkSweepService $linkSweep
+ * @property-read SyncLockService $locks
  * @property-read MatrixBuilder $matrixBuilder
  * @property-read NodesRenderer $nodes
  * @property-read RedirectService $redirects
+ * @property-read SyncPlanner $planner
+ * @property-read SyncRunService $syncRuns
  * @property-read Settings $settings
  *
  * @author Matrix Create <hello@matrixcreate.com>
@@ -92,9 +98,12 @@ class ContentIQImporter extends Plugin
             'images' => ImageImportService::class,
             'imports' => ImportService::class,
             'linkSweep' => LinkSweepService::class,
+            'locks' => SyncLockService::class,
             'matrixBuilder' => MatrixBuilder::class,
             'nodes' => NodesRenderer::class,
             'redirects' => RedirectService::class,
+            'planner' => SyncPlanner::class,
+            'syncRuns' => SyncRunService::class,
         ]);
 
         $this->_registerCpRoutes();
