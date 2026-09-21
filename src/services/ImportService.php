@@ -371,14 +371,20 @@ class ImportService extends Component
             //                  block); the shared entry itself is written by
             //                  _resolveGlobalCtaEntry(), gated on globals
             //                  consent — see docs/globals.md.
-            //     footerCallToAction.showGlobalCallToAction is queued below as
+            //     callToAction.showGlobalCallToAction is queued below as
             //     a tri-state decision (see _resolveCtaBlocks()'s return
             //     value): ON when ≥1 block routed 'global'; OFF when only
             //     'page'-routed blocks were found; untouched when there were
             //     no CTA blocks at all.
             // -----------------------------------------------------------------------
-            $matrixData          = $built['matrixData'];
-            $blockKeyConsumption = $built['blockKeyConsumption'] ?? [];
+            $matrixData           = $built['matrixData'];
+            $blockKeyConsumption  = $built['blockKeyConsumption'] ?? [];
+            // Text block CTA buttons queued for CKEditor nested-entry
+            // creation once the owner saves — see step 11c below and
+            // _writeNestedActionButtons(). Never touched by
+            // _resolveCtaBlocks()'s $matrixData/$blockKeyConsumption pruning
+            // (CTA placeholder keys and Text block keys never collide).
+            $pendingNestedButtons = $built['pendingNestedButtons'] ?? [];
 
             $footerGlobalCtaIntent = $this->_resolveCtaBlocks(
                 $matrixData,
@@ -440,6 +446,19 @@ class ImportService extends Component
                         }
                     }
 
+                    // Sweep stale nested `actionButtons` entries BEFORE this
+                    // write replaces $existing's Matrix — craft\ckeditor\Field
+                    // never cleans these up on its own (see the method's
+                    // docblock), so a Text block about to be soft-deleted by
+                    // this save would otherwise leave its action-button
+                    // entries live and orphaned. Skipped when the
+                    // empty-matrix guard above left the current blocks
+                    // untouched — nothing is being replaced, so there's
+                    // nothing to sweep.
+                    if (!$matrixHandleOmitted) {
+                        $this->_deleteStaleNestedActionButtons($existing, $matrixHandle, $config, $result);
+                    }
+
                     $result['seoFieldCount'] = $this->_countSeoFields($filteredValues, $config);
 
                     if (!$isHomepage) {
@@ -456,6 +475,14 @@ class ImportService extends Component
                     }
 
                     $transaction->commit();
+
+                    // Text block CTA buttons queued as CKEditor nested
+                    // `actionButtons` entries — only possible now that
+                    // $existing has a real saved id (see _writeNestedActionButtons()
+                    // and docs/block-mapping.md "Text blocks — nested action
+                    // buttons"). Its own try/catch isolation means a failure
+                    // here can't fail this page — see the method's docblock.
+                    $this->_writeNestedActionButtons($existing, $pendingNestedButtons, $blockKeyConsumption, $matrixHandle, $result);
 
                     // DIFF-AWARE Matrix writes: record the block map for the NEXT
                     // sync now that this save succeeded. Skipped when the
@@ -502,6 +529,11 @@ class ImportService extends Component
                 $transaction->rollBack();
                 throw $e;
             }
+
+            // Text block CTA buttons queued as CKEditor nested `actionButtons`
+            // entries — see the matching call in the existing-entry branch
+            // above and _writeNestedActionButtons()'s docblock.
+            $this->_writeNestedActionButtons($entry, $pendingNestedButtons, $blockKeyConsumption, $matrixHandle, $result);
 
             // DIFF-AWARE Matrix writes: a brand-new entry has no prior block map
             // to preserve, but recording one now lets the SECOND sync reuse these
@@ -1328,6 +1360,12 @@ class ImportService extends Component
         // (e.g. {type: doc, content: []}) still reads as a clear.
         $hasBodyTextContent = $hasBlocks && ($fieldValues[$contentFieldHandle] ?? '') !== '';
 
+        // Out params from _buildBlockFieldValues() below, for the post-save
+        // _writeNestedActionButtons() calls further down — stay empty (a
+        // no-op there) when $hasBlocks is false.
+        $blockKeyConsumption  = [];
+        $pendingNestedButtons = [];
+
         // When blocks[] is present and non-empty, run the same Matrix/hero/CTA
         // machinery the page path uses. Absent or empty blocks[] leaves this
         // entirely untouched (pre-§7.1 behaviour).
@@ -1340,7 +1378,14 @@ class ImportService extends Component
                 $this->_resolveProtectedGalleryFolderIds($blocks, $assetTargets['pageFolder'], $assetTargets['isSitemap'], $dryRun),
             );
 
-            $blockFieldValues = $this->_buildBlockFieldValues($data, $dryRun, $result, $entryType->getFieldLayout());
+            $blockFieldValues = $this->_buildBlockFieldValues(
+                $data,
+                $dryRun,
+                $result,
+                $entryType->getFieldLayout(),
+                $blockKeyConsumption,
+                $pendingNestedButtons,
+            );
 
             // Route this content_type's blocks to its configured Matrix field
             // (defaults to config['matrixField'] — see 'blocksField' in content_types).
@@ -1416,6 +1461,16 @@ class ImportService extends Component
             $result['seoFieldCount'] = $this->_countSeoFields($filtered, $config);
             $existing->title = $title;
             $this->_applyPostDate($existing, $data, (bool)($config['postDate']['collections'] ?? true), $result);
+
+            // Sweep stale nested `actionButtons` entries BEFORE this write
+            // replaces $existing's Matrix — see _deleteStaleNestedActionButtons()'s
+            // docblock. Only when $hasBlocks: that's the only case this save
+            // actually replaces $targetMatrixHandle (see _buildBlockFieldValues()) —
+            // an absent/empty blocks[] leaves the field (and its blocks) untouched.
+            if ($hasBlocks) {
+                $this->_deleteStaleNestedActionButtons($existing, $targetMatrixHandle, $config, $result);
+            }
+
             $existing->setFieldValues($filtered);
 
             if (!Craft::$app->getElements()->saveElement($existing, false)) {
@@ -1425,6 +1480,13 @@ class ImportService extends Component
             }
 
             $this->_refreshUri($existing, $result);
+
+            // Text block CTA buttons queued as CKEditor nested `actionButtons`
+            // entries — same mechanism as importPage(), see
+            // _writeNestedActionButtons()'s docblock. $targetMatrixHandle is
+            // the field this content_type's blocks actually saved under
+            // (may differ from config['matrixField'] — see 'blocksField').
+            $this->_writeNestedActionButtons($existing, $pendingNestedButtons, $blockKeyConsumption, $targetMatrixHandle, $result);
 
             $result['entryId'] = $existing->id;
             $result['success'] = true;
@@ -1452,6 +1514,10 @@ class ImportService extends Component
         }
 
         $this->_refreshUri($entry, $result);
+
+        // Text block CTA buttons queued as CKEditor nested `actionButtons`
+        // entries — see the matching call in the existing-entry branch above.
+        $this->_writeNestedActionButtons($entry, $pendingNestedButtons, $blockKeyConsumption, $targetMatrixHandle, $result);
 
         $result['entryId'] = $entry->id;
         $result['success'] = true;
@@ -2702,6 +2768,452 @@ class ImportService extends Component
     }
 
     /**
+     * Zips an array keyed exactly like MatrixBuilder::build()'s matrixData/
+     * blockKeyConsumption (emission order) against a saved list of nested
+     * Matrix elements in that SAME order, recovering "which key produced
+     * which saved element" — Craft preserves Matrix key emission order, so
+     * position is the only signal available; MatrixBuilder never records a
+     * key => element mapping itself. Only $keyed's KEY ORDER matters —
+     * values are ignored.
+     *
+     * Mirrors the positional zip {@see _recordBlockSyncMap()} already does
+     * between blockKeyConsumption and an owner's saved top-level blocks
+     * (there, by array index rather than a returned map, since it only needs
+     * the resulting id, not the key itself) — factored out here as a
+     * standalone helper because {@see _writeNestedActionButtons()} needs it
+     * at TWO levels: outer Matrix key => saved top-level block, and (for a
+     * Text block's second column) inner 'textBlocks' key => saved inner
+     * block, within that outer block.
+     *
+     * @param array<string|int, mixed> $keyed       Any array with the relevant key order (values unused).
+     * @param array                    $savedBlocks Saved nested elements, in the same order.
+     * @return array<string|int, mixed> Key => saved element.
+     */
+    private function _zipMatrixKeysToSavedBlocks(array $keyed, array $savedBlocks): array
+    {
+        $keys = array_keys($keyed);
+        $map  = [];
+
+        foreach ($savedBlocks as $i => $savedBlock) {
+            if (isset($keys[$i])) {
+                $map[$keys[$i]] = $savedBlock;
+            }
+        }
+
+        return $map;
+    }
+
+    /**
+     * Soft-deletes every nested entry of $entryTypeHandle that $field
+     * currently owns on $owner (ownerId + fieldId scoped) — the "delete
+     * nested rows for (owner, field)" step shared by two callers:
+     * {@see _writeNestedActionButtonsOnField()}'s delete-before-recreate (a
+     * block whose identity survived this sync — preserveBlockIdentity) and
+     * {@see _deleteStaleNestedActionButtons()}'s pre-save sweep (a block
+     * this sync is about to replace outright — see that method's docblock
+     * for why Craft never does this on its own for a CKEditor field).
+     *
+     * @param Entry          $owner           The element owning the nested entries (ownerId).
+     * @param FieldInterface $field           The CKEditor field owning them (fieldId).
+     * @param string         $entryTypeHandle Only entries of this entry type handle are deleted.
+     * @return void
+     */
+    private function _deleteNestedActionButtonRows(Entry $owner, FieldInterface $field, string $entryTypeHandle): void
+    {
+        $existingNested = Entry::find()
+            ->ownerId($owner->id)
+            ->fieldId($field->id)
+            ->status(null)
+            ->all();
+
+        foreach ($existingNested as $existingEntry) {
+            if ($existingEntry->getType()->handle === $entryTypeHandle) {
+                Craft::$app->getElements()->deleteElement($existingEntry);
+            }
+        }
+    }
+
+    /**
+     * Sweeps away `actionButtons` nested entries CKEditor will otherwise
+     * never delete on its own, for every Text block a whole-page-replace
+     * re-sync is about to overwrite.
+     *
+     * craft\ckeditor\Field has NO beforeElementDelete()/afterElementDelete()
+     * override (unlike craft\fields\Matrix::beforeElementDelete(), vendor/
+     * craftcms/cms/src/fields/Matrix.php:1637-1647, which calls
+     * entryManager()->deleteNestedElements() on the owner's soft-delete) —
+     * so when a re-sync WITHOUT preserveBlockIdentity soft-deletes the OLD
+     * Text block via the outer contentBlocks Matrix's own save, the
+     * `actionButtons` entries that old block owned are never cleaned up.
+     * They stay live, orphaned, and accumulate one extra set every re-sync.
+     * {@see _writeNestedActionButtonsOnField()}'s own delete-before-recreate
+     * step only ever protects a block whose identity survives
+     * (preserveBlockIdentity) — it has no way to reach a block this sync is
+     * about to replace outright, hence this separate, earlier sweep.
+     *
+     * MUST run BEFORE the owner's Matrix-replacing save — the old blocks
+     * are only queryable up to that point. Called from importPage()'s
+     * existing-entry branch and _importCollectionChild()'s existing-entry
+     * branch, both immediately before setFieldValues()/saveElement(). Never
+     * called on the create path — a brand-new entry has no prior blocks to
+     * sweep.
+     *
+     * Walks $existing's CURRENT top-level blocks (read fresh from the DB,
+     * NOT this run's built matrixData — the point is to catch every row
+     * before this save makes it unreachable). For every block whose entry
+     * type matches the Text block's outer type — plus each of its own
+     * current `textBlocks` inner entries — resolves the richText CKEditor
+     * field on that element's layout and deletes any nested entries of the
+     * configured type it owns, via the same {@see _deleteNestedActionButtonRows()}
+     * helper {@see _writeNestedActionButtonsOnField()} uses. Wrapped in a
+     * try/catch per top-level block — a failure warns and moves on, it
+     * never aborts the page or blocks the save that follows.
+     *
+     * A no-op when textBlockNestedButtons is disabled — nothing to sweep.
+     *
+     * @param Entry  $existing     The entry about to be re-saved (its CURRENT blocks are read).
+     * @param string $matrixHandle The contentBlocks Matrix field handle the entry actually
+     *                             carries its blocks under (importPage()'s config['matrixField'],
+     *                             or a collection child's routed 'blocksField').
+     * @param array  $config       Resolved run config — re-passed into MatrixBuilder::prepare()
+     *                             defensively so the 'text' mapping is resolvable regardless of
+     *                             call order (prepare() is deterministic and cheap to re-run;
+     *                             every caller already calls it earlier in the same run).
+     * @param array  &$result      Page result — warnings appended on failure.
+     * @return void
+     */
+    private function _deleteStaleNestedActionButtons(Entry $existing, string $matrixHandle, array $config, array &$result): void
+    {
+        $nestedConfig = ContentIQImporter::$plugin->matrixBuilder->getTextBlockNestedButtonsConfig();
+
+        if (empty($nestedConfig['enabled'])) {
+            return;
+        }
+
+        ContentIQImporter::$plugin->matrixBuilder->prepare($config);
+
+        $textOuterType = ContentIQImporter::$plugin->matrixBuilder->getTextBlockOuterType();
+
+        if ($textOuterType === null) {
+            return;
+        }
+
+        $entryTypeHandle = (string)($nestedConfig['entryType'] ?? 'actionButtons');
+
+        try {
+            $blocks = $existing->getFieldValue($matrixHandle)->status(null)->all();
+        } catch (Throwable $e) {
+            Craft::warning("ContentIQImporter: could not load existing blocks to sweep stale action-button entries on owner {$existing->id}: " . $e->getMessage(), __METHOD__);
+            $result['warnings'][] = 'Could not sweep stale action-button entries before this sync\'s write — some may be left orphaned.';
+
+            return;
+        }
+
+        foreach ($blocks as $block) {
+            if ($block->getType()->handle !== $textOuterType) {
+                continue;
+            }
+
+            try {
+                $richTextField = $block->getFieldLayout()?->getFieldByHandle('richText');
+
+                if (class_exists('craft\\ckeditor\\Field') && $richTextField instanceof \craft\ckeditor\Field) {
+                    $this->_deleteNestedActionButtonRows($block, $richTextField, $entryTypeHandle);
+                }
+
+                $innerBlocks = $block->getFieldValue('textBlocks')?->status(null)->all() ?? [];
+
+                foreach ($innerBlocks as $innerBlock) {
+                    $innerField = $innerBlock->getFieldLayout()?->getFieldByHandle('richText');
+
+                    if (class_exists('craft\\ckeditor\\Field') && $innerField instanceof \craft\ckeditor\Field) {
+                        $this->_deleteNestedActionButtonRows($innerBlock, $innerField, $entryTypeHandle);
+                    }
+                }
+            } catch (Throwable $e) {
+                Craft::warning("ContentIQImporter: failed to sweep stale action-button entries for block {$block->id}: " . $e->getMessage(), __METHOD__);
+                $result['warnings'][] = "Could not sweep stale action-button entries for a Text block being replaced — some may be left orphaned: {$e->getMessage()}";
+            }
+        }
+    }
+
+    /**
+     * Creates the CKEditor nested `actionButtons` entries MatrixBuilder
+     * queued for a Text block's CTA buttons (textBlockNestedButtons config —
+     * see MatrixBuilder::getTextBlockNestedButtonsConfig() and
+     * docs/block-mapping.md "Text blocks — nested action buttons"), and
+     * splices the resulting `<craft-entry data-entry-id="…">` tags back into
+     * the block's richText HTML.
+     *
+     * MUST run after $owner has a real saved id — a CKEditor nested entry
+     * has no "new1"-style placeholder; its id must be genuine before it can
+     * even appear as a `<craft-entry>` reference (CKEditor's HTML purifier
+     * strips any other marker on save — see NodesRenderer class docblock).
+     * That forces a two-phase save for every affected block: MatrixBuilder
+     * already wrote it with prose-only richText (button runs stripped) when
+     * the owner first saved; this method creates the nested entries against
+     * the now-real block id, then re-saves the block with the button runs
+     * spliced back in as `<craft-entry>` tags.
+     *
+     * A no-op when $pending is empty (the common case — most pages have no
+     * Text block CTA buttons at all, or the feature is disabled). Every
+     * top-level block is processed in its own try/catch, and every
+     * individual nested-entry creation inside that in its own — a failure
+     * anywhere falls back to today's inline <a> HTML for just the affected
+     * button run (via NodesRenderer::renderButtonsAsHtml()) and adds a page
+     * warning; it can never fail the page or lose the other blocks/rows.
+     *
+     * Idempotency: this deletes any existing nested entries already owned by
+     * (block id, richText field id) of the configured entry type before
+     * creating this run's — required because a block's element id can
+     * survive across syncs (preserveBlockIdentity — see docs/block-mapping.md)
+     * or because a project might re-run this method more than once against
+     * the same block; without the delete, re-syncing would pile up duplicate
+     * nested entries every run instead of replacing them (the same
+     * whole-page-replace model this plugin uses everywhere else).
+     *
+     * CORRECTION — without preserveBlockIdentity, Craft does NOT reconcile
+     * the OLD block's nested `actionButtons` entries on its own.
+     * craft\ckeditor\Field has no beforeElementDelete()/afterElementDelete()
+     * override (unlike craft\fields\Matrix::beforeElementDelete(), vendor/
+     * craftcms/cms/src/fields/Matrix.php:1637-1647, which calls
+     * entryManager()->deleteNestedElements() when the OWNER Matrix block
+     * itself is soft-deleted) — so when the outer contentBlocks Matrix
+     * replaces a Text block with a new one this sync, the OLD block's
+     * `actionButtons` entries are left live and orphaned, growing by one set
+     * every re-sync. That is exactly what {@see _deleteStaleNestedActionButtons()}
+     * exists to sweep, BEFORE the replacing save — see its own docblock; this
+     * method's own delete-before-recreate above only ever protects a block
+     * whose identity survives (preserveBlockIdentity), which is the
+     * complementary, narrower case.
+     *
+     * @param Entry  $owner               The just-saved owner entry (existing or newly created).
+     * @param array<string|int, array{richText?: array, textBlocks?: array<string, array>}> $pending
+     *                                    MatrixBuilder::build()'s pendingNestedButtons — emitted top-level
+     *                                    Matrix key => segment lists (see its docblock).
+     * @param array<string|int, string[]> $blockKeyConsumption Emitted key => payload block id(s), from
+     *                                    MatrixBuilder::build() — only its KEY ORDER is used here, to zip
+     *                                    against the owner's saved top-level blocks (see
+     *                                    _zipMatrixKeysToSavedBlocks()).
+     * @param string $matrixHandle        The contentBlocks Matrix field handle the owner actually saved
+     *                                    its blocks under (importPage()'s config['matrixField'], or a
+     *                                    collection child's routed 'blocksField' — see _importCollectionChild()).
+     * @param array  &$result             Page result — warnings and the nestedButtonRows counter appended.
+     * @return void
+     */
+    private function _writeNestedActionButtons(Entry $owner, array $pending, array $blockKeyConsumption, string $matrixHandle, array &$result): void
+    {
+        if (empty($pending) || !$owner->id) {
+            return;
+        }
+
+        $nestedConfig = ContentIQImporter::$plugin->matrixBuilder->getTextBlockNestedButtonsConfig();
+
+        if (empty($nestedConfig['enabled'])) {
+            // Shouldn't happen ($pending is only ever populated when the
+            // config was enabled at build() time), but the config could in
+            // principle be flipped mid-run in a future refactor — never
+            // write against a disabled feature.
+            return;
+        }
+
+        try {
+            $savedBlocks = $owner->getFieldValue($matrixHandle)->status(null)->all();
+        } catch (Throwable $e) {
+            Craft::warning("ContentIQImporter: could not load saved blocks for nested action buttons on owner {$owner->id}: " . $e->getMessage(), __METHOD__);
+            $result['warnings'][] = 'Could not create nested action-button entries — the saved blocks could not be re-read.';
+
+            return;
+        }
+
+        $keyToBlock = $this->_zipMatrixKeysToSavedBlocks($blockKeyConsumption, $savedBlocks);
+
+        foreach ($pending as $key => $columns) {
+            try {
+                $block = $keyToBlock[$key] ?? null;
+
+                if ($block === null) {
+                    $result['warnings'][] = "Could not locate the saved Text block for its action buttons (key '{$key}') — buttons left as a link instead of a managed entry.";
+                    continue;
+                }
+
+                if (isset($columns['richText'])) {
+                    $this->_writeNestedActionButtonsOnField($block, 'richText', $columns['richText'], $nestedConfig, $result);
+                }
+
+                if (!empty($columns['textBlocks'])) {
+                    $innerSaved      = $block->getFieldValue('textBlocks')->status(null)->all();
+                    $innerKeyToBlock = $this->_zipMatrixKeysToSavedBlocks($columns['textBlocks'], $innerSaved);
+
+                    foreach ($columns['textBlocks'] as $innerKey => $segments) {
+                        $innerBlock = $innerKeyToBlock[$innerKey] ?? null;
+
+                        if ($innerBlock === null) {
+                            $result['warnings'][] = "Could not locate the saved inner text column for its action buttons (key '{$innerKey}') — buttons left as a link instead of a managed entry.";
+                            continue;
+                        }
+
+                        $this->_writeNestedActionButtonsOnField($innerBlock, 'richText', $segments, $nestedConfig, $result);
+                    }
+                }
+            } catch (Throwable $e) {
+                Craft::warning("ContentIQImporter: nested action-button write failed for Text block key '{$key}': " . $e->getMessage(), __METHOD__);
+                $result['warnings'][] = "Could not create nested action-button entries for a Text block — buttons left as-is: {$e->getMessage()}";
+            }
+        }
+    }
+
+    /**
+     * Rewrites ONE richText field's action-button segments — the per-field
+     * worker behind {@see _writeNestedActionButtons()}, called once for a
+     * Text block's own outer richText and once per second-column inner
+     * textBlock.
+     *
+     * Verifies $fieldHandle is a genuine `craft\ckeditor\Field` that allows
+     * the configured nested entry type (via `class_exists()` — craftcms/
+     * ckeditor is assumed installed on the target site, same as verbb/hyper
+     * and nystudio107/craft-seomatic, never a composer dependency of this
+     * plugin — see AGENTS.md). Either check failing falls back to today's
+     * inline <a> HTML for every button segment (NodesRenderer::renderButtonsAsHtml())
+     * and warns once, rather than silently dropping the buttons.
+     *
+     * @param Entry  $target       The saved entry carrying the richText field (a top-level Text
+     *                             block or one of its inner textBlock entries).
+     * @param string $fieldHandle  The richText field's handle (always 'richText' — see
+     *                             defaults.php's 'text' mapping).
+     * @param array  $segments     The full ordered segment list for this field (from
+     *                             NodesRenderer::renderSegmented() — see MatrixBuilder's
+     *                             text_columns branch).
+     * @param array  $nestedConfig The resolved textBlockNestedButtons config
+     *                             (MatrixBuilder::getTextBlockNestedButtonsConfig()).
+     * @param array  &$result      Page result — warnings and the nestedButtonRows counter appended.
+     * @return void
+     */
+    private function _writeNestedActionButtonsOnField(Entry $target, string $fieldHandle, array $segments, array $nestedConfig, array &$result): void
+    {
+        $entryTypeHandle   = (string)($nestedConfig['entryType'] ?? 'actionButtons');
+        $matrixFieldHandle = (string)($nestedConfig['matrixField'] ?? 'actionButtons');
+
+        $field = $target->getFieldLayout()?->getFieldByHandle($fieldHandle);
+        $isCkeditorField = class_exists('craft\\ckeditor\\Field') && $field instanceof \craft\ckeditor\Field;
+
+        $matchedType = null;
+        if ($isCkeditorField) {
+            foreach ($field->getEntryTypes() as $candidate) {
+                if ($candidate->handle === $entryTypeHandle) {
+                    $matchedType = $candidate;
+                    break;
+                }
+            }
+        }
+
+        if (!$isCkeditorField || $matchedType === null) {
+            $html = $this->_renderSegmentsAsHtml($segments);
+            $target->setFieldValue($fieldHandle, $html);
+
+            if (!Craft::$app->getElements()->saveElement($target, false)) {
+                $result['warnings'][] = "Could not save a Text block's '{$fieldHandle}' field while falling back to link-rendered action buttons.";
+
+                return;
+            }
+
+            $result['warnings'][] = $isCkeditorField
+                ? "A Text block's '{$fieldHandle}' field doesn't allow the '{$entryTypeHandle}' entry type — its action buttons were rendered as links instead of managed entries."
+                : "A Text block's '{$fieldHandle}' field isn't a CKEditor field — its action buttons were rendered as links instead of managed entries.";
+
+            return;
+        }
+
+        // Idempotency — see _writeNestedActionButtons()'s docblock: delete
+        // this field's existing nested entries of the configured type before
+        // recreating them, so re-syncing a block whose identity survived
+        // (preserveBlockIdentity) never piles up duplicates.
+        $this->_deleteNestedActionButtonRows($target, $field, $entryTypeHandle);
+
+        $html      = '';
+        $sortOrder = 0;
+
+        foreach ($segments as $segment) {
+            if (isset($segment['html'])) {
+                $html .= $segment['html'];
+                continue;
+            }
+
+            if (!isset($segment['buttons'])) {
+                continue;
+            }
+
+            $sortOrder++;
+            $nested      = new Entry();
+            $saved       = false;
+            $failMessage = null;
+
+            try {
+                $nested->fieldId = $field->id;
+                $nested->typeId  = $matchedType->id;
+                $nested->siteId  = $target->siteId;
+                $nested->setPrimaryOwner($target);
+                $nested->setOwner($target);
+                $nested->setSortOrder($sortOrder);
+                $nested->setSaveOwnership(true);
+                $nested->setFieldValue(
+                    $matrixFieldHandle,
+                    ContentIQImporter::$plugin->matrixBuilder->buildActionButtonsMatrixFromSegment($segment['buttons']),
+                );
+
+                $saved = Craft::$app->getElements()->saveElement($nested, false);
+
+                if (!$saved) {
+                    $failMessage = implode(', ', $nested->getFirstErrors());
+                }
+            } catch (Throwable $e) {
+                $saved       = false;
+                $failMessage = $e->getMessage();
+            }
+
+            if (!$saved) {
+                $result['warnings'][] = "Could not create a nested action-button entry: {$failMessage} — rendered as a link instead.";
+                $html .= ContentIQImporter::$plugin->nodes->renderButtonsAsHtml($segment['buttons']);
+                continue;
+            }
+
+            $html .= '<craft-entry data-entry-id="' . $nested->id . '">&nbsp;</craft-entry>';
+            $result['nestedButtonRows'] = ($result['nestedButtonRows'] ?? 0) + 1;
+        }
+
+        $target->setFieldValue($fieldHandle, $html);
+
+        if (!Craft::$app->getElements()->saveElement($target, false)) {
+            $result['warnings'][] = "Could not save a Text block's '{$fieldHandle}' field after writing its nested action-button entries.";
+        }
+    }
+
+    /**
+     * Renders a full renderSegmented() segment list back to plain HTML —
+     * html segments verbatim, button segments via
+     * NodesRenderer::renderButtonsAsHtml() — used by
+     * {@see _writeNestedActionButtonsOnField()}'s whole-field fallback when
+     * the richText field can't take a nested `actionButtons` entry at all.
+     *
+     * @param array $segments Ordered segment list from NodesRenderer::renderSegmented().
+     * @return string
+     */
+    private function _renderSegmentsAsHtml(array $segments): string
+    {
+        $html = '';
+
+        foreach ($segments as $segment) {
+            if (isset($segment['html'])) {
+                $html .= $segment['html'];
+            } elseif (isset($segment['buttons'])) {
+                $html .= ContentIQImporter::$plugin->nodes->renderButtonsAsHtml($segment['buttons']);
+            }
+        }
+
+        return $html;
+    }
+
+    /**
      * Creates (or updates) a per-page callToActionEntry from a ContentIQ CTA
      * block. Only invoked for `fields.source === 'page'` blocks — the router,
      * _resolveCtaBlocks(), sends `'global'`-source blocks to
@@ -3644,13 +4156,26 @@ class ImportService extends Component
      *                                             homepage, and collection children each pass their own
      *                                             resolved entry type's layout; null falls back to the
      *                                             ContentBlock shape.
+     * @param array            &$blockKeyConsumptionOut  Out param — MatrixBuilder::build()'s emitted-key
+     *                                             => payload-block-id(s) map (post-CTA-routing), for the
+     *                                             caller to pass into _writeNestedActionButtons() after
+     *                                             the entry saves.
+     * @param array            &$pendingNestedButtonsOut Out param — MatrixBuilder::build()'s
+     *                                             pendingNestedButtons side channel (see its docblock),
+     *                                             for the same caller/purpose.
      * @return array<string, mixed> Field values keyed by the Matrix field handle
      *         (config['matrixField']) and, when a hero block is present, either
      *         'enableHero'/'hero' (ContentBlock shape) or 'enableHero'/'heroTitle'/etc
      *         (flat shape — see _buildHeroField()).
      */
-    private function _buildBlockFieldValues(array $data, bool $dryRun, array &$result, ?FieldLayout $targetFieldLayout = null): array
-    {
+    private function _buildBlockFieldValues(
+        array $data,
+        bool $dryRun,
+        array &$result,
+        ?FieldLayout $targetFieldLayout = null,
+        array &$blockKeyConsumptionOut = [],
+        array &$pendingNestedButtonsOut = [],
+    ): array {
         $config = $this->_getConfig();
         $slug   = $result['slug'];
 
@@ -3732,6 +4257,12 @@ class ImportService extends Component
                 $pageId,
             );
         }
+
+        // Out params for the caller's post-save _writeNestedActionButtons()
+        // call (see this method's docblock) — set after CTA routing, so they
+        // reflect the same pruned key set $matrixData/$fieldValues end up with.
+        $blockKeyConsumptionOut   = $blockKeyConsumption;
+        $pendingNestedButtonsOut  = $built['pendingNestedButtons'] ?? [];
 
         $matrixHandle = $config['matrixField'] ?? 'contentBlocks';
 

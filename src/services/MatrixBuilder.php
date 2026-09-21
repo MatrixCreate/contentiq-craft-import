@@ -102,6 +102,41 @@ class MatrixBuilder extends Component
     }
 
     /**
+     * Returns the resolved 'textBlockNestedButtons' config (defaults.php
+     * merged with any blockOverrides, via the same prepare() call every
+     * other mapping goes through — see docs/block-mapping.md "Text blocks —
+     * nested action buttons"). Read by ImportService::_writeNestedActionButtons()
+     * after the owner entry saves, so both the build-time decision (this
+     * class) and the post-save write (ImportService) agree on the same
+     * entry/matrix/hyper field handles without ImportService re-deriving its
+     * own copy of the defaults+overrides merge.
+     *
+     * @return array{enabled?: bool, entryType?: string, matrixField?: string, blockEntryType?: string, hyperField?: string}
+     */
+    public function getTextBlockNestedButtonsConfig(): array
+    {
+        return $this->_mapping['textBlockNestedButtons'] ?? [];
+    }
+
+    /**
+     * Returns the 'text' block mapping's `outerType` — the Craft
+     * contentBlocks entry type handle a Text block becomes. Read by
+     * ImportService::_deleteStaleNestedActionButtons() to identify which of
+     * an entry's CURRENT top-level blocks are Text blocks, before that
+     * sync's write replaces them (see that method's docblock for why this
+     * sweep exists — craft\ckeditor\Field never cleans up its own nested
+     * entries when its owner is soft-deleted).
+     *
+     * @return string|null Null only if the 'text' mapping itself was somehow
+     *                      removed via blockOverrides (never true for the
+     *                      shipped defaults.php).
+     */
+    public function getTextBlockOuterType(): ?string
+    {
+        return $this->_mapping['text']['outerType'] ?? null;
+    }
+
+    /**
      * Builds the Matrix field data array and the block report from a ContentIQ blocks array.
      *
      * DIFF-AWARE top-level identity (preserveBlockIdentity config flag, gated by the
@@ -128,18 +163,27 @@ class MatrixBuilder extends Component
      *   imageReport: array<int, array{filename: string, reused: bool}>,
      *   cardRefs: array<int, array{blockIndex: int, mode: string, refs?: array, parent?: array}>,
      *   warnings: string[],
-     *   blockKeyConsumption: array<string|int, string[]>
+     *   blockKeyConsumption: array<string|int, string[]>,
+     *   pendingNestedButtons: array<string|int, array{richText?: array, textBlocks?: array<string, array>}>
      * }
      */
     public function build(array $blocks, bool $dryRun = false, string $hostPageSlug = '', array $existingBlockMap = []): array
     {
-        $matrixData          = [];
-        $blockReport         = [];
-        $imageReport         = [];
-        $cardRefs            = [];  // Deferred card references (in-memory, never persisted to Craft)
-        $blockKeyConsumption = [];  // Emitted top-level key => payload block id(s) it represents
-        $counter             = 0;
-        $this->_warnings     = [];
+        $matrixData           = [];
+        $blockReport          = [];
+        $imageReport          = [];
+        $cardRefs             = [];  // Deferred card references (in-memory, never persisted to Craft)
+        $blockKeyConsumption  = [];  // Emitted top-level key => payload block id(s) it represents
+        // Text blocks' CTA buttons, when textBlockNestedButtons is enabled and
+        // this isn't a dry run — outer Matrix key => {richText?, textBlocks?}
+        // segment lists, consumed by ImportService::_writeNestedActionButtons()
+        // AFTER the owner entry saves (a CKEditor nested entry needs a real
+        // saved element id — see docs/block-mapping.md "Text blocks — nested
+        // action buttons"). Empty unless MatrixBuilder actually emitted ≥1
+        // button segment for a Text block this build() call.
+        $pendingNestedButtons = [];
+        $counter              = 0;
+        $this->_warnings      = [];
 
         // Pre-process: group consecutive blocks that use 'grouped' mode.
         $processedBlocks = $this->_groupConsecutiveBlocks($blocks);
@@ -172,6 +216,12 @@ class MatrixBuilder extends Component
 
             $mapping = $this->_mapping[$type];
 
+            // Default: no nested action-button rows for this block — only the
+            // Text block's text_columns branch (inside _buildBlock()) ever
+            // populates this. See docs/block-mapping.md "Text blocks —
+            // nested action buttons".
+            $nestedButtonsMeta = ['pending' => [], 'noteCount' => 0];
+
             // Grouped blocks arrive as a single item with a '_groupedBlocks' array.
             if (isset($item['_groupedBlocks'])) {
                 [$outerFields, $innerMatrixData, $reportedFields] = $this->_buildGroupedBlock(
@@ -183,7 +233,7 @@ class MatrixBuilder extends Component
             } else {
                 $sourceFields = $item['fields'] ?? [];
 
-                [$outerFields, $innerMatrixData, $reportedFields, $blockCardRefs] = $this->_buildBlock(
+                [$outerFields, $innerMatrixData, $reportedFields, $blockCardRefs, $nestedButtonsMeta] = $this->_buildBlock(
                     $type,
                     $mapping,
                     $sourceFields,
@@ -232,22 +282,43 @@ class MatrixBuilder extends Component
             $matrixData[$key]          = ['type' => $mapping['outerType'], 'fields' => $allFields];
             $blockKeyConsumption[$key] = $consumedBlockIds;
 
+            // Nested action-button rows for THIS block, keyed by the same
+            // Matrix key just resolved above — ImportService zips this
+            // against the owner's saved top-level blocks the same way
+            // preserveBlockIdentity's _recordBlockSyncMap() does (order, not
+            // key lookup — Craft preserves Matrix key emission order).
+            if (!empty($nestedButtonsMeta['pending'])) {
+                $pendingNestedButtons[$key] = $nestedButtonsMeta['pending'];
+            }
+
             $innerCount = isset($item['_groupedBlocks']) ? count($item['_groupedBlocks']) : 1;
-            $blockReport[] = [
+            $blockReportRow = [
                 'type'   => $type,
                 'fields' => $reportedFields,
                 'skipped' => false,
                 'innerCount' => $innerCount,
             ];
+
+            // Dry-run only — a real run's row count is implicit in the
+            // written pendingNestedButtons segments above, not repeated here.
+            if ($dryRun && ($nestedButtonsMeta['noteCount'] ?? 0) > 0) {
+                $blockReportRow['note'] = sprintf(
+                    '%d action button row(s) will be created as nested entries',
+                    $nestedButtonsMeta['noteCount'],
+                );
+            }
+
+            $blockReport[] = $blockReportRow;
         }
 
         return [
-            'matrixData'          => $matrixData,
-            'blockReport'         => $blockReport,
-            'imageReport'         => $imageReport,
-            'cardRefs'            => $cardRefs,  // Deferred card refs (passed to ImportService, then SyncJob)
-            'warnings'            => $this->_warnings,
-            'blockKeyConsumption' => $blockKeyConsumption,  // Emitted key => payload block id(s) — see ImportService::_recordBlockSyncMap()
+            'matrixData'           => $matrixData,
+            'blockReport'          => $blockReport,
+            'imageReport'          => $imageReport,
+            'cardRefs'             => $cardRefs,  // Deferred card refs (passed to ImportService, then SyncJob)
+            'warnings'             => $this->_warnings,
+            'blockKeyConsumption'  => $blockKeyConsumption,  // Emitted key => payload block id(s) — see ImportService::_recordBlockSyncMap()
+            'pendingNestedButtons' => $pendingNestedButtons,  // Emitted key => {richText?, textBlocks?} segments — see ImportService::_writeNestedActionButtons()
         ];
     }
 
@@ -493,8 +564,10 @@ class MatrixBuilder extends Component
     /**
      * Builds the outer fields and inner Matrix data for a single block.
      *
-     * Returns a tuple of [outerFields, innerMatrixData, reportedFields, cardRefs].
+     * Returns a tuple of [outerFields, innerMatrixData, reportedFields, cardRefs, nestedButtonsMeta].
      * cardRefs is non-empty only for cards blocks in pages/children modes.
+     * nestedButtonsMeta is non-default only for the Text block's text_columns
+     * branch — see docs/block-mapping.md "Text blocks — nested action buttons".
      *
      * @param string $blockType     ContentIQ block type ('cards', 'text', etc).
      * @param array  $mapping       Block mapping definition from defaults.php.
@@ -502,8 +575,8 @@ class MatrixBuilder extends Component
      * @param array  &$imageReport  Image report array, mutated by image handlers.
      * @param bool   $dryRun
      * @param string $hostPageSlug  The slug of the page being imported (for children mode).
-     * @return array{0: array, 1: array, 2: string[], 3: array}
-     *         [outerFields, innerMatrixData, reportedFields, cardRefs]
+     * @return array{0: array, 1: array, 2: string[], 3: array, 4: array{pending: array, noteCount: int}}
+     *         [outerFields, innerMatrixData, reportedFields, cardRefs, nestedButtonsMeta]
      */
     private function _buildBlock(
         string $blockType,
@@ -513,9 +586,10 @@ class MatrixBuilder extends Component
         bool $dryRun,
         string $hostPageSlug,
     ): array {
-        $outerFields    = [];
-        $reportedFields = [];
-        $cardRefs       = [];  // Deferred refs for pages/children modes
+        $outerFields       = [];
+        $reportedFields    = [];
+        $cardRefs          = [];  // Deferred refs for pages/children modes
+        $nestedButtonsMeta = ['pending' => [], 'noteCount' => 0];  // Text block only — see text_columns branch below
 
         // Resolve outer fields (e.g. layout dropdown on the outer entry type).
         foreach ($mapping['outerFields'] ?? [] as $contentiqKey => [$craftHandle, $handlerType]) {
@@ -557,7 +631,7 @@ class MatrixBuilder extends Component
                     }
                 }
                 // Return without inner matrix — deferred refs travel in memory via $cardRefs
-                return [$outerFields, [], $reportedFields, $cardRefs];
+                return [$outerFields, [], $reportedFields, $cardRefs, $nestedButtonsMeta];
             }
             // For detected mode, set cardsInThisBlock='manual' and continue to inner card matrix
             $outerFields['cardsInThisBlock'] = 'manual';
@@ -570,7 +644,7 @@ class MatrixBuilder extends Component
         $innerConfig = $mapping['innerMatrix'] ?? null;
 
         if ($innerConfig === null) {
-            return [$outerFields, [], $reportedFields, []];  // Empty cardRefs for non-card blocks
+            return [$outerFields, [], $reportedFields, [], $nestedButtonsMeta];  // Empty cardRefs for non-card blocks
         }
 
         $outerField    = $innerConfig['outerField'];
@@ -641,14 +715,52 @@ class MatrixBuilder extends Component
                 ));
             }
 
+            // Text blocks' CTA buttons become CKEditor nested `actionButtons`
+            // entries instead of inline <a> tags — see docs/block-mapping.md
+            // "Text blocks — nested action buttons" and ImportService::
+            // _writeNestedActionButtons(). Scoped to the Text block (the only
+            // text_columns user) via $blockType, gated on the config flag,
+            // and never written on a dry run — ImportService needs a real
+            // saved owner/inner block element before it can create the
+            // nested Craft entries the CKEditor purifier requires (no
+            // placeholder id survives the save — see docs/block-mapping.md).
+            // A dry run still counts what WOULD become nested rows, purely
+            // for the block report note below.
+            $nestedButtonsConfig  = $blockType === 'text' ? ($this->_mapping['textBlockNestedButtons'] ?? []) : [];
+            $nestedButtonsEnabled = !empty($nestedButtonsConfig['enabled']);
+            $nestedButtonsWrite   = $nestedButtonsEnabled && !$dryRun;
+            $nestedButtonsPending = [];
+            $nestedButtonsNotes   = 0;
+
             if ($liftFirstColumn) {
-                $resolved = $this->_resolveFieldByHandler(
+                $firstColumnNodes = array_shift($columnNodes);
+                $resolved         = $this->_resolveFieldByHandler(
                     $nodesMapping[1],
                     $firstColumnField,
-                    array_shift($columnNodes),
+                    $firstColumnNodes,
                     $imageReport,
                     $dryRun,
                 );
+
+                if ($nestedButtonsEnabled) {
+                    $segments    = ContentIQImporter::$plugin->nodes->renderSegmented($firstColumnNodes);
+                    $buttonCount = $this->_countSegmentButtons($segments);
+
+                    if ($nestedButtonsWrite) {
+                        // Overrides the <a>-rendered value _resolveFieldByHandler()
+                        // just produced — html-only concatenation is byte-identical
+                        // to it for prose (see NodesRenderer::renderSegmented()),
+                        // minus the button run(s), which become nested entries below.
+                        $resolved[$firstColumnField] = $this->_htmlOnlyFromSegments($segments);
+
+                        if ($buttonCount > 0) {
+                            $nestedButtonsPending['richText'] = $segments;
+                        }
+                    } elseif ($buttonCount > 0) {
+                        // Dry run — keep today's <a>-rendered value; only the count differs.
+                        $nestedButtonsNotes += $buttonCount;
+                    }
+                }
 
                 foreach ($resolved as $handle => $fieldValue) {
                     $outerFields[$handle] = $fieldValue;
@@ -668,7 +780,24 @@ class MatrixBuilder extends Component
                     $dryRun,
                 );
 
-                $innerEntries['new' . (++$innerCounter)] = [
+                $innerKey = 'new' . (++$innerCounter);
+
+                if ($nestedButtonsEnabled && $nodesMapping !== null) {
+                    $segments    = ContentIQImporter::$plugin->nodes->renderSegmented($columnSlice);
+                    $buttonCount = $this->_countSegmentButtons($segments);
+
+                    if ($nestedButtonsWrite) {
+                        $innerFields[$nodesMapping[0]] = $this->_htmlOnlyFromSegments($segments);
+
+                        if ($buttonCount > 0) {
+                            $nestedButtonsPending['textBlocks'][$innerKey] = $segments;
+                        }
+                    } elseif ($buttonCount > 0) {
+                        $nestedButtonsNotes += $buttonCount;
+                    }
+                }
+
+                $innerEntries[$innerKey] = [
                     'type'   => $innerConfig['innerType'],
                     'fields' => $innerFields,
                 ];
@@ -677,6 +806,8 @@ class MatrixBuilder extends Component
                     $reportedFields = array_merge($reportedFields, $innerReportedFields);
                 }
             }
+
+            $nestedButtonsMeta = ['pending' => $nestedButtonsPending, 'noteCount' => $nestedButtonsNotes];
         } else {
             $sourceKey   = $innerConfig['sourceKey'] ?? '';
             $items       = $sourceFields[$sourceKey] ?? [];
@@ -713,7 +844,78 @@ class MatrixBuilder extends Component
 
         $innerMatrixData = [$outerField => $innerEntries];
 
-        return [$outerFields, $innerMatrixData, $reportedFields, []];
+        return [$outerFields, $innerMatrixData, $reportedFields, [], $nestedButtonsMeta];
+    }
+
+    /**
+     * Concatenates only the 'html' segments from {@see NodesRenderer::renderSegmented()}'s
+     * output, dropping any 'buttons' segments — used to write a Text block's
+     * richText value once its CTA buttons are being lifted into CKEditor
+     * nested entries instead of inline <a> tags (textBlockNestedButtons).
+     *
+     * @param array $segments Ordered segment list from renderSegmented().
+     * @return string
+     */
+    private function _htmlOnlyFromSegments(array $segments): string
+    {
+        $html = '';
+
+        foreach ($segments as $segment) {
+            if (isset($segment['html'])) {
+                $html .= $segment['html'];
+            }
+        }
+
+        return $html;
+    }
+
+    /**
+     * Counts every button across every 'buttons' segment in a
+     * {@see NodesRenderer::renderSegmented()} result.
+     *
+     * @param array $segments Ordered segment list from renderSegmented().
+     * @return int
+     */
+    private function _countSegmentButtons(array $segments): int
+    {
+        $count = 0;
+
+        foreach ($segments as $segment) {
+            if (isset($segment['buttons'])) {
+                $count += count($segment['buttons']);
+            }
+        }
+
+        return $count;
+    }
+
+    /**
+     * Builds an actionButtons Matrix field value from a flat button array
+     * ({label, url, target}) — the shape {@see NodesRenderer::renderSegmented()}
+     * returns for a 'buttons' segment. Public wrapper around
+     * {@see _buildActionButtonsMatrix()} so ImportService::
+     * _writeNestedActionButtons() (CKEditor nested action-button entries —
+     * see docs/block-mapping.md "Text blocks — nested action buttons") builds
+     * the exact same shape, through the exact same LinkHelper::hyperUrlLink()
+     * construction, as every other button mapping in this class, rather than
+     * re-deriving it.
+     *
+     * @param array<int, array{label: string, url: string, target: mixed}> $buttons
+     * @return array<string, array> Matrix data keyed by 'new1', 'new2', …
+     */
+    public function buildActionButtonsMatrixFromSegment(array $buttons): array
+    {
+        $nodes = array_map(
+            static fn(array $button): array => [
+                'type'   => 'ctaButton',
+                'label'  => $button['label'] ?? '',
+                'url'    => $button['url'] ?? '',
+                'target' => $button['target'] ?? null,
+            ],
+            $buttons,
+        );
+
+        return $this->_buildActionButtonsMatrix($nodes);
     }
 
     /**

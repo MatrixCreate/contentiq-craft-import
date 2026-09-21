@@ -17,7 +17,26 @@ use yii\base\Component;
  *   - unordered_list      → <ul><li> (legacy alias)
  *   - faq_items           → <details><summary>…</summary><p>…</p></details>
  *   - table               → <table><thead>/<tbody> with <th>/<td> cells
- *   - ctaButton           → <p><a href="url">label</a></p>
+ *   - ctaButton           → <p><a href="url">label</a></p> via render();
+ *                           {@see renderSegmented()} is the one path that
+ *                           does NOT inline ctaButton nodes as an <a> — it
+ *                           returns an ordered {html}/{buttons} segment list
+ *                           instead, so a caller (MatrixBuilder's Text block
+ *                           handling, gated on the textBlockNestedButtons
+ *                           config flag — see defaults.php) can lift button
+ *                           runs into CKEditor nested `actionButtons`
+ *                           entries. That two-phase save (owner saved with
+ *                           prose only, nested entries created against its
+ *                           real id, THEN `<craft-entry>` tags spliced back
+ *                           in and the owner re-saved) lives in
+ *                           ImportService::_writeNestedActionButtons() —
+ *                           CKEditor's HTML purifier strips any placeholder
+ *                           marker on save, so no id can be inlined before
+ *                           the nested entry actually exists. A richText
+ *                           field whose CKEditor config doesn't allow the
+ *                           `actionButtons` entry type falls back to
+ *                           today's inline <a> — see docs/block-mapping.md
+ *                           "Text blocks — nested action buttons".
  *
  * No external dependencies. This service is stateless — all methods are pure.
  *
@@ -54,6 +73,97 @@ class NodesRenderer extends Component
     }
 
     /**
+     * Renders an array of ContentIQ nodes to an ORDERED LIST OF SEGMENTS,
+     * splitting out runs of consecutive ctaButton nodes so a caller can lift
+     * them out of the rendered HTML entirely — e.g. MatrixBuilder's Text
+     * block handling, which turns a button run into CKEditor nested
+     * `actionButtons` entries instead of an inline <a> (see class docblock
+     * and docs/block-mapping.md "Text blocks — nested action buttons").
+     *
+     * Every element is one of:
+     *   {html: string}                                   — a run of zero or
+     *     more non-button nodes, rendered exactly as render() would (via the
+     *     same _renderNode() dispatch — byte-identical output for the same
+     *     nodes).
+     *   {buttons: [{label, url, target}, ...]}            — a run of one or
+     *     more CONSECUTIVE ctaButton nodes. Two button runs separated by
+     *     prose are always two separate segments, never merged.
+     *
+     * A ctaButton node with an empty label AND an empty url contributes
+     * NOTHING — not html, not a button, not even a segment boundary — the
+     * same skip rule MatrixBuilder::_buildActionButtonsMatrix() applies (not
+     * _renderCtaButton()'s own, slightly looser, label-only check: this
+     * method's contract is with the nested-entry path, not the inline-<a>
+     * one). Dropping it silently rather than emitting an empty {buttons: []}
+     * segment means it never splits an otherwise-contiguous prose run in two.
+     *
+     * render() and _renderCtaButton() are entirely UNCHANGED by this method
+     * — every other caller, and the textBlockNestedButtons-disabled/dry-run
+     * paths, keep rendering ctaButton nodes as an inline <a> exactly as
+     * before.
+     *
+     * @param array|null $nodes
+     * @return array<int, array{html?: string, buttons?: array<int, array{label: string, url: string, target: mixed}>}>
+     */
+    public function renderSegmented(?array $nodes): array
+    {
+        if (empty($nodes)) {
+            return [];
+        }
+
+        $segments  = [];
+        $htmlNodes = [];
+        $buttonRun = [];
+
+        $flushHtml = function () use (&$segments, &$htmlNodes): void {
+            if (empty($htmlNodes)) {
+                return;
+            }
+
+            $html = '';
+            foreach ($htmlNodes as $node) {
+                $html .= $this->_renderNode($node);
+            }
+            $segments[] = ['html' => $html];
+            $htmlNodes  = [];
+        };
+
+        $flushButtons = function () use (&$segments, &$buttonRun): void {
+            if (empty($buttonRun)) {
+                return;
+            }
+
+            $segments[] = ['buttons' => $buttonRun];
+            $buttonRun  = [];
+        };
+
+        foreach ($nodes as $node) {
+            if (($node['type'] ?? '') === 'ctaButton') {
+                $label = (string)($node['label'] ?? '');
+                $url   = (string)($node['url'] ?? '');
+
+                if ($label === '' && $url === '') {
+                    // Contributes nothing — not a boundary either, so
+                    // surrounding prose stays in one html run.
+                    continue;
+                }
+
+                $flushHtml();
+                $buttonRun[] = ['label' => $label, 'url' => $url, 'target' => $node['target'] ?? null];
+                continue;
+            }
+
+            $flushButtons();
+            $htmlNodes[] = $node;
+        }
+
+        $flushHtml();
+        $flushButtons();
+
+        return $segments;
+    }
+
+    /**
      * Public access to inline content rendering for other services (e.g. MatrixBuilder).
      *
      * @param array $inlineNodes
@@ -62,6 +172,36 @@ class NodesRenderer extends Component
     public function renderInlineContent(array $inlineNodes): string
     {
         return $this->_renderInlineContent($inlineNodes);
+    }
+
+    /**
+     * Renders a flat button array ({label, url, target} — the shape
+     * {@see renderSegmented()} returns for a 'buttons' segment) back to the
+     * same inline <a> HTML render() would have produced for the equivalent
+     * ctaButton nodes — reuses _renderCtaButton() directly rather than
+     * re-deriving its markup, so the two never drift apart.
+     *
+     * Used by ImportService::_writeNestedActionButtons()'s fallback path: a
+     * richText field whose entry type doesn't allow (or isn't) a CKEditor
+     * field falls back to today's inline markup for that button run instead
+     * of losing it — see class docblock and docs/block-mapping.md "Text
+     * blocks — nested action buttons".
+     *
+     * @param array<int, array{label: string, url: string, target?: mixed}> $buttons
+     * @return string
+     */
+    public function renderButtonsAsHtml(array $buttons): string
+    {
+        $html = '';
+
+        foreach ($buttons as $button) {
+            $html .= $this->_renderCtaButton([
+                'label' => $button['label'] ?? '',
+                'url'   => $button['url'] ?? '',
+            ]);
+        }
+
+        return $html;
     }
 
     /**

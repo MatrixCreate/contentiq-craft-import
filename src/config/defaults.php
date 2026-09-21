@@ -61,6 +61,23 @@
  * Overrides replace the entire block definition (not merged at field level).
  *
  * ---------------------------------------------------------------------------
+ * 'textBlockNestedButtons' key (below) — NOT a block mapping either
+ * ---------------------------------------------------------------------------
+ * Config for the Text block's CTA buttons (see the 'text' mapping's
+ * text_columns innerMatrix, and MatrixBuilder's text_columns branch):
+ * when enabled, a run of ctaButton nodes in a Text block's richText (first
+ * column or a textBlocks inner column) is lifted out of the CKEditor HTML
+ * and written as a CKEditor nested entry of 'entryType' instead, whose
+ * 'matrixField' Matrix field holds one 'blockEntryType' block per button,
+ * each carrying a Hyper link on 'hyperField' — the same shape
+ * MatrixBuilder::_buildActionButtonsMatrix() already builds for every other
+ * button mapping in this file. See docs/block-mapping.md "Text blocks —
+ * nested action buttons" for the two-phase save this requires and why
+ * (CKEditor's HTML purifier strips any placeholder marker on save — a
+ * nested entry's id must be real before it can appear in the HTML at all).
+ * Overridden wholesale via 'blockOverrides' like everything else here.
+ *
+ * ---------------------------------------------------------------------------
  * Content types ('content_types' key, below)
  * ---------------------------------------------------------------------------
  * Maps ContentIQ content_type slugs (set on collection children) to the Craft
@@ -106,6 +123,18 @@ return [
                 'nodes' => ['richText', 'nodes'],
             ],
         ],
+    ],
+
+    // See the file header's "'textBlockNestedButtons' key" note above for
+    // what each key controls. 'enabled' => false restores today's
+    // behaviour byte-for-byte (CTA buttons render inline as <a class="btn
+    // btn-primary not-prose"> — see NodesRenderer::_renderCtaButton()).
+    'textBlockNestedButtons' => [
+        'enabled'        => true,
+        'entryType'      => 'actionButtons',
+        'matrixField'    => 'actionButtons',
+        'blockEntryType' => 'actionButton',
+        'hyperField'     => 'actionButton',
     ],
 
     'text_and_media' => [

@@ -485,6 +485,111 @@ check(
 );
 
 // -----------------------------------------------------------------------------
+// NodesRenderer::renderSegmented() — Text block nested action buttons.
+//
+// The one path that does NOT inline a ctaButton node as an <a> — it splits
+// nodes into an ordered {html}/{buttons} segment list so MatrixBuilder's Text
+// block handling can lift button runs into CKEditor nested `actionButtons`
+// entries (textBlockNestedButtons — see docs/block-mapping.md). render() and
+// _renderCtaButton() are unchanged; this is a wholly separate output shape.
+// -----------------------------------------------------------------------------
+echo "\nNodesRenderer — renderSegmented()\n";
+
+$segRenderer = new \matrixcreate\contentiqimporter\services\NodesRenderer();
+
+$introPara  = ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Intro copy.']]];
+$closePara  = ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Closing copy.']]];
+$learnBtn   = ['type' => 'ctaButton', 'label' => 'Learn more', 'url' => '/learn', 'target' => null];
+$buyBtn     = ['type' => 'ctaButton', 'label' => 'Buy now', 'url' => '/buy', 'target' => '_blank'];
+$emptyBtn   = ['type' => 'ctaButton', 'label' => '', 'url' => ''];
+
+check(
+    'renderSegmented(): prose only — one html segment',
+    [['html' => '<p>Intro copy.</p>']],
+    $segRenderer->renderSegmented([$introPara]),
+);
+
+$proseButtonsProse = $segRenderer->renderSegmented([$introPara, $learnBtn, $buyBtn, $closePara]);
+check('renderSegmented(): prose, 2 consecutive buttons, prose — 3 segments', 3, count($proseButtonsProse));
+check('renderSegmented(): first segment is the leading prose', ['html' => '<p>Intro copy.</p>'], $proseButtonsProse[0] ?? null);
+check(
+    'renderSegmented(): middle segment holds both buttons in order',
+    ['buttons' => [
+        ['label' => 'Learn more', 'url' => '/learn', 'target' => null],
+        ['label' => 'Buy now', 'url' => '/buy', 'target' => '_blank'],
+    ]],
+    $proseButtonsProse[1] ?? null,
+);
+check('renderSegmented(): last segment is the trailing prose', ['html' => '<p>Closing copy.</p>'], $proseButtonsProse[2] ?? null);
+
+$startAndEnd = $segRenderer->renderSegmented([$learnBtn, $introPara, $buyBtn]);
+check(
+    'renderSegmented(): buttons at start and end — separate segments',
+    [
+        ['buttons' => [['label' => 'Learn more', 'url' => '/learn', 'target' => null]]],
+        ['html' => '<p>Intro copy.</p>'],
+        ['buttons' => [['label' => 'Buy now', 'url' => '/buy', 'target' => '_blank']]],
+    ],
+    $startAndEnd,
+);
+
+check(
+    'renderSegmented(): a button with empty label AND url is skipped (no split, no empty segment)',
+    [['html' => '<p>Intro copy.</p><p>Closing copy.</p>']],
+    $segRenderer->renderSegmented([$introPara, $emptyBtn, $closePara]),
+);
+
+check(
+    'renderSegmented(): html segment output identical to render() for the same nodes',
+    $segRenderer->render([$introPara, $closePara]),
+    $segRenderer->renderSegmented([$introPara, $closePara])[0]['html'] ?? null,
+);
+
+// -----------------------------------------------------------------------------
+// MatrixBuilder — Text block nested action buttons (textBlockNestedButtons).
+//
+// Enabled by default (defaults.php) — a 'text' block's ctaButton nodes must
+// be lifted out of richText (no inline <a class="btn...) and queued in the
+// pendingNestedButtons side channel for ImportService::_writeNestedActionButtons()
+// to turn into CKEditor nested entries once the owner entry is saved.
+// -----------------------------------------------------------------------------
+echo "\nMatrixBuilder — Text block nested action buttons\n";
+
+$nestedButtonsBuilder = new \matrixcreate\contentiqimporter\services\MatrixBuilder();
+$nestedButtonsBuilder->prepare(['blockOverrides' => []]);
+$nestedButtonsBuilder->entryTypeFieldProbe = static fn(string $entryType, string $handle): bool => $entryType === 'text' && $handle === 'richText';
+
+$nestedButtonsBuilt = $nestedButtonsBuilder->build([[
+    'type'   => 'text',
+    'id'     => 'block-nested-buttons',
+    'fields' => [
+        'columns' => 'singleColumn',
+        'nodes'   => [$introPara, $learnBtn, $closePara],
+    ],
+]]);
+
+check(
+    'textBlockNestedButtons: richText carries no inline <a class="btn...',
+    false,
+    str_contains($nestedButtonsBuilt['matrixData']['new1']['fields']['richText'] ?? '', '<a class="btn'),
+);
+check(
+    'textBlockNestedButtons: richText is the prose only (button run dropped)',
+    '<p>Intro copy.</p><p>Closing copy.</p>',
+    $nestedButtonsBuilt['matrixData']['new1']['fields']['richText'] ?? null,
+);
+check(
+    'textBlockNestedButtons: pendingNestedButtons populated for the block key',
+    true,
+    isset($nestedButtonsBuilt['pendingNestedButtons']['new1']['richText']),
+);
+check(
+    'textBlockNestedButtons: pending segment list holds the button run',
+    [['label' => 'Learn more', 'url' => '/learn', 'target' => null]],
+    $nestedButtonsBuilt['pendingNestedButtons']['new1']['richText'][1]['buttons'] ?? null,
+);
+
+// -----------------------------------------------------------------------------
 // MatrixBuilder — cards block, detected mode, button → cardLink.
 //
 // The `card` entry type has no `actionButtonLabel` field — only `cardLink`

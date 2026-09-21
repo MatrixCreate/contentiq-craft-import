@@ -331,24 +331,68 @@ class LinkSweepService extends Component
                     ? $value->getRawContent()
                     : (is_string($value) ? $value : null);
 
-                if ($raw === null || $raw === '') {
-                    continue;
+                if ($raw !== null && $raw !== '') {
+                    $r = LinkRewriter::rewriteHtml($raw, $resolve, $siteId);
+
+                    if ($r['html'] !== $raw) {
+                        $el->setFieldValue($handle, $r['html']);
+                        $dirty          = true;
+                        $resolvedCount += $r['resolved'];
+                    }
+
+                    foreach ($r['unresolved'] as $path) {
+                        $message = "Link '{$path}' did not resolve to an entry — left as a URL.";
+
+                        if (!isset($seenWarnings[$message])) {
+                            $seenWarnings[$message] = true;
+                            $warnings[]             = $message;
+                        }
+                    }
                 }
 
-                $r = LinkRewriter::rewriteHtml($raw, $resolve, $siteId);
+                // -----------------------------------------------------------------
+                // CKEditor fields (craft\ckeditor\Field extends HtmlField) can also
+                // carry nested entries — e.g. the `actionButtons` entries
+                // textBlockNestedButtons creates (see
+                // ImportService::_writeNestedActionButtons() and
+                // docs/block-mapping.md "Text blocks — nested action buttons").
+                // Recurse into each so a Hyper Url button inside one is upgraded
+                // to an Entry link by this same pass, same as everywhere else a
+                // button lives. class_exists() guards sites without
+                // craftcms/ckeditor installed — never a composer dependency of
+                // this plugin (see AGENTS.md) — same convention as the
+                // ContentBlock branch below.
+                // -----------------------------------------------------------------
+                if (class_exists('craft\\ckeditor\\Field') && $field instanceof \craft\ckeditor\Field) {
+                    $nested = Entry::find()->ownerId($el->id)->fieldId($field->id)->status(null)->all();
 
-                if ($r['html'] !== $raw) {
-                    $el->setFieldValue($handle, $r['html']);
-                    $dirty          = true;
-                    $resolvedCount += $r['resolved'];
-                }
+                    foreach ($nested as $child) {
+                        $childDirty = $this->_walkElement(
+                            $child,
+                            $resolve,
+                            $siteId,
+                            $dryRun,
+                            $warnings,
+                            $seenWarnings,
+                            $hyperHandleCache,
+                            $resolvedCount,
+                            $depth + 1,
+                        );
 
-                foreach ($r['unresolved'] as $path) {
-                    $message = "Link '{$path}' did not resolve to an entry — left as a URL.";
+                        if ($childDirty && !$dryRun) {
+                            try {
+                                if (!Craft::$app->getElements()->saveElement($child, false)) {
+                                    $message = 'Could not save resolved links: ' . implode('; ', $child->getFirstErrors());
 
-                    if (!isset($seenWarnings[$message])) {
-                        $seenWarnings[$message] = true;
-                        $warnings[]             = $message;
+                                    if (!isset($seenWarnings[$message])) {
+                                        $seenWarnings[$message] = true;
+                                        $warnings[]             = $message;
+                                    }
+                                }
+                            } catch (Throwable $e) {
+                                $warnings[] = 'Could not save resolved links: ' . $e->getMessage();
+                            }
+                        }
                     }
                 }
 

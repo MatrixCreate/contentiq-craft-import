@@ -222,6 +222,59 @@ even after this plugin starts writing the new shape on the next sync.
 
 ---
 
+## Text blocks — nested action buttons
+
+A Text block's `ctaButton` nodes (in either the outer `richText` or a
+`textBlocks` inner column) become **CKEditor nested entries** of entry type
+`actionButtons` — never the inline `<a class="btn...` tag every other
+richText field still gets — gated by the `textBlockNestedButtons` config
+block in `defaults.php` (see its header comment for exactly what each key
+controls; `blockOverrides`-replaceable like every other mapping here).
+`NodesRenderer::renderSegmented()` is what makes this possible: it splits a
+Text column's nodes into an ordered `{html}`/`{buttons}` segment list
+instead of one flat HTML string, so `MatrixBuilder` can write the prose
+segments straight into `richText` and hand the button segments off
+separately.
+
+**Two-phase save, because a nested entry has no placeholder id.** Unlike a
+Matrix field's own `'new1'`-style keys, a CKEditor nested entry must already
+exist as a real, saved element before it can appear in the HTML — its HTML
+purifier strips any other marker on save (see `NodesRenderer`'s class
+docblock). So MatrixBuilder's `build()` only ever writes the *prose* to
+`richText` (button runs stripped, queued in the `pendingNestedButtons` side
+channel it returns alongside `blockKeyConsumption`); once the owner entry
+has actually saved and has a real id, `ImportService::_writeNestedActionButtons()`
+creates the nested entries against it, splices `<craft-entry
+data-entry-id="…">` tags into the right spots, and re-saves just that block.
+It reuses the same outer-key → saved-block positional zip
+`_recordBlockSyncMap()` already does (Craft preserves Matrix key emission
+order), and re-runs on every sync — any previously-created nested entries
+for that block/field are deleted first, so `preserveBlockIdentity` keeping a
+block's element id alive across syncs never piles up duplicates.
+
+**Craft never cleans these up on its own — a separate pre-save sweep is
+required.** `craft\ckeditor\Field` has no `beforeElementDelete()`/
+`afterElementDelete()` override, unlike `craft\fields\Matrix`, which calls
+`entryManager()->deleteNestedElements()` when its owner is soft-deleted. So
+on a plain re-sync (`preserveBlockIdentity` OFF, the default), the outer
+`contentBlocks` Matrix soft-deletes the OLD Text block as part of its own
+whole-page-replace write, but the `actionButtons` entries that old block
+owned are never touched — they'd stay live and orphaned, one extra set per
+sync, forever. `ImportService::_deleteStaleNestedActionButtons()` sweeps
+them explicitly, reading the entry's CURRENT blocks and deleting their owned
+`actionButtons` entries BEFORE the replacing save runs — called from both
+`importPage()`'s and `_importCollectionChild()`'s existing-entry branches,
+never on create (nothing to sweep yet).
+
+**Fallback.** A richText field that isn't a genuine `craft\ckeditor\Field`,
+or whose CKEditor config doesn't allow the `actionButtons` entry type,
+renders every button in today's inline `<a>` markup instead — a page
+warning either way, never a silently dropped button. The same fallback
+covers an individual nested-entry save failure, scoped to just that one
+button run.
+
+---
+
 ## Text & Media grouping
 
 `_groupConsecutiveBlocks()` merges consecutive `text_and_media` blocks in
