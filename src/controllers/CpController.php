@@ -314,6 +314,11 @@ class CpController extends Controller
         // Prepare services for dry-run.
         $importService = ContentIQImporter::$plugin->imports;
 
+        // Resets per-run state (currently just the "first global CTA block
+        // wins" tracking — see ImportService::beginRun()) so this preview
+        // never inherits state from a previous run in the same PHP process.
+        $importService->beginRun();
+
         $previewResults = [];
         $totalWarnings  = 0;
 
@@ -322,7 +327,7 @@ class CpController extends Controller
 
             // Check if entry exists.
             $slug     = $result['slug'] ?? '';
-            $existing = Entry::find()->section('pages')->slug($slug)->status(null)->one();
+            $existing = Entry::find()->section('pages')->slug(Db::escapeParam((string)$slug))->status(null)->one();
 
             $result['willCreate'] = $existing === null;
             $result['existingId'] = $existing?->id;
@@ -414,6 +419,12 @@ class CpController extends Controller
         $pages   = $isBatch ? $data['pages'] : [$data];
 
         $importService = ContentIQImporter::$plugin->imports;
+
+        // Resets per-run state (currently just the "first global CTA block
+        // wins" tracking — see ImportService::beginRun()) so this run never
+        // inherits state from a previous run in the same PHP process.
+        $importService->beginRun();
+
         $pageResults   = [];
         $totalImages   = 0;
         $hasErrors     = false;
@@ -532,7 +543,7 @@ class CpController extends Controller
                         if ($parentId === null) {
                             $parentEntry = Entry::find()
                                 ->section($sectionHandle)
-                                ->slug($parentSlug)
+                                ->slug(Db::escapeParam((string)$parentSlug))
                                 ->status(null)
                                 ->one();
                             $parentId = $parentEntry?->id;
@@ -1161,6 +1172,12 @@ class CpController extends Controller
         if (!$elementId || $slug === '') {
             return $this->asJson(['success' => false, 'error' => 'elementId and slug are required.']);
         }
+
+        // A widget sync is a run of one page — resets per-run state
+        // (currently just the "first global CTA block wins" tracking — see
+        // ImportService::beginRun()) so it never inherits state from a
+        // previous run in the same PHP process.
+        ContentIQImporter::$plugin->imports->beginRun();
 
         // Enforce the lock server-side. The sidebar Sync button is disabled
         // client-side when locked, but that's advisory only — a stale page or a

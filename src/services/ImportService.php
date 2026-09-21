@@ -53,8 +53,66 @@ class ImportService extends Component
      */
     private ?array $_contentTypesMap = null;
 
+    /**
+     * Whether a 'global'-source CTA block has already been resolved this run
+     * — see beginRun()/_resolveGlobalCtaEntry(). The FIRST 'global' CTA block
+     * that saves the shared entry, or that hits a run-invariant
+     * configuration warning (globals locked, missing set/field/section),
+     * claims the run; every subsequent one is a no-op discard. A block whose
+     * own save fails does not claim it. Reset to false by
+     * beginRun() — required because Craft services are singletons per PHP
+     * process, and `craft queue/listen` executes many runs in one process.
+     *
+     * @var bool
+     */
+    private bool $_globalCtaResolvedThisRun = false;
+
+    /**
+     * Memoised id of the entry currently related through the global set's
+     * `globalChooseCtaField` (see _getGlobalCtaEntryId()) — meaningful only
+     * when $_globalCtaEntryIdLooked is true; null there means nothing is
+     * currently related (not "not looked up yet").
+     *
+     * @var int|null
+     */
+    private ?int $_globalCtaEntryId = null;
+
+    /**
+     * Whether $_globalCtaEntryId has been looked up this run — see
+     * _getGlobalCtaEntryId(). Reset to false by beginRun(); cleared again by
+     * _resolveGlobalCtaEntry() immediately after it relates a new entry, so
+     * a page processed later in the same run sees that entry's id rather
+     * than a memo cached before it existed.
+     *
+     * @var bool
+     */
+    private bool $_globalCtaEntryIdLooked = false;
+
     // Public Methods
     // =========================================================================
+
+    /**
+     * Resets the per-run state that must never leak between imports — the
+     * "first global CTA block wins" tracking (see
+     * $_globalCtaResolvedThisRun/_resolveGlobalCtaEntry()) and the global
+     * CTA entry id memo (see $_globalCtaEntryId/_getGlobalCtaEntryId()).
+     * Craft services
+     * are singletons per PHP process, and a `craft queue/listen` daemon
+     * executes many SyncJobs (and every other entry point that ends up here
+     * — CP upload, the sidebar widget, the CLI) in one process, so leftover
+     * state from one run would silently poison the next. Call this once at
+     * the start of every run, before any page is imported — see SyncJob::execute(),
+     * CpController::actionPreview()/actionRunImport()/actionWidgetSync(), and
+     * ImportController::actionImport().
+     *
+     * @return void
+     */
+    public function beginRun(): void
+    {
+        $this->_globalCtaResolvedThisRun = false;
+        $this->_globalCtaEntryId         = null;
+        $this->_globalCtaEntryIdLooked   = false;
+    }
 
     /**
      * Runs the full import pipeline for a single ContentIQ page export.
@@ -549,7 +607,7 @@ class ImportService extends Component
 
             return Entry::find()
                 ->section($route['section'])
-                ->slug($slug)
+                ->slug(Db::escapeParam((string)$slug))
                 ->status(null)
                 ->one();
         }
@@ -571,7 +629,7 @@ class ImportService extends Component
 
         return Entry::find()
             ->section($sectionHandle)
-            ->slug($slug)
+            ->slug(Db::escapeParam((string)$slug))
             ->status(null)
             ->one();
     }
@@ -711,7 +769,7 @@ class ImportService extends Component
 
             return Entry::find()
                 ->section($sectionHandle)
-                ->slug($slug)
+                ->slug(Db::escapeParam($slug))
                 ->status(null)
                 ->one()?->id;
         };
@@ -879,6 +937,7 @@ class ImportService extends Component
                 // ImportController), and producer facts apply even when this
                 // narrower assets-only path itself throws.
                 'warnings'   => $this->_mergeProducerWarnings($data, ['Could not file page assets: ' . $e->getMessage()]),
+                'assetIds'   => [],
             ];
         }
     }
@@ -1638,7 +1697,7 @@ class ImportService extends Component
             // _resolveCtaBlocks()/_resolveGlobalCtaEntry()/_buildFooterGlobalCtaField()
             // and docs/globals.md. These are the Craft Starter's own handles;
             // override per-project in config/contentiq.php if a fork renamed them.
-            'footerCtaField'           => 'footerCallToAction',      // ContentBlock field on pages/homepage
+            'footerCtaField'           => 'callToAction',      // ContentBlock field on pages/homepage
             'footerCtaShowGlobalField' => 'showGlobalCallToAction',  // Lightswitch nested inside it
             'globalContentSet'         => 'globalContent',           // Global set holding the relation
             'globalChooseCtaField'     => 'globalChooseCallToAction', // Entries field on that global set
@@ -2659,11 +2718,17 @@ class ImportService extends Component
      *     falls back entirely to the pre-existing title-only behaviour below —
      *     no map row is read or written.
      *   - With a stable identity: look up contentiq_cta_syncs by (page_id,
-     *     block_id). A live mapped element wins outright (update, done).
-     *   - No mapping row (or a stale one whose element vanished): fall back to
-     *     the legacy `->title($title)` lookup. A match is adopted — updated and
-     *     recorded into contentiq_cta_syncs — so the *next* sync resolves it by
-     *     id instead of title. No match creates a new entry and records it.
+     *     block_id). A live mapped element wins outright (update, done) —
+     *     UNLESS that mapped element id is the shared global CTA entry (see
+     *     _getGlobalCtaEntryId()), in which case the mapping is treated as
+     *     poisoned (a page can never legitimately map onto the global entry
+     *     — see the rule below) and is ignored, falling through to the
+     *     title lookup as if unmapped.
+     *   - No mapping row (or a stale/poisoned one): fall back to the legacy
+     *     `->title($title)` lookup, excluding the global CTA entry id from
+     *     the candidates. A match is adopted — updated and recorded into
+     *     contentiq_cta_syncs — so the *next* sync resolves it by id instead
+     *     of title. No match creates a new entry and records it.
      *   - $claimedElementIds (by reference, one array per importPage() call)
      *     tracks every element a stable-identity block has already
      *     created/adopted/mapped this run, so a second block sharing the same
@@ -2674,6 +2739,18 @@ class ImportService extends Component
      * byte: same title collisions as before, no map reads/writes. This is
      * intentional back-compat for payloads exported before the block carried
      * a stable id.
+     *
+     * RULE: this page-scoped path never writes the shared global CTA entry.
+     * `Entry::find()->title($title)` parses a leading operator/comma/`*` in
+     * the value (see `craft\helpers\Db::escapeParam()`), so an unescaped
+     * ContentiQ title could otherwise match — and silently adopt — an
+     * unrelated entry, including the global one created by the first
+     * `'global'` block of the run (see _resolveGlobalCtaEntry()). Every
+     * title/slug/filename value from ContentiQ is escaped for this reason;
+     * on top of that, both the stable-identity map lookup and the
+     * title-fallback query here explicitly exclude the global CTA entry id,
+     * so a page can never end up "owning" the site-wide entry even if a
+     * stale mapping row points at it.
      *
      * @param array    $ctaBlock          The raw CTA block from the JSON (its `id` is
      *                                    the stable block id when present).
@@ -2693,6 +2770,8 @@ class ImportService extends Component
         $blockId = isset($ctaBlock['id']) && $ctaBlock['id'] !== '' ? (string)$ctaBlock['id'] : null;
         $hasStableIdentity = $pageId !== null && $pageId > 0 && $blockId !== null;
 
+        $globalCtaId = $this->_getGlobalCtaEntryId();
+
         if ($dryRun) {
             // Idempotency check for dry run — prefer the stable (page_id, block_id)
             // map when available, else fall back to the title lookup.
@@ -2703,8 +2782,11 @@ class ImportService extends Component
                     ->where(['page_id' => $pageId, 'block_id' => $blockId])
                     ->scalar();
 
-                // Query::scalar() returns false when no row matches.
-                if ($mappedElementId !== false) {
+                // Query::scalar() returns false when no row matches. A mapping
+                // onto the global CTA entry is poisoned (see docblock) —
+                // ignore it and fall through to the title lookup below as if
+                // unmapped.
+                if ($mappedElementId !== false && (int)$mappedElementId !== $globalCtaId) {
                     $mapped = Entry::find()->id((int)$mappedElementId)->status(null)->one();
                     if ($mapped !== null) {
                         return $mapped->id;
@@ -2712,9 +2794,13 @@ class ImportService extends Component
                 }
             }
 
-            $existing = Entry::find()->section('callsToAction')->title($title)->status(null)->one();
+            $titleQuery = Entry::find()->section('callsToAction')->title(Db::escapeParam($title))->status(null);
 
-            return $existing?->id;
+            if ($globalCtaId !== null) {
+                $titleQuery->id(['not', $globalCtaId]);
+            }
+
+            return $titleQuery->one()?->id;
         }
 
         // Resolve section and entry type.
@@ -2750,18 +2836,33 @@ class ImportService extends Component
                 ->where(['page_id' => $pageId, 'block_id' => $blockId])
                 ->scalar();
 
-            // Query::scalar() returns false when no row matches.
+            // Query::scalar() returns false when no row matches. A mapping
+            // onto the global CTA entry is poisoned (see docblock) — treat
+            // it as unmapped so this page gets its own entry below and
+            // _upsertCtaMap() remaps it, instead of silently overwriting the
+            // shared global entry's content.
             if ($mappedElementId !== false) {
-                $existing = Entry::find()->id((int)$mappedElementId)->status(null)->one();
+                if ((int)$mappedElementId !== $globalCtaId) {
+                    $existing = Entry::find()->id((int)$mappedElementId)->status(null)->one();
+                } else {
+                    $result['warnings'][] = 'CTA block was previously mapped onto the global Call to Action entry — created a separate page entry instead.';
+                }
             }
         }
 
-        // 2. No mapping row (or a stale one whose element vanished) — fall back
-        //    to the legacy title lookup. Excludes an element another CTA block
-        //    already claimed this run, so two same/blank-titled blocks don't
-        //    both adopt the same entry.
+        // 2. No mapping row (or a stale/poisoned one) — fall back to the
+        //    legacy title lookup, excluding the global CTA entry id (a page
+        //    must never adopt it — see docblock) and any element another
+        //    CTA block already claimed this run, so two same/blank-titled
+        //    blocks don't both adopt the same entry.
         if ($existing === null) {
-            $existing = Entry::find()->section('callsToAction')->title($title)->status(null)->one();
+            $titleQuery = Entry::find()->section('callsToAction')->title(Db::escapeParam($title))->status(null);
+
+            if ($globalCtaId !== null) {
+                $titleQuery->id(['not', $globalCtaId]);
+            }
+
+            $existing = $titleQuery->one();
 
             if ($hasStableIdentity && $existing !== null && in_array($existing->id, $claimedElementIds, true)) {
                 $existing = null;
@@ -2977,7 +3078,7 @@ class ImportService extends Component
      *            globals consent (docs/globals.md).
      *
      * The caller is told, via the tri-state return value, what to do with the
-     * page's own footerCallToAction.showGlobalCallToAction lightswitch: ON
+     * page's own callToAction.showGlobalCallToAction lightswitch: ON
      * when ≥1 block routed 'global' this run (wins even alongside 'page'
      * ones — a page can carry both); OFF when every CTA block routed 'page'
      * and none routed 'global' (the page supplies its own CTA, so the shared
@@ -3122,23 +3223,50 @@ class ImportService extends Component
      * globalContent.globalChooseCallToAction (handles configurable — see
      * _getConfig()'s 'globalContentSet'/'globalChooseCtaField' keys).
      *
-     * Gated on the same globals-consent lock GlobalsImportService/SyncJob use
-     * (contentiq_globals_sync.locked — missing row ⇒ locked, the safe
-     * default; see _globalsLocked()): locked skips both writes and adds a
-     * per-page warning. The page's own footerCallToAction.showGlobalCallToAction
-     * lightswitch is set by the CALLER regardless (_resolveCtaBlocks()) —
-     * that write is page-scoped, already consented via the page's own unlock,
-     * unlike this method's two site-wide writes.
+     * Globals-consent locked (contentiq_globals_sync.locked — missing row ⇒
+     * locked, the safe default; see _globalsLocked()) only gates an
+     * OVERWRITE of an ALREADY-related global CTA entry, not the creation of
+     * the very first one: an empty globalChooseCallToAction slot has nothing
+     * for the lock to protect, and a page whose callToAction.
+     * showGlobalCallToAction is ON renders nothing until that slot is filled
+     * — see docs/globals.md. So the lock is checked AFTER the current
+     * relation is read (below), and only bites when a live related entry
+     * already exists; locked-with-nothing-related falls through and creates/
+     * relates the first one same as if globals were unlocked. The page's own
+     * callToAction.showGlobalCallToAction lightswitch is set by the CALLER
+     * regardless (_resolveCtaBlocks()) — that write is page-scoped, already
+     * consented via the page's own unlock, unlike this method's two
+     * site-wide writes.
      *
      * Identity is NOT contentiq_cta_syncs — that table means per-page
      * ownership (see docs/import-pipeline.md), which doesn't apply to a
      * single shared entry. Instead, globalContent's CURRENT
-     * globalChooseCallToAction relation is read fresh on every call: if it
-     * already points at a live entry, that entry's content is updated in
-     * place; otherwise a new callsToAction entry is created (same
-     * construction as the page path) and related. Two 'global'-labelled CTA
-     * blocks in one run therefore naturally resolve to ONE entry, with the
-     * last-processed block's content winning — see PROGRESS.md.
+     * globalChooseCallToAction relation is read fresh on the first call of
+     * the run: if it already points at a live entry, that entry's content is
+     * updated in place (subject to the lock check above); otherwise a new
+     * callsToAction entry is created (same construction as the page path)
+     * and related — never subject to the lock, since nothing existed to
+     * protect.
+     *
+     * FIRST ONE WINS (product ruling): two 'global'-labelled CTA blocks in
+     * one run resolve to ONE entry, but only the FIRST block processed this
+     * run actually writes anything — see $_globalCtaResolvedThisRun. The
+     * run is claimed by the first block that either saves the shared entry,
+     * hits a run-invariant configuration warning (missing global set/field/
+     * section — every later block would fail identically, so that warning
+     * fires once per run), or finds an existing relation locked (also
+     * run-invariant within this run, since discarding leaves that relation
+     * — and therefore the same locked verdict — untouched for every later
+     * block). A first block whose entry save fails on its OWN content does
+     * not claim the run, so the next 'global' block gets its turn. Once
+     * claimed, every subsequent 'global' CTA block in the same run is
+     * discarded outright (title/content ignored, no entry save, no
+     * global-set save, no warning) before any of the work below runs; the
+     * caller (_resolveCtaBlocks()) still applies the page-level
+     * callToAction.showGlobalCallToAction linkage for those later
+     * pages regardless — that's a page-scoped decision independent of which
+     * page's content the shared entry ended up carrying.
+     * $_globalCtaResolvedThisRun is reset per run by beginRun().
      *
      * @param array $ctaBlock The raw call_to_action block (fields.source === 'global').
      * @param array &$result  Result array — warnings/images appended.
@@ -3146,9 +3274,13 @@ class ImportService extends Component
      */
     private function _resolveGlobalCtaEntry(array $ctaBlock, array &$result): void
     {
-        if ($this->_globalsLocked()) {
-            $result['warnings'][] = 'Global CTA not applied — globals are locked.';
-
+        if ($this->_globalCtaResolvedThisRun) {
+            // Not the first 'global' CTA block this run — the first one
+            // already created/updated the shared entry (or hit a run-
+            // invariant configuration warning, or a locked-with-existing-
+            // relation skip, that this block would hit identically).
+            // Discard this block's title/content silently: no save, no
+            // repeated warning.
             return;
         }
 
@@ -3159,6 +3291,7 @@ class ImportService extends Component
         $globalSet = Craft::$app->getGlobals()->getSetByHandle($globalSetHandle);
 
         if ($globalSet === null) {
+            $this->_globalCtaResolvedThisRun = true;
             $result['warnings'][] = "Global set '{$globalSetHandle}' not found — global CTA not applied.";
 
             return;
@@ -3167,7 +3300,22 @@ class ImportService extends Component
         $globalLayout = $globalSet->getFieldLayout();
 
         if ($globalLayout?->getFieldByHandle($ctaFieldHandle) === null) {
+            $this->_globalCtaResolvedThisRun = true;
             $result['warnings'][] = "Field '{$ctaFieldHandle}' not found on the '{$globalSetHandle}' global set — global CTA not applied.";
+
+            return;
+        }
+
+        // Read the current relation fresh every call — see docblock above for
+        // why this (not contentiq_cta_syncs) is this method's identity source.
+        $entry = $globalSet->getFieldValue($ctaFieldHandle)->status(null)->one();
+
+        // The lock only protects an ALREADY-chosen global CTA from being
+        // overwritten — an empty slot has nothing to protect, so an unlocked
+        // OR relation-less run both fall through to create/update below.
+        if ($entry !== null && $this->_globalsLocked()) {
+            $this->_globalCtaResolvedThisRun = true;
+            $result['warnings'][] = 'Global CTA not updated — globals are locked and a global Call to Action is already chosen.';
 
             return;
         }
@@ -3175,15 +3323,12 @@ class ImportService extends Component
         $title          = $this->_extractCtaTitle($ctaBlock);
         $ctaFieldValues = $this->_buildCtaContentValues($ctaBlock, false, $result);
 
-        // Read the current relation fresh every call — see docblock above for
-        // why this (not contentiq_cta_syncs) is this method's identity source.
-        $entry = $globalSet->getFieldValue($ctaFieldHandle)->status(null)->one();
-
         if ($entry === null) {
             $section   = Craft::$app->entries->getSectionByHandle('callsToAction');
             $entryType = Craft::$app->entries->getEntryTypeByHandle('callToActionEntry');
 
             if ($section === null || $entryType === null) {
+                $this->_globalCtaResolvedThisRun = true;
                 $result['warnings'][] = "Section 'callsToAction' or entry type 'callToActionEntry' not found — global CTA not applied.";
 
                 return;
@@ -3206,16 +3351,73 @@ class ImportService extends Component
             $result['warnings'][] = "Failed to save global CTA entry '{$title}': {$errors}";
             Craft::warning("ContentIQImporter: global CTA entry save failed: {$errors}", __METHOD__);
 
+            // Content-dependent failure — do NOT claim the run; the next
+            // 'global' block gets its turn (see docblock).
             return;
         }
 
+        // The shared entry now carries this block's content — claim the
+        // run so every later 'global' block is discarded.
+        $this->_globalCtaResolvedThisRun = true;
+
         $globalSet->setFieldValue($ctaFieldHandle, [$entry->id]);
 
-        if (!Craft::$app->getElements()->saveElement($globalSet, false)) {
+        if (Craft::$app->getElements()->saveElement($globalSet, false)) {
+            // The relation just changed — clear the memo so
+            // _getGlobalCtaEntryId() re-reads it fresh next call instead of
+            // returning a stale (or never-looked-up) id to a page later in
+            // this same run — see _resolveCtaEntry()'s poisoned-mapping guard.
+            $this->_globalCtaEntryIdLooked = false;
+        } else {
             $errors = implode(', ', $globalSet->getFirstErrors());
             $result['warnings'][] = "Failed to relate global CTA entry to '{$globalSetHandle}': {$errors}";
             Craft::warning("ContentIQImporter: global CTA relation save failed: {$errors}", __METHOD__);
         }
+    }
+
+    /**
+     * Id of the entry currently related through the global set's
+     * `globalChooseCtaField` (handles from _getConfig() — same lookup
+     * _resolveGlobalCtaEntry() performs when reading the current relation),
+     * or null when nothing is related, or the global set/field can't be
+     * resolved.
+     *
+     * Memoised per run on $_globalCtaEntryId/$_globalCtaEntryIdLooked, reset
+     * by beginRun(). _resolveGlobalCtaEntry() clears the memo right after it
+     * relates a new entry, so this always reflects the id a page later in
+     * the same run would actually collide with — see _resolveCtaEntry()'s
+     * poisoned-mapping guard, the only caller.
+     *
+     * @return int|null
+     */
+    private function _getGlobalCtaEntryId(): ?int
+    {
+        if ($this->_globalCtaEntryIdLooked) {
+            return $this->_globalCtaEntryId;
+        }
+
+        $this->_globalCtaEntryIdLooked = true;
+        $this->_globalCtaEntryId       = null;
+
+        $config          = $this->_getConfig();
+        $globalSetHandle = $config['globalContentSet'] ?? 'globalContent';
+        $ctaFieldHandle  = $config['globalChooseCtaField'] ?? 'globalChooseCallToAction';
+
+        $globalSet = Craft::$app->getGlobals()->getSetByHandle($globalSetHandle);
+
+        if ($globalSet === null) {
+            return null;
+        }
+
+        $globalLayout = $globalSet->getFieldLayout();
+
+        if ($globalLayout?->getFieldByHandle($ctaFieldHandle) === null) {
+            return null;
+        }
+
+        $this->_globalCtaEntryId = $globalSet->getFieldValue($ctaFieldHandle)->status(null)->one()?->id;
+
+        return $this->_globalCtaEntryId;
     }
 
     /**
@@ -3245,7 +3447,7 @@ class ImportService extends Component
     }
 
     /**
-     * Builds the footerCallToAction.showGlobalCallToAction field value for a
+     * Builds the callToAction.showGlobalCallToAction field value for a
      * page whose CTA blocks this run resolved a lightswitch intent for — see
      * _resolveCtaBlocks()'s decision table ($showGlobal is its tri-state
      * return value narrowed to bool by the caller, which never calls this
@@ -3266,7 +3468,7 @@ class ImportService extends Component
      * does NOT catch (only InvalidFieldException) — so this is load-bearing,
      * not defensive dead code.
      *   1. The outer field (config['footerCtaField'], default
-     *      'footerCallToAction') must exist on $ownerFieldLayout and be a
+     *      'callToAction') must exist on $ownerFieldLayout and be a
      *      ContentBlock field.
      *   2. Its own nested field layout must have the inner handle
      *      (config['footerCtaShowGlobalField'], default 'showGlobalCallToAction').
@@ -3278,7 +3480,7 @@ class ImportService extends Component
      * that should have routed to the footer silently didn't) — turning it
      * OFF and finding nothing is silent, because there's nothing to disable
      * and collection children (case studies/team) routinely carry
-     * 'page'-source CTA blocks with no footerCallToAction field at all;
+     * 'page'-source CTA blocks with no callToAction field at all;
      * warning on every one of those would be spam, not signal.
      *
      * Takes $config as a parameter (the caller's already-resolved _getConfig()
@@ -3297,7 +3499,7 @@ class ImportService extends Component
      */
     private function _buildFooterGlobalCtaField(?FieldLayout $ownerFieldLayout, array $config, array &$result, bool $showGlobal): ?array
     {
-        $footerCtaHandle  = $config['footerCtaField'] ?? 'footerCallToAction';
+        $footerCtaHandle  = $config['footerCtaField'] ?? 'callToAction';
         $showGlobalHandle = $config['footerCtaShowGlobalField'] ?? 'showGlobalCallToAction';
 
         $footerCtaField = $ownerFieldLayout?->getFieldByHandle($footerCtaHandle);
@@ -3320,6 +3522,12 @@ class ImportService extends Component
             return null;
         }
 
+        // Re-verified against vendor/craftcms/cms/src/fields/ContentBlock.php
+        // ::_createContentBlockFromSerializedData() (2026-09-21): it fetches
+        // the EXISTING ContentBlockElement before applying this array's
+        // 'fields', so a sibling handle omitted here (callToActionLayout)
+        // keeps its already-saved value — no read-modify-write needed on our
+        // side, only the handle(s) actually returned below are ever touched.
         return [
             $footerCtaHandle => [
                 'fields' => [
@@ -3409,8 +3617,8 @@ class ImportService extends Component
      * data from `blocks`, the hero ContentBlock field, and CTA routing (see
      * _resolveCtaBlocks()) for call_to_action blocks — per-page
      * callToActionEntry creation/patching for `fields.source === 'page'`
-     * blocks, footerCallToAction/global-entry routing for `'global'` ones
-     * (and footerCallToAction.showGlobalCallToAction forced OFF when only
+     * blocks, callToAction/global-entry routing for `'global'` ones
+     * (and callToAction.showGlobalCallToAction forced OFF when only
      * `'page'`-source blocks were found — see _resolveCtaBlocks()'s tri-state
      * return value).
      *

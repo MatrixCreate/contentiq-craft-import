@@ -452,6 +452,14 @@ from `ctaButton` nodes in `fields.nodes` (falling back to a flat
 itself (`_extractCtaTitle()`/`_buildCtaContentValues()`) is shared with the
 global path below rather than duplicated.
 
+**A page-scoped CTA never writes the shared global entry.** Both the
+`contentiq_cta_syncs` lookup and the title-fallback query exclude the
+current global CTA entry id (`ImportService::_getGlobalCtaEntryId()`,
+memoised per run) — a mapping row pointing at it is treated as poisoned and
+ignored, so the page gets its own entry instead. The global entry is only
+ever written by `_resolveGlobalCtaEntry()`, for the first `'global'`-source
+block of a run (see below).
+
 ### Source routing (`fields.source`: `'page'` | `'global'`)
 
 Every ContentiQ `call_to_action` block carries `fields.source`, which an
@@ -475,17 +483,25 @@ on this label:
   `config['globalContentSet']`/`config['globalChooseCtaField']`) — gated on
   globals consent, see [globals.md](globals.md). Identity is **not**
   `contentiq_cta_syncs` (that table means per-page ownership) —
-  `globalChooseCallToAction`'s current relation is read fresh every call: a
-  live related entry is updated in place (title included, unlike the page
-  path's update branch, which never renames an already-matched entry); no
-  relation creates a new entry (same construction as the page path) and
-  relates it. Two `'global'`-labelled CTA blocks in one run therefore resolve
-  to **one** entry, last-processed wins.
+  `globalChooseCallToAction`'s current relation is read fresh on the first
+  call of the run: a live related entry is updated in place (title included,
+  unlike the page path's update branch, which never renames an
+  already-matched entry); no relation creates a new entry (same construction
+  as the page path) and relates it. Two `'global'`-labelled CTA blocks in one
+  run therefore resolve to **one** entry — but per product ruling, the
+  **first** `'global'` block that saves the entry (or hits a run-invariant
+  config warning) claims the run; a block whose own save fails does not,
+  so the next one gets its turn. Once claimed, every subsequent one is
+  discarded (no save, no warning), tracked via
+  `ImportService::$_globalCtaResolvedThisRun` (reset per run by
+  `beginRun()`). The page-level `callToAction.showGlobalCallToAction`
+  linkage below still applies normally to pages whose CTA block was
+  discarded.
 
-**The `footerCallToAction.showGlobalCallToAction` lightswitch is a single
+**The `callToAction.showGlobalCallToAction` lightswitch is a single
 per-page decision** (handles: `config['footerCtaField']`/
 `config['footerCtaShowGlobalField']`, default
-`footerCallToAction`/`showGlobalCallToAction`), made once `_resolveCtaBlocks()`
+`callToAction`/`showGlobalCallToAction`), made once `_resolveCtaBlocks()`
 has classified every CTA block on the page — it's an aggregate over the whole
 page, not a property of any one block, and follows this table:
 
@@ -509,7 +525,7 @@ warning is asymmetric. Turning the switch **ON** and finding no field to turn
 on is worth a per-page warning (content that should route to the footer
 silently can't). Turning it **OFF** and finding no field is **silent** —
 there's nothing to disable, and collection children (case studies/team)
-routinely carry `'page'`-source CTA blocks with no `footerCallToAction` field
+routinely carry `'page'`-source CTA blocks with no `callToAction` field
 at all; warning on every one of them would be spam, not signal.
 
 A `routingNotes` line records the routing on the page's result row either way:

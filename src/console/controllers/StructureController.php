@@ -7,6 +7,7 @@ use craft\console\Controller;
 use craft\db\Query;
 use craft\elements\Entry;
 use craft\helpers\Console;
+use craft\helpers\Db;
 use matrixcreate\contentiqimporter\ContentIQImporter;
 use matrixcreate\contentiqimporter\helpers\StructureOrder;
 use yii\console\ExitCode;
@@ -251,7 +252,7 @@ class StructureController extends Controller
 
         return Entry::find()
             ->section($sectionHandle)
-            ->slug($parentSlug)
+            ->slug(Db::escapeParam($parentSlug))
             ->status(null)
             ->one()
             ?->id;

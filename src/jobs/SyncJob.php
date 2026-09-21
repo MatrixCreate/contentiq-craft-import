@@ -148,6 +148,14 @@ class SyncJob extends BaseJob
 
             // 4. PASS 1: Import all pages and build slug → entry ID map.
             $importService = $plugin->imports;
+
+            // Resets per-run state (currently just the "first global CTA
+            // block wins" tracking — see ImportService::beginRun()) so this
+            // run never inherits state left over from a previous SyncJob run
+            // in the same PHP process — `craft queue/listen` executes many
+            // in one process.
+            $importService->beginRun();
+
             $pageResults   = [];
             $totalImages   = 0;
             $hasErrors     = false;
@@ -362,7 +370,7 @@ class SyncJob extends BaseJob
                             if ($parentId === null) {
                                 $parentEntry = \craft\elements\Entry::find()
                                     ->section($sectionHandle)
-                                    ->slug($parentSlug)
+                                    ->slug(Db::escapeParam((string)$parentSlug))
                                     ->status(null)
                                     ->one();
                                 $parentId = $parentEntry?->id;

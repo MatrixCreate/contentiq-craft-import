@@ -40,8 +40,17 @@ writes the shared `callToActionEntry` and its
 `SyncJob::_globalsLocked()` — same table, same missing-row-is-locked
 default). It is **not** part of `GlobalsImportService::import()` and doesn't
 touch the three destinations above — it's mentioned here because it's a
-second reader of the same lock, and "Why globals never travel via upload"
-below applies to it identically.
+second reader of the same lock. Unlike the rest of this doc, though, that
+reader's gate is **conditional**, not absolute: the lock protects an
+already-chosen global CTA (a client's pick) from being silently overwritten,
+but an empty `globalChooseCallToAction` slot has nothing for it to protect —
+and a page whose `callToAction.showGlobalCallToAction` lightswitch is ON
+renders nothing in the footer until that slot is filled. So
+`ImportService::_resolveGlobalCtaEntry()` reads the CURRENT relation first
+and only invokes the lock when one already exists; a locked run with no
+relation yet still creates and relates the first global CTA. "Why globals
+never travel via upload" below therefore applies to it only in the
+already-related case — see that section's note.
 
 ---
 
@@ -84,9 +93,13 @@ The upload/import path and the CLI import command never touch this table at
 all; they simply skip globals unconditionally (see below) — a
 `'global'`-source CTA block imported through either path finds the row
 exactly as the last sync left it (locked, unless a `SyncJob` run is unlocked
-and mid-flight elsewhere), so its global entry write is skipped and warned,
-though the page's own `footerCallToAction` lightswitch is still set
-(page-scoped, not gated by this row — see
+and mid-flight elsewhere). As of `_resolveGlobalCtaEntry()`'s
+existing-relation gate (above), that locked row only skips-and-warns the
+global entry write when `globalContent.globalChooseCallToAction` is already
+related to a live entry; if no relation exists yet, the write goes ahead
+regardless of the row's locked state — an empty slot has nothing for the
+lock to protect. Either way the page's own `callToAction` lightswitch is
+still set (page-scoped, not gated by this row — see
 [block-mapping.md](block-mapping.md#source-routing-fieldssource-page--global)).
 
 ---

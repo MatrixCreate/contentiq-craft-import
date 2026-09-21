@@ -204,6 +204,13 @@ class ImportController extends Controller
 
         $importService = ContentIQImporter::$plugin->imports;
 
+        // Resets per-run state (currently just the "first global CTA block
+        // wins" tracking — see ImportService::beginRun()) so this run never
+        // inherits state from a previous run in the same PHP process. One
+        // call, whether the file below turns out to be single-page or batch
+        // — both are one run.
+        $importService->beginRun();
+
         // Batch format has a top-level 'pages' array.
         if (isset($data['pages']) && is_array($data['pages'])) {
             return $this->_runBatch($data['pages'], $importService);
@@ -324,7 +331,7 @@ class ImportController extends Controller
                                 if ($parentId === null) {
                                     $parentEntry = Entry::find()
                                         ->section($sectionHandle)
-                                        ->slug($parentSlug)
+                                        ->slug(Db::escapeParam((string)$parentSlug))
                                         ->status(null)
                                         ->one();
                                     $parentId = $parentEntry?->id;

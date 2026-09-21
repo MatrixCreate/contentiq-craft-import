@@ -711,7 +711,7 @@ class ImageImportService extends Component
         $existing = Asset::find()
             ->volumeId($volume->id)
             ->folderId($targetFolder->id)
-            ->filename($filename)
+            ->filename(Db::escapeParam($filename))
             ->trashed(false)
             ->one();
 
@@ -735,7 +735,7 @@ class ImageImportService extends Component
                 $legacyHit = Asset::find()
                     ->volumeId($volume->id)
                     ->folderId($legacyFolder->id)
-                    ->filename($filename)
+                    ->filename(Db::escapeParam($filename))
                     ->trashed(false)
                     ->one();
 
@@ -819,7 +819,7 @@ class ImageImportService extends Component
             $hasAssetRecord = Asset::find()
                 ->volumeId($volume->id)
                 ->folderId($folder->id)
-                ->filename($filename)
+                ->filename(Db::escapeParam($filename))
                 ->trashed(null) // null = match both live and trashed rows.
                 ->exists();
 
