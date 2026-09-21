@@ -131,6 +131,27 @@ class RedirectService extends Component
         $httpCode        = (int)($config['httpCode'] ?? 301);
         $warningsByOwner = [];
 
+        // -----------------------------------------------------------------------
+        // Preload every candidate entry in ONE query rather than one per
+        // candidate inside the loop below — status(null) + indexBy('id') keep
+        // this query's own semantics identical to the per-candidate lookup it
+        // replaces (any status, element id => Entry). A genuinely missing
+        // single entry just comes back absent from the map, handled below
+        // exactly as before (silent skip); a failure of the query itself is
+        // exceptional and is reported against every candidate with the same
+        // message the old per-entry try/catch would have produced for it,
+        // rather than aborting the whole pass.
+        // -----------------------------------------------------------------------
+        try {
+            $candidateEntries = Entry::find()->id(array_keys($candidates))->status(null)->indexBy('id')->all();
+        } catch (Throwable $e) {
+            $candidateEntries = [];
+
+            foreach (array_keys($candidates) as $entryId) {
+                $warningsByOwner[$entryId][] = 'Could not load entry to create a redirect: ' . $e->getMessage();
+            }
+        }
+
         foreach ($candidates as $entryId => $legacyUrl) {
             $warn = function (string $message) use (&$warningsByOwner, $entryId): void {
                 $warningsByOwner[$entryId][] = $message;
@@ -143,12 +164,7 @@ class RedirectService extends Component
                 continue;
             }
 
-            try {
-                $entry = Entry::find()->id($entryId)->status(null)->one();
-            } catch (Throwable $e) {
-                $warn('Could not load entry to create a redirect: ' . $e->getMessage());
-                continue;
-            }
+            $entry = $candidateEntries[$entryId] ?? null;
 
             if ($entry === null) {
                 continue;

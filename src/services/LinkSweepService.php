@@ -183,13 +183,34 @@ class LinkSweepService extends Component
         $resolvedByOwner  = [];
         $hyperHandleCache = [];
 
+        // -----------------------------------------------------------------------
+        // 4b. Preload every target entry in ONE query rather than one per
+        //     target inside the loop below — an 88-page run was otherwise
+        //     issuing 88 individual Entry::find() calls here. status(null) +
+        //     indexBy('id') keep this query's own semantics identical to the
+        //     per-target lookup it replaces (any status, element id => Entry);
+        //     no siteId filter, matching what the per-target lookup did too.
+        //     A failure of the query itself is reported against every owner
+        //     page (mirroring RedirectService::sweep()) rather than escaping
+        //     the per-element isolation the old per-target lookup enjoyed.
+        // -----------------------------------------------------------------------
+        try {
+            $targetEntries = Entry::find()->id(array_keys($targets))->status(null)->indexBy('id')->all();
+        } catch (Throwable $e) {
+            $targetEntries = [];
+
+            foreach ($targets as $ownerPageId) {
+                $warningsByOwner[$ownerPageId][] = 'Could not load entry for the link sweep: ' . $e->getMessage();
+            }
+        }
+
         foreach ($targets as $entryId => $ownerPageId) {
             $warn = function (string $message) use (&$warningsByOwner, $ownerPageId): void {
                 $warningsByOwner[$ownerPageId][] = $message;
             };
 
             try {
-                $el = Entry::find()->id($entryId)->status(null)->one();
+                $el = $targetEntries[$entryId] ?? null;
 
                 if ($el === null) {
                     continue;

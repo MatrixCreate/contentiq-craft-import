@@ -9,6 +9,7 @@ use craft\helpers\Assets;
 use craft\helpers\Db;
 use craft\models\Volume;
 use craft\models\VolumeFolder;
+use GuzzleHttp\Exception\RequestException;
 use GuzzleHttp\RequestOptions;
 use matrixcreate\contentiqimporter\helpers\UrlSafety;
 use Throwable;
@@ -1020,6 +1021,18 @@ class ImageImportService extends Component
      * one — harmless, since the asset's own `contentiq_asset_syncs` key
      * mapping (not the filename) is what makes it resolvable next sync.
      *
+     * The `$maxBytes` cap is enforced three times, cheapest/earliest first:
+     * an `on_headers` callback rejects a declared `Content-Length` over the
+     * cap before a single body byte streams to disk; a `progress` callback
+     * rejects mid-transfer once bytes-so-far exceed the cap (the only guard
+     * that catches a chunked response with no `Content-Length`); the
+     * existing post-hoc `filesize()` check stays as belt and braces. All
+     * three log the same "Downloaded file exceeds the N-byte limit" warning
+     * and return null — the two in-transfer ones abort by throwing (curl
+     * stops streaming immediately), which is unwound in the `catch` block
+     * below to produce that identical warning text rather than a generic
+     * "Exception importing image" one.
+     *
      * @param string       $url
      * @param string       $filename
      * @param Volume       $volume Target volume (images or documents).
@@ -1048,6 +1061,13 @@ class ImageImportService extends Component
 
         $tempPath = Craft::$app->getPath()->getTempPath() . DIRECTORY_SEPARATOR . uniqid('contentiq_') . '_' . $filename;
 
+        // Sane upper bound so a misbehaving/malicious endpoint streaming an
+        // unbounded body doesn't get imported as an asset. Declared before
+        // the request so the on_headers/progress callbacks below can also
+        // enforce it during transfer, not just on the file that lands.
+        $maxBytes        = 25 * 1024 * 1024;
+        $oversizeMessage = "Downloaded file exceeds the {$maxBytes}-byte limit: $url";
+
         try {
             $response = Craft::createGuzzleClient()->request('GET', $url, [
                 RequestOptions::SINK            => $tempPath,
@@ -1055,6 +1075,22 @@ class ImageImportService extends Component
                 // A public URL must not be able to 302 its way to an internal
                 // one — never follow redirects on this request.
                 RequestOptions::ALLOW_REDIRECTS => false,
+                // Declared Content-Length over the cap — reject before a
+                // single body byte streams to disk.
+                RequestOptions::ON_HEADERS      => function ($headersResponse) use ($maxBytes, $oversizeMessage) {
+                    $contentLength = $headersResponse->getHeaderLine('Content-Length');
+
+                    if ($contentLength !== '' && (int) $contentLength > $maxBytes) {
+                        throw new \RuntimeException($oversizeMessage);
+                    }
+                },
+                // No (or an understated) Content-Length — catches a
+                // chunked response by watching bytes actually received.
+                RequestOptions::PROGRESS        => function ($downloadTotal, $downloadedBytes) use ($maxBytes, $oversizeMessage) {
+                    if ($downloadedBytes > $maxBytes) {
+                        throw new \RuntimeException($oversizeMessage);
+                    }
+                },
             ]);
 
             // With redirects disabled, a 3xx is not an image — reject it
@@ -1071,11 +1107,11 @@ class ImageImportService extends Component
                 return null;
             }
 
-            // Sane upper bound so a misbehaving/malicious endpoint streaming an
-            // unbounded body doesn't get imported as an asset.
-            $maxBytes = 25 * 1024 * 1024;
+            // Belt and braces — the on_headers/progress callbacks above
+            // should already have aborted an oversize transfer, but check
+            // the file that actually landed too.
             if (filesize($tempPath) > $maxBytes) {
-                Craft::warning("Downloaded file exceeds the {$maxBytes}-byte limit: $url", __METHOD__);
+                Craft::warning($oversizeMessage, __METHOD__);
 
                 return null;
             }
@@ -1107,7 +1143,21 @@ class ImageImportService extends Component
 
             return ['id' => $asset->id, 'filename' => $filename, 'reused' => false];
         } catch (Throwable $e) {
-            Craft::warning("Exception importing image '{$filename}': " . $e->getMessage(), __METHOD__);
+            // An on_headers abort arrives wrapped in a Guzzle
+            // RequestException; a progress abort (curl calls that callback
+            // directly, no Guzzle wrapping) doesn't need unwrapping —
+            // check both so either one logs the identical oversize-limit
+            // text the post-hoc check above uses, not a generic
+            // "Exception importing image" one.
+            $cause = $e instanceof RequestException && $e->getPrevious() !== null
+                ? $e->getPrevious()
+                : $e;
+
+            if ($cause instanceof \RuntimeException && $cause->getMessage() === $oversizeMessage) {
+                Craft::warning($oversizeMessage, __METHOD__);
+            } else {
+                Craft::warning("Exception importing image '{$filename}': " . $e->getMessage(), __METHOD__);
+            }
 
             return null;
         } finally {

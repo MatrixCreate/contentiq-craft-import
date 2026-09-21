@@ -571,8 +571,32 @@ class CpController extends Controller
         }
 
         // Post-passes: card references (pass 2) + link sweep (pass 3), now the
-        // slug map is complete.
-        $cardWarnings = $importService->runPostPasses($allCardRefs, $slugToEntryId, $pageResults);
+        // slug map is complete. Guarded (unlike importPage() above, whose own
+        // per-page try/catch already isolates a single bad page) because a
+        // throw from the sweeps' own setup queries would otherwise produce a
+        // raw 500 and skip the record save below, even though every entry up
+        // to this point was already written. Falls back to a synthetic
+        // per-entry warning set, reusing the exact same merge loop below a
+        // successful call would feed — see AGENTS.md's per-page error
+        // isolation principle; this is the run-wide equivalent for a
+        // run-wide (not per-page) step.
+        try {
+            $cardWarnings = $importService->runPostPasses($allCardRefs, $slugToEntryId, $pageResults);
+        } catch (\Throwable $e) {
+            Craft::error(
+                'ContentIQImporter: post-import passes failed — ' . $e->getMessage() . "\n" . $e->getTraceAsString(),
+                __METHOD__,
+            );
+
+            $postPassFailure = 'Post-import passes (card references / link sweep) failed: ' . $e->getMessage();
+            $cardWarnings    = [];
+
+            foreach ($pageResults as $r) {
+                if (($r['entryId'] ?? null) !== null) {
+                    $cardWarnings[$r['entryId']] = [$postPassFailure];
+                }
+            }
+        }
 
         foreach ($cardWarnings as $entryId => $warnings) {
             if (empty($warnings)) {
@@ -1251,7 +1275,25 @@ class CpController extends Controller
                 'skipped'           => false,
             ];
 
-            $postPassWarnings = ContentIQImporter::$plugin->imports->runPostPasses($allCardRefs, [], [$oneRow]);
+            // Guarded (see actionRunImport()'s matching try/catch for the
+            // full reasoning) — a throw from the sweeps' own setup queries
+            // must not produce a raw 500 and skip the sync-timestamp upsert/
+            // ack/lock steps below, even though the entry was already
+            // written. Falls back to a synthetic warning in the exact same
+            // shape ($postPassWarnings[$entryId] => string[]) the foreach
+            // loop below already expects on success.
+            try {
+                $postPassWarnings = ContentIQImporter::$plugin->imports->runPostPasses($allCardRefs, [], [$oneRow]);
+            } catch (\Throwable $e) {
+                Craft::error(
+                    'ContentIQImporter: widget sync post-import passes failed — ' . $e->getMessage() . "\n" . $e->getTraceAsString(),
+                    __METHOD__,
+                );
+
+                $postPassWarnings = [
+                    $entryId => ['Post-import passes (card references / link sweep) failed: ' . $e->getMessage()],
+                ];
+            }
 
             foreach ($postPassWarnings[$entryId] ?? [] as $warning) {
                 Craft::warning("Widget sync post-passes ({$slug}): {$warning}", __METHOD__);

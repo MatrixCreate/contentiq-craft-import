@@ -20,7 +20,7 @@
    pane's inner content edge on this screen) plus 24px per tree depth
    level; the last cell's right inset is 24px too, so every row lines up
    with the pane's own left/right edges regardless of column. #}
-{% macro pageRows(slugs, slugToPage, childrenOf, depth) %}
+{% macro pageRows(slugs, slugToPage, childrenOf, depth, entryById) %}
     {% for slug in slugs %}
         {% set page = slugToPage[slug] ?? null %}
         {% if page %}
@@ -84,7 +84,7 @@
                 </td>
                 <td class="thin" style="white-space:nowrap; padding-right:24px;">
                     {% if page.entryId ?? null %}
-                        {% set pageEntry = craft.entries.id(page.entryId).status(null).one() %}
+                        {% set pageEntry = entryById[page.entryId] ?? null %}
                         {% if pageEntry %}
                             <a href="{{ pageEntry.cpEditUrl }}" class="btn small" title="Edit in CP">
                                 {{ 'Edit'|t('contentiq-importer') }}
@@ -102,7 +102,7 @@
             {# Recurse into children #}
             {% set children = childrenOf[slug] ?? [] %}
             {% if children|length %}
-                {{ _self.pageRows(children, slugToPage, childrenOf, depth + 1) }}
+                {{ _self.pageRows(children, slugToPage, childrenOf, depth + 1, entryById) }}
             {% endif %}
         {% endif %}
     {% endfor %}
@@ -171,7 +171,7 @@
     {% endfor %}
 {% endmacro %}
 
-{% macro flatEntryRows(pages) %}
+{% macro flatEntryRows(pages, entryById) %}
     {% for page in pages %}
         {% set isLocked = 'Skipped — entry is locked.' in (page.warnings ?? []) %}
         {% set isDeselected = 'Skipped — deselected.' in (page.warnings ?? []) %}
@@ -227,7 +227,7 @@
             </td>
             <td class="thin" style="white-space:nowrap; padding-right:24px;">
                 {% if page.entryId ?? null %}
-                    {% set pageEntry = craft.entries.id(page.entryId).status(null).one() %}
+                    {% set pageEntry = entryById[page.entryId] ?? null %}
                     {% if pageEntry %}
                         <a href="{{ pageEntry.cpEditUrl }}" class="btn small" title="Edit in CP">
                             {{ 'Edit'|t('contentiq-importer') }}
@@ -250,6 +250,30 @@
     {% set result = run.result ?? [] %}
     {% set pages = result.pages is defined ? result.pages : result %}
     {% set globals = result.globals is defined ? result.globals : null %}
+
+    {# One batched entry load for the whole report, rather than pageRows()/
+       flatEntryRows() each running craft.entries.id(page.entryId).one() per
+       row (an 88-page run meant 88 element queries) — collect every
+       entryId up front, run a single query, and key the result by id so
+       both macros do a plain array lookup instead. Guarded so an empty
+       $entryIds never reaches craft.entries.id() — passed an empty array,
+       that would drop the id() filter and become an unfiltered "every
+       entry" query. No siteId filter here, matching the per-row query this
+       replaces — craft.entries resolves against the CP request's own
+       current site same as it always did. #}
+    {% set entryIds = [] %}
+    {% for page in pages %}
+        {% if page.entryId ?? null %}
+            {% set entryIds = entryIds|merge([page.entryId]) %}
+        {% endif %}
+    {% endfor %}
+    {% set entryById = {} %}
+    {% if entryIds|length %}
+        {% for entry in craft.entries.id(entryIds).status(null).all() %}
+            {% set entryById = entryById|merge({ (entry.id): entry }) %}
+        {% endfor %}
+    {% endif %}
+
     {% set totalImages = 0 %}
     {% set reusedImages = 0 %}
     {% set totalWarnings = 0 %}
@@ -505,7 +529,7 @@
                     </tr>
                 </thead>
                 <tbody>
-                    {{ _self.pageRows(rootSlugs, slugToPage, childrenOf, 0) }}
+                    {{ _self.pageRows(rootSlugs, slugToPage, childrenOf, 0, entryById) }}
                 </tbody>
             </table>
         </div>
@@ -529,7 +553,7 @@
                     </tr>
                 </thead>
                 <tbody>
-                    {{ _self.flatEntryRows(collectionGroups[label]) }}
+                    {{ _self.flatEntryRows(collectionGroups[label], entryById) }}
                 </tbody>
             </table>
         </div>
