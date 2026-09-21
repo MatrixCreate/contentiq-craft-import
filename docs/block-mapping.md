@@ -340,10 +340,14 @@ deferred ref set per block (`result['cardRefs'][$blockIndex]`, in memory
 only) and returns without building an inner Matrix at all.
 `ImportService::resolveCardReferences(array $allCardRefs, array
 $slugToEntryId, ...)` runs this pass **after** the whole run's slug → entry
-ID map is complete, from every entry point (SyncJob, CLI batch/single
-import, CP upload, sidebar widget sync) — a referenced page's Craft entry
-may not exist yet (or may be created later in the same batch) until the
-whole run has processed. Resolved blocks are located by `blockIndex` in the
+ID map is complete, from every entry point that reaches
+`runPostPasses()` — `PostPassJob` (batched, covers CP Sync, CP upload, and
+`sync/run` alike, since all three route through the same pipeline; see
+[import-pipeline.md](import-pipeline.md#the-job-chain--phase-by-phase)),
+the standalone CLI's batch/single import (`ImportController`), and the
+sidebar widget sync — a referenced page's Craft entry may not exist yet (or
+may be created later in the same batch, for `PostPassJob`) until the whole
+run has processed. Resolved blocks are located by `blockIndex` in the
 owner's saved `contentBlocks` and **saved directly as elements** — the owner
 page entry is never re-saved for this.
 
@@ -588,8 +592,10 @@ footer CTA disabled'` once when the aggregate decision lands OFF (after the
 loop, since it's a page-level decision). Both notes are `routingNotes`-only,
 deliberately **not** `blockNotes` and **not** `warnings`. Never `blockNotes`:
 that key holds only ContentIQ's own payload-authored `block.notes` text, and
-`SyncJob`'s post-import auto-lock step / `CpController::actionWidgetSync()`
-persist it verbatim into `contentiq_entry_syncs.notes` — the "ContentIQ
+`FinaliseRunJob`'s `lock` step (the pipeline's post-import auto-lock step —
+see [import-pipeline.md](import-pipeline.md#the-job-chain--phase-by-phase))
+/ `CpController::actionWidgetSync()` persist it verbatim into
+`contentiq_entry_syncs.notes` — the "ContentIQ
 Notes" field the entry sidebar widget displays — which must never contain
 plugin-generated text. `routingNotes` is a separate, same-shape (`"\n\n"`-joined
 string) result key that nothing persists — it exists only in the run's result

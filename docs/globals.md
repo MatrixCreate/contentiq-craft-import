@@ -6,7 +6,7 @@ info, offices, branding, social networks, trust signals, scripts) into the
 sets — the per-run consent model that gates it, the field boundary the sync
 respects, offices idempotency, and the read-only URL-prefix drift check.
 
-Verified against code 2026-09-04.
+Verified against code 2026-09-21.
 
 ---
 
@@ -14,10 +14,16 @@ Verified against code 2026-09-04.
 
 Globals import is a separate pipeline from the per-page importer, run by
 `GlobalsImportService::import()` (`src/services/GlobalsImportService.php`).
-It's invoked from two places: `SyncJob` for a real sync, and the Sync
-screen's preview (`CpController::actionPreview()`) in dry-run mode purely to
-show what would happen. The upload/JSON-file path never invokes it at all —
-see "Why globals never travel via upload" below.
+It's invoked from two places: `FinaliseRunJob`'s `globals` step
+(`src/jobs/FinaliseRunJob.php` — the `finalising` phase's `globals`
+sub-step, see
+[import-pipeline.md](import-pipeline.md#the-job-chain--phase-by-phase)) for
+every pipeline run (CP Sync, CP upload, `sync/run` alike — the step itself
+doesn't gate on `source`, the consent lock does, see "Why globals never
+travel via upload" below), and the Sync screen's preview
+(`CpController::actionPreview()`) in dry-run mode purely to show what would
+happen. The standalone CLI import command (`ImportController`, unrelated to
+the batched pipeline) never invokes it at all.
 
 A globals import writes to three destinations:
 
@@ -37,10 +43,15 @@ writes the shared `callToActionEntry` and its
 `globalContent.globalChooseCallToAction` relation under the identical
 `contentiq_globals_sync.locked` gate this doc describes, via its own
 `ImportService::_globalsLocked()` (a read-only mirror of
-`SyncJob::_globalsLocked()` — same table, same missing-row-is-locked
-default). It is **not** part of `GlobalsImportService::import()` and doesn't
-touch the three destinations above — it's mentioned here because it's a
-second reader of the same lock. Unlike the rest of this doc, though, that
+`SyncLockService::globalsLocked()` — same table, same missing-row-is-locked
+default). This routing itself runs per page inside `ImportPagesJob`'s
+`importing` phase (see
+[import-pipeline.md](import-pipeline.md#the-job-chain--phase-by-phase)) —
+`ImportPagesJob` calls `importPage()`/`_buildBlockFieldValues()` per row,
+which is where `_resolveCtaBlocks()` and this gate actually run, not inside
+`FinaliseRunJob`'s `globals` step. It is **not** part of
+`GlobalsImportService::import()` and doesn't touch the three destinations
+above — it's mentioned here because it's a second reader of the same lock. Unlike the rest of this doc, though, that
 reader's gate is **conditional**, not absolute: the lock protects an
 already-chosen global CTA (a client's pick) from being silently overwritten,
 but an empty `globalChooseCallToAction` slot has nothing for it to protect —
@@ -72,28 +83,48 @@ Mechanics:
 - The Sync screen shows one lightswitch above the tree (`sync.twig`, tied to
   `globalsLocked` in `CpController::actionSync()`). Checking it and
   submitting POSTs `unlockGlobals=1` to `contentiq-importer/cp/run-sync`.
-- `SyncJob` applies the inverse into `contentiq_globals_sync.locked` at the
-  very start of the run (`_setGlobalsLock(!$this->unlockGlobals)`), imports
-  globals only if unlocked, then **immediately relocks** and stamps
-  `synced_at` (`_relockGlobals()`) once the run finishes — success or
-  failure. A worker that dies mid-run leaves the row unlocked; the sync
-  status poll has a relock safety net for that case too (see
-  `CpController` around the `queue` table probe).
+- `StageRunJob` (`src/jobs/StageRunJob.php`, the `staging` phase — the first
+  job in the chain, see
+  [import-pipeline.md](import-pipeline.md#the-job-chain--phase-by-phase))
+  applies the inverse into `contentiq_globals_sync.locked` at the very start
+  of the run (`SyncLockService::setGlobalsLock(!$unlockGlobals)`), for every
+  pipeline source alike. `FinaliseRunJob`'s `globals` step — the third of its
+  four `finalising` sub-steps, running only once `importing`/`postpass` have
+  finished — imports globals only if still unlocked, then **immediately
+  relocks** and stamps `synced_at` (`SyncLockService::relockGlobals()`,
+  no-argument success path) once that step completes. On any failure
+  anywhere in the chain, the job that caught the error calls
+  `relockGlobals($message)` instead (the failure-path overload — see
+  `SyncLockService::relockGlobals()`'s own docblock) — every terminal path
+  relocks, never leaving globals unlocked past the run that unlocked them. A
+  worker that dies mid-run with no failure handler ever running leaves the
+  row unlocked regardless; the sync status poll's staleness fallback
+  (`CpController::actionSyncStatus()`) is the relock safety net for that
+  case, same as it fails the run itself.
 - Net effect: consent lives for exactly one sync. The next sync's tree
   always shows the lightswitch unchecked again — nothing persists it.
-- `_setGlobalsLock()` runs before pass 1's page loop (see
-  [import-pipeline.md](import-pipeline.md#syncjobs-passes)), so the CTA
-  global-routing path's own read (`ImportService::_globalsLocked()`, called
-  once per `'global'`-source CTA block as pages import) always sees THIS
-  run's consent decision, not last run's — the same reason
-  `GlobalsImportService::import()` itself is safe to gate on the same row
-  later in the run.
+- `setGlobalsLock()` runs inside `StageRunJob`, which always completes (and
+  advances the run to `importing`) before `ImportPagesJob` starts — so the
+  CTA global-routing path's own read (`ImportService::_globalsLocked()`,
+  called once per `'global'`-source CTA block as `ImportPagesJob` imports
+  each page) always sees THIS run's consent decision, not last run's — the
+  same reason `FinaliseRunJob`'s `globals` step itself is safe to gate on the
+  same row later in the run.
 
-The upload/import path and the CLI import command never touch this table at
-all; they simply skip globals unconditionally (see below) — a
+CP upload now runs through the same `StageRunJob`/`FinaliseRunJob` steps as
+CP Sync — but the upload controller (`CpController::actionRunImport()`)
+always stamps `unlockGlobals: false` on the run's options (there's no
+consent UI on that screen), so `StageRunJob` still locks the row for every
+uploaded run, and `FinaliseRunJob`'s `globals` step still finds it locked
+and skips the write — same outcome as before this pipeline existed, just
+reached by running (and skipping) the same shared step rather than a
+separate code path that never touched the table at all. The **standalone
+CLI import command** (`ImportController`, unrelated to the batched pipeline)
+is the one entry point that genuinely never touches `contentiq_globals_sync`
+at all — it simply skips globals unconditionally (see below). A
 `'global'`-source CTA block imported through either path finds the row
-exactly as the last sync left it (locked, unless a `SyncJob` run is unlocked
-and mid-flight elsewhere). As of `_resolveGlobalCtaEntry()`'s
+exactly as the last pipeline run left it (locked, unless another pipeline
+run is unlocked and mid-flight elsewhere). As of `_resolveGlobalCtaEntry()`'s
 existing-relation gate (above), that locked row only skips-and-warns the
 global entry write when `globalContent.globalChooseCallToAction` is already
 related to a live entry; if no relation exists yet, the write goes ahead
@@ -184,12 +215,13 @@ advisory text surfaced in the sync report.
 
 ## Why globals never travel via upload
 
-The CP's manual JSON-upload path (`actionRunImport()`) deliberately skips
-globals: there's no consent UI on that screen, so importing them there would
-bypass the whole per-run gate above. If the uploaded file's envelope
-contains a non-empty `globals` key, the editor gets a flash message pointing
-them at Sync instead ("Globals present in file — use Sync to import
-globals."). The Sync screen's own preview step dry-runs the globals payload
+The CP's manual JSON-upload path (`actionRunImport()`) deliberately never
+writes globals: there's no consent UI on that screen, so importing them there
+would bypass the whole per-run gate above. The upload is staged onto the same
+job chain as a Sync with `unlockGlobals: false`, so `StageRunJob` locks the
+row for that run and `FinaliseRunJob`'s globals step records "skipped —
+locked" in the report (any `globals` key in the file is carried on the run
+row but unused). The Sync screen's own preview step dry-runs the globals payload
 purely for **display** (`GlobalsImportService::import($globals, dryRun:
 true)`) — nothing is written on preview regardless of the lock state.
 

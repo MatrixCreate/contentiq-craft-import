@@ -6,7 +6,7 @@ report's anatomy, and the per-entry sidebar widget that lives on the entry
 edit screen — how they share lock state and where each piece of behaviour
 lives in code.
 
-Verified against code 2026-08-24.
+Verified against code 2026-09-21.
 
 ---
 
@@ -32,8 +32,9 @@ transcription.
   screen's original, pre-Sitemap-preview behaviour) with a dismissible
   warning banner. See "Sync tree controls" below for the selection UI, and
   `docs/globals.md` for the globals lightswitch this screen also hosts.
-  Submitting starts a queue job (`actionRunSync`) and the page polls
-  `sync/status` until it leaves `pending`.
+  Submitting stages a run and pushes `StageRunJob` (`actionRunSync`) and the
+  page polls `sync/status` — see "Status polling and the progress bar" below
+  for what that returns and how a stalled run offers Resume.
 - **Mappings** (`actionMappings` / `actionSaveMappings`, `_cp/mappings.twig`)
   — one row per ContentiQ collection, cascading section → entry type →
   content/heading field dropdowns fed by `_buildSectionsData()`. Saved rows
@@ -49,26 +50,58 @@ transcription.
   `contentiq_import_runs` rows (single/batch/sync/widget imports), each
   linking to its result screen — a `sync`-type row links straight to
   `contentiq-importer/sync/result/<id>` (`actionSyncResult`), every other
-  type to `contentiq-importer/result/<id>` (`actionResult`).
+  type to `contentiq-importer/result/<id>` (`actionResult`). Two columns
+  beyond the legacy `type`/`status` pair: **Source** (`run.source` —
+  `api`|`upload`|`cli`|`widget`, blank for a pre-pipeline row) and **Phase**
+  (`run.phase` — `staging`|`importing`|`postpass`|`finalising`|`done`|`failed`;
+  a pre-pipeline row was backfilled to `done` by the pipeline migration). Both
+  are plain-text, not badges — `Status` is still the coloured dot readers
+  actually scan for pass/fail/in-progress.
 - **Preview** (`actionPreview`, `_cp/preview.twig`) — the upload flow's
   dry-run step: shows what an uploaded JSON file would do, including a
   dry-run of any `globals` key it carries (display only — see
-  `docs/globals.md` "Why globals never travel via upload").
+  `docs/globals.md` "Why globals never travel via upload"). Stays synchronous
+  and outside the batched pipeline (§8 of the queue spec) — it's a read-only
+  estimate and users expect it immediately.
 - **Upload** (`actionUpload` / `actionRunImport`, `_cp/upload.twig`) — manual
   JSON-file import. The temp file round-trips through a hidden
   `tempFilename` field between preview and run — see `docs/assets.md`
-  "Temp-file handling" for the path-traversal guard on that value.
-- **Result** (`actionResult`, `_cp/result.twig`) — the upload/CLI import's
-  result screen: per-page block-by-block breakdown. `run.result` here is
-  always the flat per-page array those entry points store — `actionResult()`
-  redirects a `sync`-type run (302) to the sync result screen below instead
-  of rendering it, because `SyncJob` stores a differently-shaped, wrapped
-  result (see "Sync report anatomy"). `result.twig` also unwraps
-  `run.result.pages` if present as a belt-and-braces fallback, matching
-  `sync-result.twig`'s existing `pages`/`result` fallback, in case anything
-  else ever links straight here with a wrapped result.
-- **Sync result** (`actionSyncResult`, `_cp/sync-result.twig`) — the sync
-  run's result screen; see "Sync report anatomy" below.
+  "Temp-file handling" for the path-traversal guard on that value. Confirming
+  the preview now stages a `source=upload` run and pushes `StageRunJob` —
+  the same batched pipeline CP Sync uses (see
+  [import-pipeline.md](import-pipeline.md#the-job-chain--phase-by-phase)) —
+  and redirects straight to the Sync screen's polling view
+  (`contentiq-importer/sync?runId=<id>&source=upload`) rather than waiting
+  on the request. Because every pipeline run is stamped `type='sync'`
+  regardless of `source` (so it always routes to the sync report screen
+  below, which is the only one built to render the pipeline's
+  `{pages, globals, ackWarning}` result shape), an uploaded file's report is
+  now the *Sync result* screen below, not *Result* — unlike before this
+  pipeline existed, when upload wrote a flat per-page array and rendered on
+  *Result* like a CLI import.
+- **Result** (`actionResult`, `_cp/result.twig`) — the CLI import's (`php
+  craft contentiq-importer/import`, unaffected by the batched pipeline — see
+  [import-pipeline.md](import-pipeline.md)) result screen: per-page
+  block-by-block breakdown. `run.result` here is always the flat per-page
+  array that entry point stores — `actionResult()` redirects a `sync`-type
+  run (302) to the sync result screen below instead of rendering it, since
+  every pipeline run (CP Sync, CP upload, `sync/run`) stores a
+  differently-shaped, wrapped result (see "Sync report anatomy").
+  `result.twig` also unwraps `run.result.pages` if present as a
+  belt-and-braces fallback, matching `sync-result.twig`'s existing
+  `pages`/`result` fallback, in case anything else ever links straight here
+  with a wrapped result.
+- **Sync result** (`actionSyncResult`, `_cp/sync-result.twig`) — the report
+  screen for every pipeline run (CP Sync, CP upload, `sync/run`); see "Sync
+  report anatomy" below. Renders **while the run is still going**, not just
+  once it's `done`: it reads `contentiq_sync_pages` rows directly (paginated
+  at 200 per page) rather than the legacy `result` blob, which only exists
+  once `FinaliseRunJob`'s `report` step has assembled it — so a page mid-run
+  simply has no `result` yet and is omitted rather than shown as a false
+  "Failed" row. The template gets a `running: true` flag whenever
+  `!run.isTerminal()` and shows a banner explaining more pages are still
+  coming; pagination controls appear whenever the run has more than 200
+  result rows, independent of `running`.
 
 ---
 
@@ -92,6 +125,26 @@ never-imported pages to actually pull in.
 
 ---
 
+## Status polling, the progress bar, and Resume
+
+Once a run is queued, `sync.twig` polls `sync/status` (`CpController::actionSyncStatus()`) on an interval until the run leaves `pending`. The JSON shape:
+
+```
+{ status, phase, step, counts, progressLabel, stale }
+```
+
+- **`status`** — the legacy vocabulary (`pending`|`success`|`warnings`|`errors`) the polling loop's own "keep going?" check still reads, unchanged by this pipeline so that check needed no rewrite.
+- **`phase`**/**`step`** — `SyncRun`'s `PHASE_*`/`STEP_*` constants (see [import-pipeline.md](import-pipeline.md#the-job-chain--phase-by-phase)); `phase === 'failed'` is what tells the frontend to show the Resume button instead of redirecting to the report.
+- **`counts`** — `SyncRunService::counts($runId)`: `total`, `pending`, `imported`, `skipped`, `failed`, `postpassDone`, `acked`, `locked` — row counts straight off `contentiq_sync_pages`, live for a still-running run.
+- **`progressLabel`** — a short server-computed string (`CpController::_progressLabel()`) like "Importing page 37 of 412" or "Locking synced entries…", built from `phase`/`step`/`counts`.
+- **`stale`** — `true` only on the one poll that just detected and failed a stalled run (see "Staleness" in [import-pipeline.md](import-pipeline.md#staleness)); every subsequent poll of that same (now `failed`) run reports `stale: false` again, since by then it's a normal terminal failure with its own error message.
+
+**The progress bar** (`#sync-progress-bar`/`#sync-progress-bar-bottom`, two copies — top and bottom of the screen, kept in lockstep) fills from a percentage the JS derives from `counts`, not from the server: `importing` uses `(counts.total - counts.pending) / counts.total`; `postpass`/`finalising` show a fixed high percentage (there's no cheap per-row postpass/finalise progress to compute); `staging` shows a low fixed percentage (the whole export is being decoded, nothing to count yet).
+
+**Resume.** Whenever a poll returns `phase: 'failed'`, a Resume button appears alongside the error message. Clicking it POSTs `contentiq-importer/cp/resume-run` (`CpController::actionResumeRun()`) with the run id; on success, polling resumes exactly as it did for the original submission. The button is never shown for any other phase — a run that's still going has nothing to resume, and a `done` run redirects straight to the report instead of staying on this screen.
+
+---
+
 ## Sync report anatomy
 
 `_cp/sync-result.twig` builds its page hierarchy the same way as the Sync
@@ -104,8 +157,9 @@ order is grouped by depth, not truly depth-first.
 
 - **Pages vs. collections.** Regular pages/homepage (no `sectionLabel` on
   the result row) render as the nested tree; collection children
-  (`sectionLabel` set by `ImportService`/`SyncJob`) render flat, one group
-  per collection section, sorted alphabetically by label.
+  (`sectionLabel` set by `ImportService`, carried unchanged through
+  `contentiq_sync_pages.result`) render flat, one group per collection
+  section, sorted alphabetically by label.
 - **Counts.** `updatedCount`/`skippedCount`/`totalWarnings`/`totalImages`/
   `reusedImages` are all derived in the template from the raw per-page
   result flags (`success`, `skipped`, the "Skipped — entry is locked."/
@@ -158,10 +212,10 @@ type="checkbox">` behind a `<label>` styled to look like a lightswitch
   server-side: `actionWidgetSync()` re-checks `contentiq_entry_syncs.locked`
   for the given `elementId` before doing anything, since the client-side
   disable is advisory only. A missing sync row is treated as locked — same
-  default as the Sync screen and `SyncJob`.
-- **Batch syncs skip locked entries too** — `SyncJob` logs "Skipped — entry
-  is locked." per entry, which is what drives the sync report's "Locked"
-  badge (see above).
+  default as the Sync screen and `ImportPagesJob`.
+- **Batch syncs skip locked entries too** — `ImportPagesJob` logs "Skipped —
+  entry is locked." per row, which is what drives the sync report's
+  "Locked" badge (see above).
 
 **Locator resolution.** The widget's Sync button posts the entry's Craft
 `slug`; `actionWidgetSync()` resolves the ContentiQ locator for
@@ -212,13 +266,13 @@ read and write:
   brand-new/"New") entry and unchecked for a locked one — but locked rows
   stay independently visible with a disabled-style "Locked" badge rather
   than being hidden.
-- `SyncJob` reads it per entry at import time and skips locked entries
+- `ImportPagesJob` reads it per row at import time and skips locked entries
   regardless of what the Sync screen's checkbox state was (the checkbox
   only controls *deselection* of unlocked entries — it can't override a
   lock).
 
 A missing row is treated as locked everywhere this is checked (`actionSync`,
-`actionWidgetSync`, `SyncJob`) — the safe default for an entry that has
+`actionWidgetSync`, `ImportPagesJob`) — the safe default for an entry that has
 never been touched by this plugin.
 
 ---
