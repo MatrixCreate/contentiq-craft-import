@@ -175,6 +175,7 @@ class ContentIQImporter extends Plugin
                 $event->rules['contentiq-importer/sync']                    = 'contentiq-importer/cp/sync';
                 $event->rules['contentiq-importer/sync/run']                = 'contentiq-importer/cp/run-sync';
                 $event->rules['contentiq-importer/sync/status']             = 'contentiq-importer/cp/sync-status';
+                $event->rules['contentiq-importer/sync/resume']             = 'contentiq-importer/cp/resume-run';
                 $event->rules['contentiq-importer/sync/result/<runId:\d+>'] = 'contentiq-importer/cp/sync-result';
                 $event->rules['contentiq-importer/widget-sync']             = 'contentiq-importer/cp/widget-sync';
                 $event->rules['contentiq-importer/clear-notes']           = 'contentiq-importer/cp/clear-notes';

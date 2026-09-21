@@ -390,7 +390,21 @@
        pages, so this isn't gated to the 'warnings' status alone. When there
        are no warnings at all, the pane is just the status line, for all
        three status values. #}
-    {% if run.status == 'success' %}
+    {% if running ?? false %}
+        {# The run hasn't reached a terminal phase yet (set by
+           CpController::actionSyncResult() for any run with
+           contentiq_sync_pages rows; always false for a legacy
+           pre-pipeline run's flat-array result) — the rows below already
+           reflect whatever has been processed so far (pending rows are
+           simply omitted), so this isn't a placeholder for missing data,
+           just a heads-up that more is still coming. No auto-refresh (the
+           status-poller screen already owns that); a manual link is enough
+           for a report someone's likely to leave open. #}
+        {% set bannerBg = 'var(--blue-050)' %}
+        {% set bannerBorder = 'var(--blue-300)' %}
+        {% set bannerDot = 'blue' %}
+        {% set bannerHeading = 'Sync still in progress — this report will keep filling in'|t('contentiq-importer') %}
+    {% elseif run.status == 'success' %}
         {% set bannerBg = 'var(--green-050)' %}
         {% set bannerBorder = 'var(--green-300)' %}
         {% set bannerDot = 'green' %}
@@ -435,7 +449,12 @@
                     <strong>{{ bannerHeading }}</strong>
                     <span class="light">({{ totalWarnings }})</span>
                 </span>
-                <label for="cq-warn-toggle" class="cq-warn-link"></label>
+                <span style="display:flex; align-items:center; gap:12px;">
+                    {% if running ?? false %}
+                        <a href="{{ url('contentiq-importer/sync/result/' ~ run.id) }}" class="btn small">{{ 'Refresh'|t('contentiq-importer') }}</a>
+                    {% endif %}
+                    <label for="cq-warn-toggle" class="cq-warn-link"></label>
+                </span>
             </div>
             <div class="cq-warn-body">
                 <div class="cq-warn-inner">
@@ -463,8 +482,15 @@
                 </div>
             </div>
         {% else %}
-            <span class="status {{ bannerDot }}"></span>
-            <strong>{{ bannerHeading }}</strong>
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <span>
+                    <span class="status {{ bannerDot }}"></span>
+                    <strong>{{ bannerHeading }}</strong>
+                </span>
+                {% if running ?? false %}
+                    <a href="{{ url('contentiq-importer/sync/result/' ~ run.id) }}" class="btn small">{{ 'Refresh'|t('contentiq-importer') }}</a>
+                {% endif %}
+            </div>
         {% endif %}
     </div>
 
@@ -616,6 +642,27 @@
                         {% endfor %}
                     </ul>
                 </div>
+            {% endif %}
+        </div>
+    {% endif %}
+
+    {# Pagination — only present at all for a pipeline run large enough to
+       need it (CpController::actionSyncResult() always passes totalPages,
+       defaulting to 1 for a legacy run's flat-array result, so this simply
+       never renders for one). `?p=` matches the query param the controller
+       reads. #}
+    {% if (totalPages ?? 1) > 1 %}
+        <div class="pane" style="border-radius:8px; padding:12px 24px; display:flex; justify-content:space-between; align-items:center;">
+            {% if page > 1 %}
+                <a href="{{ url('contentiq-importer/sync/result/' ~ run.id, { p: page - 1 }) }}" class="btn small">{{ '« Previous'|t('contentiq-importer') }}</a>
+            {% else %}
+                <span></span>
+            {% endif %}
+            <span class="light" style="font-size:13px;">{{ 'Page {page} of {total}'|t('contentiq-importer', { page: page, total: totalPages }) }}</span>
+            {% if page < totalPages %}
+                <a href="{{ url('contentiq-importer/sync/result/' ~ run.id, { p: page + 1 }) }}" class="btn small">{{ 'Next »'|t('contentiq-importer') }}</a>
+            {% else %}
+                <span></span>
             {% endif %}
         </div>
     {% endif %}

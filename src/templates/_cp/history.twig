@@ -21,6 +21,8 @@
                     <th>{{ 'Date'|t('contentiq-importer') }}</th>
                     <th>{{ 'File'|t('contentiq-importer') }}</th>
                     <th>{{ 'Type'|t('contentiq-importer') }}</th>
+                    <th>{{ 'Source'|t('contentiq-importer') }}</th>
+                    <th>{{ 'Phase'|t('contentiq-importer') }}</th>
                     <th>{{ 'Pages'|t('contentiq-importer') }}</th>
                     <th>{{ 'Images'|t('contentiq-importer') }}</th>
                     <th>{{ 'Status'|t('contentiq-importer') }}</th>
@@ -41,6 +43,8 @@
                                 Single
                             {% endif %}
                         </td>
+                        <td><span class="light" style="font-size:12px;">{{ run.source ?? '—' }}</span></td>
+                        <td><span class="light" style="font-size:12px;">{{ run.phase ?? '—' }}</span></td>
                         <td>{{ run.pageCount }}</td>
                         <td>{{ run.imageCount }}</td>
                         <td>

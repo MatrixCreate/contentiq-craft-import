@@ -54,6 +54,9 @@
     {% endfor %}
 {% endmacro %}
 
+{% set initialRunId = initialRunId ?? null %}
+{% set runSource = runSource ?? 'sync' %}
+
 {% block content %}
 
     <div>
@@ -100,24 +103,35 @@
                     </form>
                 </div>
 
-                {# Loading state — shown while job is running #}
+                {# Loading state — shown while job is running. #progress-text/
+                   #progress-bar-fill are updated on every poll tick from the
+                   status JSON's phase/step/counts (see the script below) —
+                   "Preparing…" while staging, "Importing page N of M" while
+                   importing, "Resolving links…" while post-passing,
+                   "Finalising…" (plus its sub-step) while finalising. #}
                 <div id="sync-loading" style="display:none;">
                     <div style="display:flex; align-items:center; gap:12px;">
                         <div class="spinner" style="display:block;"></div>
                         <div>
-                            <strong>{{ 'Syncing content and downloading assets'|t('contentiq-importer') }}</strong>
-                            <div class="light" style="font-size:13px; margin-top:2px;">{{ 'This may take a moment for large imports.'|t('contentiq-importer') }}</div>
+                            <strong>{{ runSource == 'upload' ? 'Uploading and importing content'|t('contentiq-importer') : 'Syncing content and downloading assets'|t('contentiq-importer') }}</strong>
+                            <div class="light" style="font-size:13px; margin-top:2px;" id="sync-progress-text">{{ 'This may take a moment for large imports.'|t('contentiq-importer') }}</div>
+                            <div style="background:var(--gray-100); border-radius:4px; height:4px; width:220px; margin-top:6px; overflow:hidden;">
+                                <div id="sync-progress-bar" style="background:var(--blue-500, #2563eb); height:100%; width:0%; transition:width .3s ease;"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
 
-                {# Error state #}
+                {# Error state — Resume is only shown when the poll reports a
+                   genuinely failed (resumable) run, never for a network
+                   hiccup talking to sync/status itself. #}
                 <div id="sync-error" style="display:none;">
                     <div style="display:flex; align-items:center; gap:12px;">
                         <div class="error">
                             <strong>{{ 'Sync failed'|t('contentiq-importer') }}</strong>
                             <span id="sync-error-message"></span>
                         </div>
+                        <button type="button" class="btn small" id="sync-resume-btn" style="display:none;" onclick="resumeSync()">{{ 'Resume'|t('contentiq-importer') }}</button>
                         <button type="button" class="btn small" onclick="resetSync()">{{ 'Try Again'|t('contentiq-importer') }}</button>
                     </div>
                 </div>
@@ -255,8 +269,11 @@
                 <div style="display:flex; align-items:center; justify-content:flex-end; gap:12px; text-align:left;">
                     <div class="spinner" style="display:block;"></div>
                     <div>
-                        <strong>{{ 'Syncing content and downloading assets'|t('contentiq-importer') }}</strong>
-                        <div class="light" style="font-size:13px; margin-top:2px;">{{ 'This may take a moment for large imports.'|t('contentiq-importer') }}</div>
+                        <strong>{{ runSource == 'upload' ? 'Uploading and importing content'|t('contentiq-importer') : 'Syncing content and downloading assets'|t('contentiq-importer') }}</strong>
+                        <div class="light" style="font-size:13px; margin-top:2px;" id="sync-progress-text-bottom">{{ 'This may take a moment for large imports.'|t('contentiq-importer') }}</div>
+                        <div style="background:var(--gray-100); border-radius:4px; height:4px; width:220px; margin-top:6px; overflow:hidden;">
+                            <div id="sync-progress-bar-bottom" style="background:var(--blue-500, #2563eb); height:100%; width:0%; transition:width .3s ease;"></div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -269,6 +286,7 @@
                         <strong>{{ 'Sync failed'|t('contentiq-importer') }}</strong>
                         <span id="sync-error-message-bottom"></span>
                     </div>
+                    <button type="button" class="btn small" id="sync-resume-btn-bottom" style="display:none;" onclick="resumeSync()">{{ 'Resume'|t('contentiq-importer') }}</button>
                     <button type="button" class="btn small" onclick="resetSync()">{{ 'Try Again'|t('contentiq-importer') }}</button>
                 </div>
             </div>
@@ -290,7 +308,13 @@
         var loadingElBottom = document.getElementById('sync-loading-bottom');
         var errorElBottom = document.getElementById('sync-error-bottom');
         var errorMsgBottom = document.getElementById('sync-error-message-bottom');
-        var runId = null;
+        var progressText = document.getElementById('sync-progress-text');
+        var progressTextBottom = document.getElementById('sync-progress-text-bottom');
+        var progressBar = document.getElementById('sync-progress-bar');
+        var progressBarBottom = document.getElementById('sync-progress-bar-bottom');
+        var resumeBtn = document.getElementById('sync-resume-btn');
+        var resumeBtnBottom = document.getElementById('sync-resume-btn-bottom');
+        var runId = {{ initialRunId ? initialRunId : 'null' }};
         var pollTimer = null;
 
         // ----- Tree checkbox logic -----
@@ -473,15 +497,19 @@
         updateSummary();
         refreshAllSelectAlls();
 
+        // A run already exists and is queued (actionRunImport()'s upload
+        // redirect set `initialRunId` — see CpController::actionSync()) —
+        // skip the idle tree-selection view entirely and start polling it
+        // immediately, same loading/error UI as the button-driven flow.
+        if (runId) {
+            enterLoadingState();
+            pollForCompletion();
+        }
+
         // ----- Sync form submission -----
         form.addEventListener('submit', function(e) {
             e.preventDefault();
-            idleEl.style.display = 'none';
-            loadingEl.style.display = 'block';
-            errorEl.style.display = 'none';
-            if (idleElBottom) idleElBottom.style.display = 'none';
-            if (loadingElBottom) loadingElBottom.style.display = 'block';
-            if (errorElBottom) errorElBottom.style.display = 'none';
+            enterLoadingState();
 
             var formData = new FormData(form);
 
@@ -532,13 +560,46 @@
                     Craft.postActionRequest('queue/run');
                     pollForCompletion();
                 } else {
-                    showError(data.error || 'An unexpected error occurred.');
+                    showError(data.error || 'An unexpected error occurred.', false);
                 }
             })
             .catch(function(err) {
-                showError(err.message || 'Network error.');
+                showError(err.message || 'Network error.', false);
             });
         });
+
+        function enterLoadingState() {
+            idleEl.style.display = 'none';
+            loadingEl.style.display = 'block';
+            errorEl.style.display = 'none';
+            if (idleElBottom) idleElBottom.style.display = 'none';
+            if (loadingElBottom) loadingElBottom.style.display = 'block';
+            if (errorElBottom) errorElBottom.style.display = 'none';
+        }
+
+        // Renders the status JSON's phase/step/counts as a short label +
+        // fill-width bar. `progressLabel` is server-computed (see
+        // CpController::_progressLabel()) — this just adds a percentage from
+        // `counts` (importing phase only; every other phase has no
+        // meaningful item count to bar-fill against, so it just pulses at a
+        // fixed width for those).
+        function updateProgress(data) {
+            var label = data.progressLabel || '';
+            if (progressText) progressText.textContent = label;
+            if (progressTextBottom) progressTextBottom.textContent = label;
+
+            var pct = 5;
+            var counts = data.counts || {};
+            if (data.phase === 'importing' && counts.total) {
+                pct = Math.min(100, Math.round(((counts.total - counts.pending) / counts.total) * 100));
+            } else if (data.phase === 'postpass' || data.phase === 'finalising') {
+                pct = 90;
+            } else if (data.phase === 'staging') {
+                pct = 5;
+            }
+            if (progressBar) progressBar.style.width = pct + '%';
+            if (progressBarBottom) progressBarBottom.style.width = pct + '%';
+        }
 
         function pollForCompletion() {
             pollTimer = setInterval(function() {
@@ -548,10 +609,25 @@
                 .then(function(resp) { return resp.json(); })
                 .then(function(data) {
                     if (data.status === 'pending') {
-                        // Still running — keep polling.
+                        // Still running — keep polling, update progress.
+                        updateProgress(data);
                         return;
                     }
                     clearInterval(pollTimer);
+
+                    // A failed run (worker died, or a job's own catch block
+                    // gave up) is resumable — offer Resume instead of
+                    // redirecting to a report that isn't there yet. A `done`
+                    // run (even with status 'errors' — per-page failures on
+                    // an otherwise-completed run) still redirects, same as
+                    // before this change.
+                    if (data.phase === 'failed') {
+                        showError(data.stale
+                            ? 'Sync did not complete — the queue worker may not be running.'
+                            : 'Sync failed — see the error below, or try resuming.', true);
+                        return;
+                    }
+
                     // Redirect to sync report.
                     window.location.href = Craft.getCpUrl('contentiq-importer/sync/result/' + runId);
                 })
@@ -561,20 +637,51 @@
             }, 2000);
         }
 
-        function showError(msg) {
+        function showError(msg, resumable) {
             loadingEl.style.display = 'none';
             errorEl.style.display = 'block';
             errorMsg.textContent = msg;
             if (loadingElBottom) loadingElBottom.style.display = 'none';
             if (errorElBottom) errorElBottom.style.display = 'block';
             if (errorMsgBottom) errorMsgBottom.textContent = msg;
+            if (resumeBtn) resumeBtn.style.display = resumable ? 'inline-block' : 'none';
+            if (resumeBtnBottom) resumeBtnBottom.style.display = resumable ? 'inline-block' : 'none';
         }
+
+        window.resumeSync = function() {
+            if (!runId) return;
+
+            fetch(Craft.getActionUrl('contentiq-importer/cp/resume-run'), {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-Token': Craft.csrfTokenValue,
+                },
+                body: JSON.stringify({ runId: runId }),
+            })
+            .then(function(resp) { return resp.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    enterLoadingState();
+                    Craft.postActionRequest('queue/run');
+                    pollForCompletion();
+                } else {
+                    showError(data.error || 'Could not resume this sync.', true);
+                }
+            })
+            .catch(function(err) {
+                showError(err.message || 'Network error.', true);
+            });
+        };
 
         window.resetSync = function() {
             errorEl.style.display = 'none';
             idleEl.style.display = 'block';
             if (errorElBottom) errorElBottom.style.display = 'none';
             if (idleElBottom) idleElBottom.style.display = 'block';
+            if (resumeBtn) resumeBtn.style.display = 'none';
+            if (resumeBtnBottom) resumeBtnBottom.style.display = 'none';
         };
     })();
     </script>

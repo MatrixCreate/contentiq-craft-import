@@ -9,16 +9,24 @@ use craft\fields\Matrix;
 use craft\fields\PlainText;
 use craft\helpers\App;
 use craft\helpers\Db;
+use craft\helpers\FileHelper;
 use craft\helpers\Json;
 use craft\models\Section;
 use craft\web\Controller;
 use craft\web\UploadedFile;
 use craft\helpers\StringHelper;
+use craft\helpers\Queue as QueueHelper;
 use GuzzleHttp\Exception\GuzzleException;
 use GuzzleHttp\RequestOptions;
 use matrixcreate\contentiqimporter\ContentIQImporter;
+use matrixcreate\contentiqimporter\helpers\SyncQueueConfig;
 use matrixcreate\contentiqimporter\helpers\TempFileSafety;
-use matrixcreate\contentiqimporter\jobs\SyncJob;
+use matrixcreate\contentiqimporter\jobs\FinaliseRunJob;
+use matrixcreate\contentiqimporter\jobs\ImportPagesJob;
+use matrixcreate\contentiqimporter\jobs\PostPassJob;
+use matrixcreate\contentiqimporter\jobs\StageRunJob;
+use matrixcreate\contentiqimporter\models\SyncRun;
+use matrixcreate\contentiqimporter\services\SyncRunService;
 use Psr\Http\Message\ResponseInterface;
 use yii\web\BadRequestHttpException;
 use yii\web\Response;
@@ -58,7 +66,7 @@ class CpController extends Controller
     public function actionHistory(): Response
     {
         $runs = (new Query())
-            ->select(['id', 'importedBy', 'filename', 'type', 'pageCount', 'imageCount', 'status', 'dateCreated'])
+            ->select(['id', 'importedBy', 'filename', 'type', 'source', 'phase', 'pageCount', 'imageCount', 'status', 'dateCreated'])
             ->from('{{%contentiq_import_runs}}')
             ->orderBy(['dateCreated' => SORT_DESC])
             ->limit(50)
@@ -375,7 +383,16 @@ class CpController extends Controller
     }
 
     /**
-     * Runs the actual import and redirects to the result screen.
+     * Saves the uploaded export to runtime storage, stages a run for it on
+     * the same batched pipeline the Sync screen uses, and redirects to the
+     * sync status screen (§3.7). Replaces the upload path's own inline
+     * import loop/post-pass call/`_saveRun()` — StageRunJob does the
+     * envelope validation, ImportPagesJob the per-page import + Structure
+     * positioning, PostPassJob the card-ref/link-sweep passes, and
+     * FinaliseRunJob the report — `source='upload'` skips the `ack` step
+     * (there's no ContentiQ-side pending state to retire for a file that
+     * didn't come from the API) and globals are never touched (the upload
+     * path has no lock/consent UI — same as before this change).
      *
      * @return Response
      * @throws BadRequestHttpException
@@ -387,7 +404,7 @@ class CpController extends Controller
 
         // Sanitize before building a filesystem path — the raw POST value is
         // untrusted and a '../' would otherwise allow arbitrary file read/delete
-        // via getTempPath() below (see the @unlink() further down).
+        // via getTempPath() below.
         $tempFilename = TempFileSafety::sanitize(
             (string)Craft::$app->getRequest()->getRequiredBodyParam('tempFilename'),
         );
@@ -406,258 +423,57 @@ class CpController extends Controller
             return $this->redirect('contentiq-importer/upload');
         }
 
-        $json = file_get_contents($tempPath);
-        $data = json_decode($json, true);
+        // StageRunJob reads the payload back off disk itself (it may run in
+        // a separate process/request from this one) — copy the preview's
+        // temp file into the runtime path it expects instead of decoding it
+        // here. `is_file()` above already confirmed it's readable.
+        $runtimeDir = Craft::$app->getPath()->getRuntimePath() . DIRECTORY_SEPARATOR . 'contentiq-importer' . DIRECTORY_SEPARATOR . 'runs';
+        FileHelper::createDirectory($runtimeDir);
 
-        if ($data === null) {
-            Craft::$app->getSession()->setError('Could not parse import file.');
+        $service = ContentIQImporter::$plugin->syncRuns;
+
+        // The runtime file is named after the run id, which only exists
+        // once createRun() returns — insert the run first with `file: null`,
+        // then patch `options.file` once the real path is known. `dryRun` is
+        // always false here — actionPreview() is the dry-run path and stays
+        // synchronous (§3.7's explicit phase-1 carve-out).
+        $run = $service->createRun('upload', [
+            'unlockIds'     => null,
+            'unlockGlobals' => false,
+            'newSelections' => [],
+            'file'          => null,
+            'dryRun'        => false,
+        ], Craft::$app->getUser()->getId(), basename($tempFilename));
+
+        $runtimeFile = $runtimeDir . DIRECTORY_SEPARATOR . $run->id . '.json';
+
+        if (!copy($tempPath, $runtimeFile)) {
+            $service->fail($run->id, 'Could not stage the uploaded file for import.');
+
+            Craft::$app->getSession()->setError('Could not stage the uploaded file for import.');
 
             return $this->redirect('contentiq-importer/upload');
         }
 
-        // Web requests run from webroot already — no chdir needed (unlike CLI).
+        Craft::$app->getDb()->createCommand()->update(
+            '{{%contentiq_import_runs}}',
+            ['options' => Json::encode(['unlockIds' => null, 'unlockGlobals' => false, 'newSelections' => [], 'file' => $runtimeFile, 'dryRun' => false])],
+            ['id' => $run->id],
+        )->execute();
 
-        $isBatch = isset($data['pages']) && is_array($data['pages']);
-        $pages   = $isBatch ? $data['pages'] : [$data];
+        $jobId = QueueHelper::push(new StageRunJob(['runId' => $run->id]), null, 0, SyncQueueConfig::ttr());
+        $service->setQueueJobId($run->id, $jobId !== null ? (int)$jobId : null);
 
-        $importService = ContentIQImporter::$plugin->imports;
-
-        // Resets per-run state (currently just the "first global CTA block
-        // wins" tracking — see ImportService::beginRun()) so this run never
-        // inherits state from a previous run in the same PHP process.
-        $importService->beginRun();
-
-        $pageResults   = [];
-        $totalImages   = 0;
-        $hasErrors     = false;
-        $hasWarnings   = false;
-        $slugToEntryId = [];
-        $allCardRefs   = [];  // Deferred card ref sets keyed by entry ID, for pass 2
-
-        // Resolve section for structure positioning.
-        $config        = Craft::$app->config->getConfigFromFile('contentiq');
-        $sectionHandle = $config['section'] ?? 'pages';
-        $section       = Craft::$app->entries->getSectionByHandle($sectionHandle);
-        $structureId   = $section?->structureId;
-
-        foreach ($pages as $pageData) {
-            // Enforce entry locks server-side — the upload path previously
-            // called importPage() with no lock check at all, so a locked entry
-            // could be silently overwritten by re-uploading the same file. A
-            // missing sync row for an existing entry is treated as locked (same
-            // default as the Sync UI / SyncJob).
-            $existingEntry = $importService->findExistingEntry($pageData);
-
-            if ($existingEntry !== null) {
-                $syncRow = (new Query())
-                    ->select(['locked'])
-                    ->from('{{%contentiq_entry_syncs}}')
-                    ->where(['element_id' => $existingEntry->id])
-                    ->one();
-
-                // craft\db\Query::one() returns null when no row matches.
-                $isLocked = $syncRow === null ? true : (bool)$syncRow['locked'];
-
-                if ($isLocked) {
-                    $lockedSlug = $pageData['document']['slug'] ?? '';
-
-                    // Asset filing never touches entry content, so it's
-                    // exempt from the lock — file this page's
-                    // assets[]/files[] (and relocate under 'sitemap') even
-                    // though nothing else runs for it. See
-                    // ImportService::importPageAssetsOnly().
-                    $assetsOnly = $importService->importPageAssetsOnly($pageData);
-
-                    $pageResults[] = [
-                        'success'       => true,
-                        'slug'          => $lockedSlug,
-                        'title'         => $pageData['document']['title'] ?? $lockedSlug,
-                        'entryId'       => $existingEntry->id,
-                        'entryFound'    => true,
-                        'seoFieldCount' => 0,
-                        'blocks'        => [],
-                        'images'        => [],
-                        'pageAssets'    => $assetsOnly['pageAssets'],
-                        'pageFiles'     => $assetsOnly['pageFiles'],
-                        'blockNotes'    => '',
-                        'warnings'      => array_merge(['Skipped — entry is locked.'], $assetsOnly['warnings']),
-                        'error'         => null,
-                        'skipped'       => false,
-                        'contentType'   => $pageData['document']['content_type'] ?? null,
-                        'sectionLabel'  => null,
-                        // Tells runPostPasses()'s "genuinely written" predicate
-                        // (ImportService::_writtenPages()) to leave this page out
-                        // of the pass-3 link sweep — nothing was written for it.
-                        'skippedLocked' => true,
-                        'contentiqPageId' => isset($pageData['document']['id']) ? (int)$pageData['document']['id'] : null,
-                    ];
-                    $hasWarnings = true;
-
-                    if ($lockedSlug !== '') {
-                        $slugToEntryId[$lockedSlug] = $existingEntry->id;
-                    }
-
-                    continue;
-                }
-            }
-
-            $result = $importService->importPage($pageData, dryRun: false);
-
-            // Thread the stable ContentIQ page id through to runPostPasses()'s
-            // "genuinely written" predicate (ImportService::_writtenPages()) —
-            // mirrors SyncJob's own $result['contentiqPageId'] assignment.
-            $result['contentiqPageId'] = isset($pageData['document']['id'])
-                ? (int)$pageData['document']['id']
-                : null;
-
-            // ContentIQ's own per-parent sibling order — passed to
-            // positionInStructure() below. This upload path has no
-            // contentiq_entry_syncs upsert step of its own (unlike SyncJob's
-            // auto-lock step), so it isn't persisted here, only used for
-            // this run's own positioning.
-            $result['sortOrder'] = (int)($pageData['document']['sort_order'] ?? 0);
-
-            $slug       = $result['slug'] ?? '';
-            $parentSlug = $pageData['document']['parent_slug'] ?? null;
-            $entryId    = $result['entryId'] ?? null;
-            $isHomepage = (bool)($pageData['document']['is_homepage'] ?? false);
-
-            if ($entryId !== null && $slug !== '') {
-                $slugToEntryId[$slug] = $entryId;
-            }
-
-            // Collect deferred card ref sets from this page for pass 2 resolution.
-            if ($entryId !== null && !empty($result['cardRefs'])) {
-                $allCardRefs[$entryId] = array_values($result['cardRefs']);
-            }
-
-            if ($entryId !== null && $structureId !== null && !$isHomepage) {
-                $entry = Entry::find()->id($entryId)->status(null)->one();
-
-                if ($entry !== null) {
-                    $parentId = null;
-
-                    if ($parentSlug !== null && $parentSlug !== '') {
-                        // Try current-batch map first, then fall back to a Craft query
-                        // so re-imports correctly place children under existing parents.
-                        $parentId = $slugToEntryId[$parentSlug] ?? null;
-
-                        if ($parentId === null) {
-                            $parentEntry = Entry::find()
-                                ->section($sectionHandle)
-                                ->slug(Db::escapeParam((string)$parentSlug))
-                                ->status(null)
-                                ->one();
-                            $parentId = $parentEntry?->id;
-                        }
-
-                        if ($parentId === null) {
-                            $result['warnings'][] = "Parent slug '{$parentSlug}' not found — entry saved at root level.";
-                        }
-                    }
-
-                    // positionInStructure() moveBefore()s/append()s/appendToRoot()s
-                    // as needed, then refreshes the URI inline — force it now so
-                    // $entry->uri is correct for PASS 4's redirect sweep below (see
-                    // ImportService::refreshUri()). Failures are caught internally
-                    // and appended to $result['warnings'].
-                    $importService->positionInStructure(
-                        entry: $entry,
-                        parentId: $parentId,
-                        structureId: $structureId,
-                        sortOrder: $result['sortOrder'],
-                        contentiqPageId: $result['contentiqPageId'],
-                        warnings: $result['warnings'],
-                    );
-                }
-            }
-
-            $pageResults[] = $result;
-            $totalImages  += count($result['images'] ?? []);
-
-            if (!$result['success']) {
-                $hasErrors = true;
-            }
-            if (!empty($result['warnings'])) {
-                $hasWarnings = true;
-            }
-        }
-
-        // Post-passes: card references (pass 2) + link sweep (pass 3), now the
-        // slug map is complete. Guarded (unlike importPage() above, whose own
-        // per-page try/catch already isolates a single bad page) because a
-        // throw from the sweeps' own setup queries would otherwise produce a
-        // raw 500 and skip the record save below, even though every entry up
-        // to this point was already written. Falls back to a synthetic
-        // per-entry warning set, reusing the exact same merge loop below a
-        // successful call would feed — see AGENTS.md's per-page error
-        // isolation principle; this is the run-wide equivalent for a
-        // run-wide (not per-page) step.
-        try {
-            $cardWarnings = $importService->runPostPasses($allCardRefs, $slugToEntryId, $pageResults);
-        } catch (\Throwable $e) {
-            Craft::error(
-                'ContentIQImporter: post-import passes failed — ' . $e->getMessage() . "\n" . $e->getTraceAsString(),
-                __METHOD__,
-            );
-
-            $postPassFailure = 'Post-import passes (card references / link sweep) failed: ' . $e->getMessage();
-            $cardWarnings    = [];
-
-            foreach ($pageResults as $r) {
-                if (($r['entryId'] ?? null) !== null) {
-                    $cardWarnings[$r['entryId']] = [$postPassFailure];
-                }
-            }
-        }
-
-        foreach ($cardWarnings as $entryId => $warnings) {
-            if (empty($warnings)) {
-                continue;
-            }
-
-            $hasWarnings = true;
-
-            foreach ($pageResults as $i => $r) {
-                if (($r['entryId'] ?? null) === $entryId) {
-                    array_push($pageResults[$i]['warnings'], ...$warnings);
-                    break;
-                }
-            }
-        }
-
-        // Determine overall status.
-        if ($hasErrors) {
-            $status = 'errors';
-        } elseif ($hasWarnings) {
-            $status = 'warnings';
-        } else {
-            $status = 'success';
-        }
-
-        // Save to history.
-        $runId = $this->_saveRun(
-            filename:   basename($tempFilename),
-            type:       $isBatch ? 'batch' : 'single',
-            pageCount:  count($pageResults),
-            imageCount: $totalImages,
-            status:     $status,
-            result:     $pageResults,
-        );
-
-        // Clean up temp file.
+        // Clean up the preview's own temp copy — StageRunJob now reads from
+        // the runtime copy above.
         @unlink($tempPath);
 
-        // The upload path intentionally does not import globals — that needs the
-        // lock/consent model, which only the Sync screen exposes. Flag it so the
-        // editor knows the globals in the file were left untouched.
-        if (isset($data['globals']) && is_array($data['globals']) && !empty($data['globals'])) {
-            Craft::$app->getSession()->setNotice(
-                Craft::t('contentiq-importer', 'Globals present in file — use Sync to import globals.'),
-            );
-        }
-
-        return $this->redirect('contentiq-importer/result/' . $runId);
+        // Same status/polling screen actionRunSync()'s own client-side flow
+        // lands on (contentiq-importer/sync, see sync.twig) — `runId`/
+        // `source` tell it to skip the idle tree-selection view and start
+        // polling this already-queued run immediately, labelled "Upload"
+        // instead of "Sync" (§3.7).
+        return $this->redirect('contentiq-importer/sync?runId=' . $run->id . '&source=upload');
     }
 
     /**
@@ -787,6 +603,15 @@ class CpController extends Controller
             ->from('{{%contentiq_office_syncs}}')
             ->count();
 
+        // Set by actionRunImport()'s redirect after it's already staged and
+        // queued a run — tells sync.twig to skip the idle tree-selection
+        // view and start polling this run immediately, labelled per
+        // `runSource` ('upload' → "Upload") instead of the default "Sync".
+        // Absent on a normal page load (the button-driven flow this screen
+        // has always had).
+        $initialRunId = Craft::$app->getRequest()->getQueryParam('runId');
+        $runSource    = (string)Craft::$app->getRequest()->getQueryParam('source', 'sync');
+
         return $this->renderTemplate('contentiq-importer/_cp/sync', [
             'contentiqUrl'    => App::parseEnv($settings->contentiqUrl),
             'projectSlug'    => $inferredSlug,
@@ -796,6 +621,8 @@ class CpController extends Controller
             'globalsLocked'     => $globalsLocked,
             'globalsOfficeCount' => $globalsOfficeCount,
             'globalsSetNames'    => ['companyInfo', 'globalContent', 'siteConfig'],
+            'initialRunId'    => $initialRunId !== null ? (int)$initialRunId : null,
+            'runSource'       => $runSource,
         ]);
     }
 
@@ -1017,24 +844,36 @@ class CpController extends Controller
             ]);
         }
 
-        // Fix C: refuse a second concurrent sync — two near-simultaneous runs
-        // would otherwise each rewrite contentiq_entry_syncs lock state and
-        // clobber each other's selections.
-        if ($this->_hasInFlightSync()) {
-            return $this->asJson([
-                'success' => false,
-                'error'   => 'A sync is already in progress — wait for it to finish.',
-            ]);
+        $service = ContentIQImporter::$plugin->syncRuns;
+        $active  = $service->hasActiveRun();
+
+        // Refuse a second concurrent sync — two near-simultaneous runs would
+        // otherwise each rewrite contentiq_entry_syncs lock state and
+        // clobber each other's selections. A stale active run (worker died,
+        // nothing left queued for it) is failed and relocked instead of
+        // blocking forever — then this request proceeds to start its own
+        // run in the same request, same as the pre-pipeline behaviour of
+        // just letting the next click through once the old one timed out.
+        if ($active !== null) {
+            if ($this->_isRunStale($active) && !$service->hasQueuedJob($active->queueJobId)) {
+                $service->fail($active->id, 'Stale run failed when a new sync started');
+                ContentIQImporter::$plugin->locks->relockGlobals('Stale run failed when a new sync started');
+            } else {
+                return $this->asJson([
+                    'success' => false,
+                    'error'   => 'A sync is already in progress — wait for it to finish.',
+                ]);
+            }
         }
 
         // Capture the lock/unlock selection from the pre-sync tree view and
-        // the globals consent checkbox here, but DEFER actually writing them
-        // until SyncJob::execute() runs (Fix B1) — writing them now, before
-        // the job is even queued, would leak an unlock/consent if the worker
-        // never picks up the job, or dies before running it. `null` preserves
-        // the previous write's guard (`is_array($unlockIds)`): a missing or
-        // malformed selection leaves lock state untouched instead of locking
-        // everything.
+        // the globals consent checkbox here, but DEFER actually applying
+        // them until StageRunJob executes — writing them now, before the
+        // job is even queued, would leak an unlock/consent if the worker
+        // never picks up the job, or dies before running it. `null`
+        // preserves the previous write's guard (`is_array($unlockIds)`): a
+        // missing or malformed selection leaves lock state untouched
+        // instead of locking everything.
         $request      = Craft::$app->getRequest();
         $unlockIdsRaw = Json::decodeIfJson($request->getBodyParam('unlockIds', '[]'));
         $unlockIds    = is_array($unlockIdsRaw) ? $unlockIdsRaw : null;
@@ -1042,47 +881,47 @@ class CpController extends Controller
         // ContentIQ page ids for unchecked "New" rows — deliberately opt-OUT:
         // an absent/malformed param (broken JS, older cached page) means
         // nothing is excluded and every New page still imports, same as
-        // before this feature existed. See SyncJob::$excludeNewIds.
+        // before this feature existed. Stored under `options.newSelections`
+        // — see SyncRun::$options / SyncJob::$excludeNewIds for the same
+        // concept under its pre-pipeline name.
         $excludeNewIdsRaw = Json::decodeIfJson($request->getBodyParam('excludeNewIds', '[]'));
-        $excludeNewIds    = is_array($excludeNewIdsRaw)
+        $newSelections    = is_array($excludeNewIdsRaw)
             ? array_values(array_map('intval', array_filter($excludeNewIdsRaw, 'is_scalar')))
             : [];
 
         // The globals consent checkbox (checked = unlock for this run only).
-        // SyncJob persists the inverse into contentiq_globals_sync.locked at
-        // the start of the run, then relocks after a successful globals
-        // import — or on any failure, see SyncJob::_failRun().
+        // StageRunJob persists the inverse into contentiq_globals_sync.locked
+        // at the start of the run, then FinaliseRunJob relocks after a
+        // successful globals import — or on any failure, every job's own
+        // catch block does.
         $unlockGlobals = (bool)$request->getBodyParam('unlockGlobals', false);
 
-        // Create a pending run record so the frontend has a run ID to poll.
-        $runId = $this->_saveRun(
-            filename:   'sync',
-            type:       'sync',
-            pageCount:  0,
-            imageCount: 0,
-            status:     'pending',
-            result:     [],
-        );
-
-        // Push the queue job.
-        Craft::$app->getQueue()->push(new SyncJob([
-            'runId'         => $runId,
+        $run = $service->createRun('api', [
             'unlockIds'     => $unlockIds,
             'unlockGlobals' => $unlockGlobals,
-            'excludeNewIds' => $excludeNewIds,
-        ]));
+            'newSelections' => $newSelections,
+            'file'          => null,
+            'dryRun'        => false,
+        ], Craft::$app->getUser()->getId(), 'sync');
+
+        $jobId = QueueHelper::push(new StageRunJob(['runId' => $run->id]), null, 0, SyncQueueConfig::ttr());
+        $service->setQueueJobId($run->id, $jobId !== null ? (int)$jobId : null);
 
         return $this->asJson([
             'success' => true,
-            'runId'   => $runId,
+            'runId'   => $run->id,
         ]);
     }
 
     /**
      * Polls the status of a sync run.
      *
-     * Returns JSON with the current status — the frontend polls until
-     * status is no longer 'pending'.
+     * Returns `{status, phase, step, counts, progressLabel, stale}`. `status`
+     * keeps the legacy vocabulary `sync.twig`'s `pollForCompletion()` already
+     * polls on (`pending` while not terminal, then `success`|`warnings`|
+     * `errors`) so its "still polling?" check needs no change; `phase`/`step`
+     * drive the progress bar, and `phase === 'failed'` is what tells the
+     * frontend to offer Resume instead of redirecting to the report.
      *
      * @return Response
      */
@@ -1090,62 +929,236 @@ class CpController extends Controller
     {
         $this->requireAcceptsJson();
 
-        $runId = Craft::$app->getRequest()->getRequiredQueryParam('runId');
-
-        $run = (new Query())
-            ->select(['status', 'dateCreated', 'dateUpdated'])
-            ->from('{{%contentiq_import_runs}}')
-            ->where(['id' => $runId])
-            ->one();
+        $runId   = (int)Craft::$app->getRequest()->getRequiredQueryParam('runId');
+        $service = ContentIQImporter::$plugin->syncRuns;
+        $run     = $service->loadRun($runId);
 
         if ($run === null) {
             return $this->asJson(['status' => 'unknown']);
         }
 
-        $status = $run['status'];
-
-        // Fix A2: a run that's been 'pending' too long almost always means the
-        // queue worker never picked up the job (or the process died before
-        // SyncJob's own try/catch — Fix A1 — could mark it failed), so the
-        // poller would otherwise spin on 'pending' forever. A false-positive
-        // stale flag only ever surfaces an error message, so this is
-        // deliberately generous: a long threshold, plus a best-effort check
-        // that no queued/reserved SyncJob explains the delay.
-        if ($status === 'pending'
-            && $this->_isStale($run['dateUpdated'] ?: $run['dateCreated'])
-            && !$this->_hasActiveSyncJob()
-        ) {
-            $this->_markRunErrored((int)$runId, 'Sync did not complete — the queue worker may not be running.');
-            $status = 'errors';
+        // Terminal — `done` (legacy runs included: the migration backfilled
+        // every pre-pipeline finished run to `phase='done'`, so `run.status`
+        // is exactly what it always was for them) or `failed` (`run.status`
+        // is never touched by fail() — see SyncRunService::fail() — so it's
+        // read here from `phase` instead, not the stale 'pending' the status
+        // column would otherwise still say).
+        if ($run->isTerminal()) {
+            return $this->asJson([
+                'status'        => $run->phase === SyncRun::PHASE_FAILED ? 'errors' : ($run->status ?: 'unknown'),
+                'phase'         => $run->phase,
+                'step'          => $run->step,
+                'counts'        => $service->counts($runId),
+                'progressLabel' => null,
+                'stale'         => false,
+            ]);
         }
 
+        // Staleness: `heartbeat` (touched by every job execution/item) older
+        // than the configured threshold AND nothing left queued for this
+        // run's `queueJobId` — the job died without a failure handler
+        // running (a killed worker, an OOM), so the poller would otherwise
+        // spin on 'pending' forever. A false positive only ever surfaces an
+        // error message the user can Resume past, so this stays deliberately
+        // generous, same reasoning as the pre-pipeline staleness fallback.
+        if ($this->_isRunStale($run) && !$service->hasQueuedJob($run->queueJobId)) {
+            $message = 'Sync did not complete — the queue worker may not be running.';
+            $service->fail($runId, $message);
+            ContentIQImporter::$plugin->locks->relockGlobals($message);
+
+            return $this->asJson([
+                'status'        => 'errors',
+                'phase'         => SyncRun::PHASE_FAILED,
+                'step'          => null,
+                'counts'        => $service->counts($runId),
+                'progressLabel' => null,
+                'stale'         => true,
+            ]);
+        }
+
+        $counts = $service->counts($runId);
+
         return $this->asJson([
-            'status' => $status ?: 'unknown',
+            'status'        => 'pending',
+            'phase'         => $run->phase,
+            'step'          => $run->step,
+            'counts'        => $counts,
+            'progressLabel' => $this->_progressLabel($run, $counts),
+            'stale'         => false,
         ]);
     }
 
     /**
-     * Sync result screen — hierarchical report of a completed sync.
+     * Sync result screen — hierarchical report of a sync run.
+     *
+     * Pipeline runs (any run with contentiq_sync_pages rows) build the
+     * report from those rows, paginated at 200 — this works identically
+     * whether the run is still going (the template gets `running: true` and
+     * shows a banner) or already `done` (a `done` run's rows are exactly
+     * what FinaliseRunJob's `report` step itself read to assemble the
+     * legacy `result` blob, so reading them again here is just as accurate
+     * and avoids re-decoding + re-slicing that blob for pagination). Runs
+     * that predate the pipeline (no sync_pages rows — widget syncs, or any
+     * run older than the m260921_100000 migration) fall back to decoding
+     * `result` directly, exactly as before this change.
      *
      * @param int $runId
      * @return Response
      */
     public function actionSyncResult(int $runId): Response
     {
-        $run = (new Query())
-            ->from('{{%contentiq_import_runs}}')
-            ->where(['id' => $runId])
-            ->one();
+        $service = ContentIQImporter::$plugin->syncRuns;
+        $run     = $service->loadRun($runId);
 
         if ($run === null) {
             throw new \yii\web\NotFoundHttpException('Sync run not found.');
         }
 
-        $run['result'] = Json::decodeIfJson($run['result'] ?? '[]');
+        if (!$service->hasSyncPages($runId)) {
+            $legacyRow = (new Query())
+                ->from('{{%contentiq_import_runs}}')
+                ->where(['id' => $runId])
+                ->one();
+
+            $legacyRow['result'] = Json::decodeIfJson($legacyRow['result'] ?? '[]');
+
+            return $this->renderTemplate('contentiq-importer/_cp/sync-result', [
+                'run'        => $legacyRow,
+                'running'    => false,
+                'page'       => 1,
+                'totalPages' => 1,
+            ]);
+        }
+
+        $perPage    = 200;
+        $page       = max(1, (int)Craft::$app->getRequest()->getQueryParam('p', 1));
+        $totalRows  = $service->pageRowCount($runId);
+        $totalPages = max(1, (int)ceil($totalRows / $perPage));
+        $page       = min($page, $totalPages);
+
+        $rows  = $service->pageRows($runId, ($page - 1) * $perPage, $perPage);
+        $pages = [];
+
+        foreach ($rows as $row) {
+            // A `pending` row hasn't been processed yet (the run is still
+            // going) — it carries no `result` at all. Rendering it as a
+            // page-result row would show it as "Failed" (the template's
+            // `page.success ?? false` falls through to the red/failed
+            // branch for a missing key) — omit it instead; the "still
+            // running" banner + progress bar on the status screen already
+            // tell the user more is coming.
+            if (is_array($row['result'])) {
+                $pages[] = $row['result'];
+            }
+        }
+
+        // Malformed export entries never got an individual result row (see
+        // SyncPlanner::plan()) — surfaced as one synthetic combined warning
+        // row on page 1 only, matching FinaliseRunJob::_runReportStep()'s
+        // own single combined entry.
+        if ($page === 1) {
+            $skippedMalformed = $service->skippedMalformedCount($runId);
+
+            if ($skippedMalformed > 0) {
+                array_unshift($pages, [
+                    'success'      => true,
+                    'slug'         => '',
+                    'entryId'      => null,
+                    'entryFound'   => false,
+                    'title'        => 'Malformed export entries',
+                    'depth'        => 0,
+                    'parentSlug'   => null,
+                    'blocks'       => [],
+                    'images'       => [],
+                    'blockNotes'   => '',
+                    'seoFieldCount' => 0,
+                    'warnings'     => ["{$skippedMalformed} page(s) in the export were malformed (not an object) and were skipped."],
+                    'error'        => null,
+                    'contentType'  => null,
+                    'sectionLabel' => null,
+                ]);
+            }
+        }
+
+        $legacyStatus = $run->phase === SyncRun::PHASE_FAILED ? 'errors' : ($run->status ?: 'pending');
 
         return $this->renderTemplate('contentiq-importer/_cp/sync-result', [
-            'run' => $run,
+            'run' => [
+                'id'     => $run->id,
+                'status' => $legacyStatus,
+                'result' => [
+                    'pages'      => $pages,
+                    'globals'    => $run->state['globalsReport'] ?? null,
+                    'ackWarning' => $run->state['ackWarning'] ?? null,
+                ],
+            ],
+            'running'    => !$run->isTerminal(),
+            'page'       => $page,
+            'totalPages' => $totalPages,
         ]);
+    }
+
+    /**
+     * Resumes a `failed` run from the phase/step {@see SyncRunService::fail()}
+     * recorded for it, re-pushing the matching job class (§3.7's Resume
+     * button, and SyncController::actionResume()'s CLI equivalent). Refuses
+     * when something is already queued for the run (a double-click, or a
+     * race with an in-flight retry) — the run row is the concurrency lock,
+     * same principle as StageRunJob's own guard (§3.6).
+     *
+     * @return Response
+     * @throws BadRequestHttpException
+     */
+    public function actionResumeRun(): Response
+    {
+        $this->requirePostRequest();
+        $this->requireAcceptsJson();
+        $this->requirePermission('contentiq-importer:sync');
+
+        $runId   = (int)Craft::$app->getRequest()->getRequiredBodyParam('runId');
+        $service = ContentIQImporter::$plugin->syncRuns;
+        $run     = $service->loadRun($runId);
+
+        if ($run === null) {
+            return $this->asJson(['success' => false, 'error' => 'Sync run not found.']);
+        }
+
+        if ($run->phase !== SyncRun::PHASE_FAILED) {
+            return $this->asJson(['success' => false, 'error' => 'Only a failed run can be resumed.']);
+        }
+
+        if ($service->hasQueuedJob($run->queueJobId)) {
+            return $this->asJson(['success' => false, 'error' => 'A job is already queued for this run.']);
+        }
+
+        $phase = $run->state['failedPhase'] ?? null;
+        $step  = $run->state['failedStep'] ?? null;
+
+        $jobClass = match ($phase) {
+            SyncRun::PHASE_STAGING    => StageRunJob::class,
+            SyncRun::PHASE_IMPORTING  => ImportPagesJob::class,
+            SyncRun::PHASE_POSTPASS   => PostPassJob::class,
+            SyncRun::PHASE_FINALISING => FinaliseRunJob::class,
+            default                   => null,
+        };
+
+        if ($jobClass === null) {
+            return $this->asJson(['success' => false, 'error' => 'This run has no recorded phase to resume from.']);
+        }
+
+        $service->advance($runId, $phase, $step);
+        // Refresh the heartbeat the staleness check reads — without this, a
+        // run resumed after sitting failed for a while (heartbeat untouched
+        // since its last job execution) would look stale again on the very
+        // next status poll, before a worker even gets a chance to pick the
+        // newly-pushed job up.
+        $service->touch($runId);
+
+        $ttr   = $phase === SyncRun::PHASE_FINALISING ? SyncQueueConfig::finaliseTtr() : SyncQueueConfig::ttr();
+        $jobId = QueueHelper::push(new $jobClass(['runId' => $runId]), null, 0, $ttr);
+        $service->setQueueJobId($runId, $jobId !== null ? (int)$jobId : null);
+
+        return $this->asJson(['success' => true, 'runId' => $runId]);
     }
 
     /**
@@ -1683,130 +1696,63 @@ class CpController extends Controller
     }
 
     /**
-     * How long a run may sit in 'pending' before it's treated as abandoned
+     * Whether a non-terminal run's `heartbeat` (touched by every job
+     * execution/item) is old enough that the run is treated as abandoned
      * rather than genuinely in flight — e.g. a queue worker that isn't
-     * running, or one that died before Fix A1's try/catch in SyncJob could
-     * mark it failed. Shared by the status poller (Fix A2) and the
-     * concurrency guard (Fix C). A false-positive stale flag only ever
-     * surfaces an error message or briefly blocks a re-click, so this is
-     * deliberately generous.
+     * running, or one that died before any job's own catch block could mark
+     * it failed. Shared by the status poller ({@see self::actionSyncStatus()})
+     * and the concurrency guard ({@see self::actionRunSync()}). A
+     * false-positive stale flag only ever surfaces an error message the user
+     * can Resume past, so the threshold ({@see SyncQueueConfig::staleAfter()},
+     * default 600s) is deliberately generous.
      *
-     * @var int
-     */
-    private const STALE_SYNC_SECONDS = 600;
-
-    /**
-     * Whether a UTC timestamp (as stored by this plugin — see Fix D2) is
-     * older than {@see self::STALE_SYNC_SECONDS}.
-     *
-     * @param string|null $timestamp
+     * @param SyncRun $run
      * @return bool
      */
-    private function _isStale(?string $timestamp): bool
+    private function _isRunStale(SyncRun $run): bool
     {
-        if ($timestamp === null || $timestamp === '') {
+        if ($run->heartbeat === null || $run->heartbeat === '') {
             return false;
         }
 
         try {
-            $updated = new \DateTime($timestamp, new \DateTimeZone('UTC'));
+            $updated = new \DateTime($run->heartbeat, new \DateTimeZone('UTC'));
         } catch (\Throwable $e) {
             return false;
         }
 
         $ageSeconds = (new \DateTime('now', new \DateTimeZone('UTC')))->getTimestamp() - $updated->getTimestamp();
 
-        return $ageSeconds >= self::STALE_SYNC_SECONDS;
+        return $ageSeconds >= SyncQueueConfig::staleAfter();
     }
 
     /**
-     * Best-effort check for a queued/reserved SyncJob row, used as an extra
-     * confidence signal before Fix A2 flips a stale 'pending' run to
-     * 'errors'. Only the default DB-backed queue driver is cheaply
-     * queryable this way — any other driver (Redis, SQS, …), or any query
-     * failure (e.g. a `LIKE` on a binary column some DB engines reject), is
-     * treated as "can't tell" and falls through to `false`, so this is
-     * never a hard requirement, only a booster.
+     * Human-readable progress label for a non-terminal run, driven by
+     * `phase`/`step` and (for `importing`) the row counts — what
+     * `sync.twig`'s progress bar renders. Terminal runs pass `null`
+     * (`progressLabel` in the status JSON) — the frontend redirects/shows an
+     * error instead of continuing to show progress text.
      *
-     * @return bool
+     * @param SyncRun $run
+     * @param array $counts {@see SyncRunService::counts()}'s return shape.
+     * @return string
      */
-    private function _hasActiveSyncJob(): bool
+    private function _progressLabel(SyncRun $run, array $counts): string
     {
-        if (!Craft::$app->getQueue() instanceof \craft\queue\Queue) {
-            return false;
-        }
-
-        try {
-            return (new Query())
-                ->from('{{%queue}}')
-                ->where(['fail' => false])
-                ->andWhere(['like', 'job', SyncJob::class])
-                ->exists();
-        } catch (\Throwable $e) {
-            return false;
-        }
-    }
-
-    /**
-     * Whether a sync is already in flight — a non-stale 'pending' row in
-     * contentiq_import_runs. Used by actionRunSync() (Fix C) to refuse a
-     * second concurrent sync. Deliberately relies on the run row alone
-     * (not {@see self::_hasActiveSyncJob()}) — a false positive here just
-     * makes the user wait and retry, whereas a false negative would let two
-     * syncs clobber each other's lock selections, which is the bug this
-     * guards against.
-     *
-     * @return bool
-     */
-    private function _hasInFlightSync(): bool
-    {
-        $pending = (new Query())
-            ->select(['dateCreated', 'dateUpdated'])
-            ->from('{{%contentiq_import_runs}}')
-            ->where(['status' => 'pending', 'type' => 'sync'])
-            ->orderBy(['dateCreated' => SORT_DESC])
-            ->one();
-
-        if ($pending === null) {
-            return false;
-        }
-
-        return !$this->_isStale($pending['dateUpdated'] ?: $pending['dateCreated']);
-    }
-
-    /**
-     * Marks a run 'errors' with a given message — used by the status
-     * poller's staleness fallback (Fix A2). Mirrors SyncJob::_failRun()'s
-     * result shape and globals-relock safety net: a worker killed mid-run
-     * (rather than a clean throw, which SyncJob's own try/catch — Fix A1 —
-     * already handles) could have left globals consent unlocked.
-     *
-     * @param int    $runId
-     * @param string $message
-     * @return void
-     */
-    private function _markRunErrored(int $runId, string $message): void
-    {
-        $db = Craft::$app->getDb();
-
-        $db->createCommand()->update(
-            '{{%contentiq_import_runs}}',
-            [
-                'status'      => 'errors',
-                'result'      => Json::encode([['success' => false, 'slug' => '', 'error' => $message, 'warnings' => []]]),
-                'dateUpdated' => Db::prepareDateForDb(new \DateTime()),
-            ],
-            ['id' => $runId],
-        )->execute();
-
-        // Only touch an existing row — same guard as SyncJob::_failRun().
-        $exists = (new Query())->from('{{%contentiq_globals_sync}}')->exists();
-
-        if ($exists) {
-            $db->createCommand()
-                ->update('{{%contentiq_globals_sync}}', ['locked' => true])
-                ->execute();
-        }
+        return match ($run->phase) {
+            SyncRun::PHASE_STAGING => 'Preparing…',
+            SyncRun::PHASE_IMPORTING => $counts['total'] > 0
+                ? 'Importing page ' . min($counts['total'] - $counts['pending'] + 1, $counts['total']) . ' of ' . $counts['total']
+                : 'Importing…',
+            SyncRun::PHASE_POSTPASS => 'Resolving links…',
+            SyncRun::PHASE_FINALISING => match ($run->step) {
+                SyncRun::STEP_ACK     => 'Acknowledging imported pages…',
+                SyncRun::STEP_GLOBALS => 'Importing globals…',
+                SyncRun::STEP_LOCK    => 'Locking synced entries…',
+                default                => 'Finalising…',
+            },
+            default => 'Working…',
+        };
     }
 
     /**

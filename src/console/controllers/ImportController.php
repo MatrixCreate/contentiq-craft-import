@@ -161,6 +161,14 @@ class ImportController extends Controller
     {
         App::maxPowerCaptain();
 
+        // Deprecated in favour of the batched sync pipeline's own console
+        // entry point (§3.8) — this action still runs the old, unbatched,
+        // non-resumable single-process import for one more release.
+        $this->stdout(
+            "[DEPRECATED] contentiq-importer/import will be removed in a future release — use `craft contentiq-importer/sync/run --file --wait` instead.\n",
+            Console::FG_YELLOW,
+        );
+
         if ($this->file === null) {
             $this->failure('`--file` is required. Usage: craft contentiq/import --file=export.json');
 
