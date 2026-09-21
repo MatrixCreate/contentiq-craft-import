@@ -63,6 +63,15 @@ final class LinkRewriter
      * opaque text throughout and only a copy is ever passed to
      * `parse_url()` — nothing is decoded or re-encoded.
      *
+     * A query string and/or fragment on the href is carried OUTSIDE the
+     * `{entry:ID@SITE:url||fallback}` tag rather than baked into the
+     * fallback text: Craft only renders the `||fallback` half when the
+     * entry fails to resolve, so on the normal (resolves-fine) path
+     * anything left inside it is silently dropped. `/about/team?utm=1#staff`
+     * becomes `{entry:42@1:url||/about/team}?utm=1#staff` — the fallback is
+     * the bare path, the suffix always renders regardless of whether the
+     * entry resolves.
+     *
      * @param string   $html    Stored CKEditor HTML.
      * @param callable $resolve fn(string $uri): ?int — $uri is the href's
      *                          path with the leading '/' stripped ('' for
@@ -108,7 +117,8 @@ final class LinkRewriter
                         }
 
                         // The `||` fallback text has no escape for a literal
-                        // '}' — an href containing one can't be safely
+                        // '}' — an href containing one, anywhere (path,
+                        // query string, or fragment), can't be safely
                         // rewritten, so it's left untouched rather than
                         // producing a truncated reference tag.
                         if (strpos($href, '}') !== false) {
@@ -117,7 +127,14 @@ final class LinkRewriter
 
                         $resolved++;
 
-                        return "href={$quote}{entry:{$id}@{$siteId}:url||{$href}}{$quote}";
+                        // Query string and fragment ride outside the tag —
+                        // see the method docblock for why.
+                        $query    = parse_url($href, PHP_URL_QUERY);
+                        $fragment = parse_url($href, PHP_URL_FRAGMENT);
+                        $suffix   = ($query !== null ? '?' . $query : '')
+                            . ($fragment !== null ? '#' . $fragment : '');
+
+                        return "href={$quote}{entry:{$id}@{$siteId}:url||{$path}}{$suffix}{$quote}";
                     },
                     $tagMatch[0]
                 );
@@ -135,6 +152,15 @@ final class LinkRewriter
     /**
      * Upgrades a serialized Hyper `Url` link whose value is a root-relative
      * path to an `Entry` link.
+     *
+     * A query string and/or fragment on the `Url` link's value is carried
+     * over as the Entry link's `urlSuffix` (Hyper's `Link::getUrl()`
+     * composes `getUrlPrefix() . getLinkUrl() . getUrlSuffix()`, and
+     * `urlSuffix` is a public attribute on every link type including
+     * `Entry`). The value's own suffix always wins when non-empty; when the
+     * value has none, whatever `urlSuffix` was already on the incoming
+     * serialized link is preserved verbatim — this keeps the no-suffix case
+     * byte-identical to before.
      *
      * @param array    $serialized          `Link::getSerializedValues()` shape:
      *                                       type, handle, linkValue, linkText,
@@ -181,17 +207,26 @@ final class LinkRewriter
             $entryLink[$key] = $value;
         }
 
+        // The value's own suffix (query/fragment) wins over whatever
+        // urlSuffix was already there; see the method docblock.
+        $suffix = self::_candidateSuffix($serialized);
+
+        if ($suffix !== '') {
+            $entryLink['urlSuffix'] = $suffix;
+        }
+
         return $entryLink;
     }
 
     /**
      * Whether a serialized Hyper link is a root-relative-path candidate —
-     * a `Url` link with no query/fragment — before it's resolved. Used by
-     * callers that want to raise an "unresolved" warning without
-     * duplicating {@see self::upgradeHyperLink()}'s own candidacy check.
+     * a `Url` link whose value is a root-relative path, any query string
+     * and/or fragment stripped off — before it's resolved. Used by callers
+     * that want to raise an "unresolved" warning without duplicating
+     * {@see self::upgradeHyperLink()}'s own candidacy check.
      *
      * @param array $serialized
-     * @return string|null The root-relative path, or null.
+     * @return string|null The bare root-relative path (no `?`/`#`), or null.
      */
     public static function hyperLinkPath(array $serialized): ?string
     {
@@ -204,7 +239,9 @@ final class LinkRewriter
     /**
      * Shared candidacy check behind {@see self::upgradeHyperLink()} and
      * {@see self::hyperLinkPath()}: a `Url`-typed link whose value is a
-     * root-relative path with no query string or fragment.
+     * root-relative path, optionally carrying a query string and/or
+     * fragment — those ride in {@see self::_candidateSuffix()} instead, so
+     * this always returns the bare path.
      *
      * @param array $serialized
      * @return string|null
@@ -215,21 +252,55 @@ final class LinkRewriter
             return null;
         }
 
+        $value = self::_linkValue($serialized);
+
+        if ($value === null || !self::isRootRelativeHref($value)) {
+            return null;
+        }
+
+        return parse_url($value, PHP_URL_PATH) ?? '';
+    }
+
+    /**
+     * The `?query`/`#fragment` suffix on a candidate link's value, or ''
+     * when it has neither. Same `parse_url()` idiom as
+     * {@see self::rewriteHtml()} — the value is treated as opaque text,
+     * nothing is decoded or re-encoded.
+     *
+     * @param array $serialized
+     * @return string
+     */
+    private static function _candidateSuffix(array $serialized): string
+    {
+        $value = self::_linkValue($serialized);
+
+        if ($value === null) {
+            return '';
+        }
+
+        $query    = parse_url($value, PHP_URL_QUERY);
+        $fragment = parse_url($value, PHP_URL_FRAGMENT);
+
+        return ($query !== null ? '?' . $query : '') . ($fragment !== null ? '#' . $fragment : '');
+    }
+
+    /**
+     * A serialized Hyper link's `linkValue` as a string — the value itself
+     * when it's already scalar, or its first scalar element when Hyper
+     * serialized it as an array.
+     *
+     * @param array $serialized
+     * @return string|null
+     */
+    private static function _linkValue(array $serialized): ?string
+    {
         $value = $serialized['linkValue'] ?? null;
 
         if (is_array($value)) {
             $value = self::_firstScalar($value);
         }
 
-        if (!is_string($value) || !self::isRootRelativeHref($value)) {
-            return null;
-        }
-
-        if (strpos($value, '?') !== false || strpos($value, '#') !== false) {
-            return null;
-        }
-
-        return $value;
+        return is_string($value) ? $value : null;
     }
 
     /**

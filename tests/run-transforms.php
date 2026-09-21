@@ -2260,10 +2260,31 @@ check(
 
 $queryFragment = LinkRewriter::rewriteHtml('<a href="/about/team?utm=1#staff">Team</a>', $resolve, $siteId);
 check(
-    'rewriteHtml(): query + fragment survive inside the fallback text',
-    '<a href="{entry:42@1:url||/about/team?utm=1#staff}">Team</a>',
+    'rewriteHtml(): query + fragment carried outside the reference tag, fallback is the bare path',
+    '<a href="{entry:42@1:url||/about/team}?utm=1#staff">Team</a>',
     $queryFragment['html']
 );
+
+$queryOnly = LinkRewriter::rewriteHtml('<a href="/about/team?utm=1">Team</a>', $resolve, $siteId);
+check(
+    'rewriteHtml(): query only carried outside the reference tag',
+    '<a href="{entry:42@1:url||/about/team}?utm=1">Team</a>',
+    $queryOnly['html']
+);
+
+$fragmentOnly = LinkRewriter::rewriteHtml('<a href="/about/team#staff">Team</a>', $resolve, $siteId);
+check(
+    'rewriteHtml(): fragment only carried outside the reference tag',
+    '<a href="{entry:42@1:url||/about/team}#staff">Team</a>',
+    $fragmentOnly['html']
+);
+
+// A literal '}' anywhere in the href — including inside the fragment —
+// can't be safely rewritten (no escape in the `||` fallback text), so the
+// whole <a> is left untouched, same as the existing bare-path guard.
+$braceInFragment = '<a href="/about/team#sta}ff">Team</a>';
+$braceInFragmentResult = LinkRewriter::rewriteHtml($braceInFragment, $resolve, $siteId);
+check('rewriteHtml(): "}" inside the fragment leaves the href untouched', $braceInFragment, $braceInFragmentResult['html']);
 
 $missing = LinkRewriter::rewriteHtml('<a href="/missing/page">Nope</a>', $resolve, $siteId);
 check('rewriteHtml(): unresolved href is left unchanged', '<a href="/missing/page">Nope</a>', $missing['html']);
@@ -2355,10 +2376,90 @@ check(
     )
 );
 check(
-    'upgradeHyperLink(): value with a query string — null',
-    null,
+    'upgradeHyperLink(): value with a query string — upgrades with urlSuffix',
+    [
+        'type'       => 'verbb\\hyper\\links\\Entry',
+        'handle'     => 'default-verbb-hyper-links-entry',
+        'linkValue'  => [42],
+        'linkSiteId' => 1,
+        'urlSuffix'  => '?x=1',
+    ],
     LinkRewriter::upgradeHyperLink(
         ['type' => LinkRewriter::URL_LINK_TYPE, 'linkValue' => '/about/team?x=1'],
+        $resolve,
+        'default-verbb-hyper-links-entry',
+        $siteId
+    )
+);
+check(
+    'upgradeHyperLink(): value with a fragment only — upgrades with urlSuffix',
+    [
+        'type'       => 'verbb\\hyper\\links\\Entry',
+        'handle'     => 'default-verbb-hyper-links-entry',
+        'linkValue'  => [42],
+        'linkSiteId' => 1,
+        'urlSuffix'  => '#tab02-hero',
+    ],
+    LinkRewriter::upgradeHyperLink(
+        ['type' => LinkRewriter::URL_LINK_TYPE, 'linkValue' => '/about/team#tab02-hero'],
+        $resolve,
+        'default-verbb-hyper-links-entry',
+        $siteId
+    )
+);
+check(
+    'upgradeHyperLink(): value with query and fragment — urlSuffix carries both in order',
+    [
+        'type'       => 'verbb\\hyper\\links\\Entry',
+        'handle'     => 'default-verbb-hyper-links-entry',
+        'linkValue'  => [42],
+        'linkSiteId' => 1,
+        'urlSuffix'  => '?x=1#tab02-hero',
+    ],
+    LinkRewriter::upgradeHyperLink(
+        ['type' => LinkRewriter::URL_LINK_TYPE, 'linkValue' => '/about/team?x=1#tab02-hero'],
+        $resolve,
+        'default-verbb-hyper-links-entry',
+        $siteId
+    )
+);
+check(
+    'upgradeHyperLink(): value with no suffix preserves an existing urlSuffix verbatim',
+    [
+        'type'       => 'verbb\\hyper\\links\\Entry',
+        'handle'     => 'default-verbb-hyper-links-entry',
+        'linkValue'  => [42],
+        'linkSiteId' => 1,
+        'urlSuffix'  => '#legacy',
+    ],
+    LinkRewriter::upgradeHyperLink(
+        ['type' => LinkRewriter::URL_LINK_TYPE, 'linkValue' => '/about/team', 'urlSuffix' => '#legacy'],
+        $resolve,
+        'default-verbb-hyper-links-entry',
+        $siteId
+    )
+);
+check(
+    'upgradeHyperLink(): value\'s own suffix wins over an existing urlSuffix',
+    [
+        'type'       => 'verbb\\hyper\\links\\Entry',
+        'handle'     => 'default-verbb-hyper-links-entry',
+        'linkValue'  => [42],
+        'linkSiteId' => 1,
+        'urlSuffix'  => '#tab02-hero',
+    ],
+    LinkRewriter::upgradeHyperLink(
+        ['type' => LinkRewriter::URL_LINK_TYPE, 'linkValue' => '/about/team#tab02-hero', 'urlSuffix' => '#legacy'],
+        $resolve,
+        'default-verbb-hyper-links-entry',
+        $siteId
+    )
+);
+check(
+    'upgradeHyperLink(): protocol-relative value with a fragment — still refused',
+    null,
+    LinkRewriter::upgradeHyperLink(
+        ['type' => LinkRewriter::URL_LINK_TYPE, 'linkValue' => '//evil.com/x#y'],
         $resolve,
         'default-verbb-hyper-links-entry',
         $siteId
@@ -2406,9 +2507,19 @@ check(
     LinkRewriter::hyperLinkPath(['type' => LinkRewriter::URL_LINK_TYPE, 'linkValue' => 'https://x/y'])
 );
 check(
-    'hyperLinkPath(): value with a query string — null',
-    null,
+    'hyperLinkPath(): value with a query string — returns the bare path',
+    '/about/team',
     LinkRewriter::hyperLinkPath(['type' => LinkRewriter::URL_LINK_TYPE, 'linkValue' => '/about/team?x=1'])
+);
+check(
+    'hyperLinkPath(): value with query and fragment — returns the bare path',
+    '/about/team',
+    LinkRewriter::hyperLinkPath(['type' => LinkRewriter::URL_LINK_TYPE, 'linkValue' => '/about/team?x=1#tab02-hero'])
+);
+check(
+    'hyperLinkPath(): protocol-relative value with a fragment — null',
+    null,
+    LinkRewriter::hyperLinkPath(['type' => LinkRewriter::URL_LINK_TYPE, 'linkValue' => '//evil.com/x#y'])
 );
 
 // -----------------------------------------------------------------------------
