@@ -10,6 +10,7 @@ use craft\fields\PlainText;
 use craft\helpers\App;
 use craft\helpers\Db;
 use craft\helpers\Json;
+use craft\models\Section;
 use craft\web\Controller;
 use craft\web\UploadedFile;
 use craft\helpers\StringHelper;
@@ -18,6 +19,7 @@ use GuzzleHttp\RequestOptions;
 use matrixcreate\contentiqimporter\ContentIQImporter;
 use matrixcreate\contentiqimporter\helpers\TempFileSafety;
 use matrixcreate\contentiqimporter\jobs\SyncJob;
+use Psr\Http\Message\ResponseInterface;
 use yii\web\BadRequestHttpException;
 use yii\web\Response;
 
@@ -1150,8 +1152,13 @@ class CpController extends Controller
      * Syncs a single entry from the ContentIQ API.
      *
      * Called via AJAX from the ContentIQ sidebar widget on the entry edit screen.
-     * Fetches the single-page export for the entry's slug, runs it through
-     * ImportService, and upserts a row in contentiq_entry_syncs on success.
+     * Resolves the ContentIQ locator for this entry (see the locator
+     * resolution block below — slugMap override, stored ContentIQ id,
+     * homepage Single, or the Craft slug), fetches that page's export, runs
+     * it through ImportService, and upserts a row in contentiq_entry_syncs
+     * on success. A 404 falls back to the plain Craft slug when the locator
+     * came from a stored id or the homepage guess, and produces a message
+     * that explains why and what to do about it — see _readNotFoundReason().
      *
      * Request body: { elementId: int, slug: string }
      * Response:     { success: bool, syncedAt?: string, error?: string }
@@ -1186,8 +1193,11 @@ class CpController extends Controller
         // checked against that entry directly rather than re-resolving it from
         // the fetched page data. A missing sync row is treated as locked (same
         // default as the Sync UI / SyncJob).
+        // Select contentiq_page_id alongside locked so locator step 2 below
+        // (a previously synced ContentIQ id) reuses this one query instead of
+        // a second round trip to the same table.
         $lockRow = (new Query())
-            ->select(['locked'])
+            ->select(['locked', 'contentiq_page_id'])
             ->from('{{%contentiq_entry_syncs}}')
             ->where(['element_id' => $elementId])
             ->one();
@@ -1200,8 +1210,10 @@ class CpController extends Controller
             ]);
         }
 
-        // Look up entry title for user-facing messages.
-        $entryTitle = Entry::find()->id($elementId)->status(null)->select(['title'])->scalar() ?: $slug;
+        // Loaded once: the title below is a user-facing label, and locator
+        // step 3 (homepage detection) needs the same entry's section.
+        $entry      = Entry::find()->id($elementId)->status(null)->one();
+        $entryTitle = $entry !== null ? ($entry->title ?: $slug) : $slug;
 
         $settings = ContentIQImporter::$plugin->getSettings();
 
@@ -1212,40 +1224,113 @@ class CpController extends Controller
             ]);
         }
 
-        // Map Craft slug to ContentIQ slug if configured.
-        $config       = Craft::$app->config->getConfigFromFile('contentiq');
-        $slugMap      = $config['slugMap'] ?? [];
-        $contentiqSlug = $slugMap[$slug] ?? $slug;
+        $config  = Craft::$app->config->getConfigFromFile('contentiq');
+        $slugMap = $config['slugMap'] ?? [];
 
+        // Resolve the ContentIQ locator — first hit wins:
+        //   1. slugMap[$slug]                    — explicit override, always wins.
+        //   2. contentiq_entry_syncs.contentiq_page_id for this entry — the
+        //      numeric id a previous sync (batch or widget) already stored.
+        //   3. The entry is the homepage Single  — '__home__'.
+        //   4. Otherwise                         — the Craft slug.
+        // $locatorSource feeds the 404 messages below so they can say why the
+        // lookup failed and what to do about it.
+        if (isset($slugMap[$slug])) {
+            $locator       = $slugMap[$slug];
+            $locatorSource = 'slugMap';
+        } elseif (!empty($lockRow['contentiq_page_id'])) {
+            $locator       = (string)$lockRow['contentiq_page_id'];
+            $locatorSource = 'stored id';
+        } elseif ($this->_isHomepageEntry($entry, $config)) {
+            $locator       = '__home__';
+            $locatorSource = 'homepage';
+        } else {
+            $locator       = $slug;
+            $locatorSource = 'slug';
+        }
+
+        $apiKey   = App::parseEnv($settings->apiKey);
         $url      = rtrim(App::parseEnv($settings->contentiqUrl), '/');
-        $endpoint = "{$url}/api/v1/pages/{$contentiqSlug}/export";
+        $endpoint = "{$url}/api/v1/pages/{$locator}/export";
 
         try {
-            $response = Craft::createGuzzleClient()->request('GET', $endpoint, [
-                RequestOptions::HEADERS => [
-                    'Accept'        => 'application/json',
-                    'Authorization' => 'Bearer ' . App::parseEnv($settings->apiKey),
-                ],
-                RequestOptions::TIMEOUT         => 30,
-                RequestOptions::CONNECT_TIMEOUT => 10,
-            ]);
-
-            $body = $response->getBody()->getContents();
-            $data = json_decode($body, true);
-
-            if (json_last_error() !== JSON_ERROR_NONE || !is_array($data)) {
-                return $this->asJson(['success' => false, 'error' => 'ContentiQ returned invalid JSON.']);
-            }
+            $response = $this->_fetchExport($endpoint, $apiKey);
         } catch (GuzzleException $e) {
             $status = method_exists($e, 'getResponse') && $e->getResponse() !== null
                 ? $e->getResponse()->getStatusCode()
                 : 0;
 
-            $message = $status === 404
-                ? "'{$entryTitle}' is not ready for export in ContentiQ."
-                : 'API request failed: ' . $e->getMessage();
+            if ($status !== 404) {
+                return $this->asJson(['success' => false, 'error' => 'API request failed: ' . $e->getMessage()]);
+            }
 
-            return $this->asJson(['success' => false, 'error' => $message]);
+            [$reason, $reasonStatus] = $this->_readNotFoundReason($e);
+
+            if ($reason === 'not_ready') {
+                return $this->asJson([
+                    'success' => false,
+                    'error'   => "'{$entryTitle}' is not ready for export in ContentiQ (status: {$reasonStatus}). Set it to Ready for Export there first.",
+                ]);
+            }
+
+            // $reason === 'unknown_page', or absent (a ContentiQ deployment
+            // that predates the {reason} body): a locator resolved from a
+            // stored id or the homepage guess can be stale — the stored id
+            // from a page that was since removed, or a __home__ guess a
+            // pre-change ContentiQ doesn't understand. Retry once against the
+            // plain Craft slug before giving up. A locator that was already
+            // the slug has nothing left to fall back to.
+            $response = null;
+
+            if (($locatorSource === 'stored id' || $locatorSource === 'homepage') && $locator !== $slug) {
+                try {
+                    $response = $this->_fetchExport("{$url}/api/v1/pages/{$slug}/export", $apiKey);
+                } catch (GuzzleException $retryException) {
+                    $retryStatus = method_exists($retryException, 'getResponse') && $retryException->getResponse() !== null
+                        ? $retryException->getResponse()->getStatusCode()
+                        : 0;
+
+                    // Only a second 404 means "no such page". Anything else
+                    // (timeout, 5xx, 401) is an infrastructure failure and
+                    // must be reported as such, exactly like the primary call.
+                    if ($retryStatus !== 404) {
+                        return $this->asJson([
+                            'success' => false,
+                            'error'   => 'API request failed: ' . $retryException->getMessage(),
+                        ]);
+                    }
+
+                    // A not_ready reason on the retry is more specific than
+                    // "no page" — surface it the same way the primary call does.
+                    [$retryReason, $retryReasonStatus] = $this->_readNotFoundReason($retryException);
+
+                    if ($retryReason === 'not_ready') {
+                        return $this->asJson([
+                            'success' => false,
+                            'error'   => "'{$entryTitle}' is not ready for export in ContentiQ (status: {$retryReasonStatus}). Set it to Ready for Export there first.",
+                        ]);
+                    }
+
+                    $response = null;
+                }
+            }
+
+            if ($response === null) {
+                return $this->asJson([
+                    'success' => false,
+                    'error'   => "ContentiQ has no page for '{$entryTitle}' (looked up by {$locatorSource}: '{$locator}'). "
+                        . 'If the ContentiQ slug differs from the Craft slug, add a slugMap entry to config/contentiq.php '
+                        . "(Craft slug → ContentiQ slug), or run a full Sync from the ContentiQ Sync screen once so this "
+                        . "entry's ContentiQ id is stored.",
+                ]);
+            }
+        }
+
+        $body = $response->getBody()->getContents();
+        $data = json_decode($body, true);
+
+        if (json_last_error() !== JSON_ERROR_NONE || !is_array($data)) {
+            return $this->asJson(['success' => false, 'error' => 'ContentiQ returned invalid JSON.']);
         }
 
         // Run the import pipeline (no dry-run).
@@ -1452,6 +1537,97 @@ class CpController extends Controller
 
     // Private Methods
     // =========================================================================
+
+    /**
+     * Performs the ContentIQ export GET for one locator.
+     *
+     * Factored out of actionWidgetSync() purely so its 404 retry-on-slug
+     * branch can reissue the same request against a different locator
+     * without duplicating the Guzzle call.
+     *
+     * @param string $endpoint Full export URL (…/api/v1/pages/{locator}/export).
+     * @param string $apiKey   Bearer token, already App::parseEnv()'d.
+     * @return ResponseInterface
+     * @throws GuzzleException
+     */
+    private function _fetchExport(string $endpoint, string $apiKey): ResponseInterface
+    {
+        return Craft::createGuzzleClient()->request('GET', $endpoint, [
+            RequestOptions::HEADERS => [
+                'Accept'        => 'application/json',
+                'Authorization' => 'Bearer ' . $apiKey,
+            ],
+            RequestOptions::TIMEOUT         => 30,
+            RequestOptions::CONNECT_TIMEOUT => 10,
+        ]);
+    }
+
+    /**
+     * Reads the {reason, status} pair from a 404 export response body.
+     *
+     * ContentIQ's export 404s carry `reason` ('unknown_page' | 'not_ready')
+     * and, for 'not_ready', the page's current `status`. A body that isn't
+     * valid JSON, or carries no 'reason' key (a ContentIQ deployment that
+     * predates this contract), yields [null, null] — actionWidgetSync()
+     * treats that the same as 'unknown_page'.
+     *
+     * @param GuzzleException $e
+     * @return array{0: ?string, 1: ?string}
+     */
+    private function _readNotFoundReason(GuzzleException $e): array
+    {
+        if (!method_exists($e, 'getResponse') || $e->getResponse() === null) {
+            return [null, null];
+        }
+
+        $body = $e->getResponse()->getBody()->getContents();
+        $data = json_decode($body, true);
+
+        if (json_last_error() !== JSON_ERROR_NONE || !is_array($data)) {
+            return [null, null];
+        }
+
+        return [$data['reason'] ?? null, $data['status'] ?? null];
+    }
+
+    /**
+     * Whether $entry is the project's homepage Single.
+     *
+     * Used by actionWidgetSync()'s locator inference (step 3: '__home__').
+     * Detected either of two ways: the entry's section handle matches the
+     * configured homepage section, or the section is a Single whose
+     * uriFormat for the entry's site is Craft's homepage marker '__home__'.
+     *
+     * @param Entry|null $entry  Loaded once by the caller; null short-circuits to false.
+     * @param array      $config Project config (config/contentiq.php), unmerged with defaults.
+     * @return bool
+     */
+    private function _isHomepageEntry(?Entry $entry, array $config): bool
+    {
+        if ($entry === null) {
+            return false;
+        }
+
+        $section = $entry->getSection();
+
+        if ($section === null) {
+            return false;
+        }
+
+        $homepageSection = $config['homepageSection'] ?? 'homepage';
+
+        if ($section->handle === $homepageSection) {
+            return true;
+        }
+
+        if ($section->type !== Section::TYPE_SINGLE) {
+            return false;
+        }
+
+        $siteSettings = $section->getSiteSettings()[$entry->siteId] ?? null;
+
+        return $siteSettings !== null && (string)$siteSettings->uriFormat === '__home__';
+    }
 
     /**
      * Builds the cascade data for the Mappings screen: every section with its

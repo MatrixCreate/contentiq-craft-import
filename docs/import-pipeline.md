@@ -114,7 +114,7 @@ Resolution order:
 
 An empty/whitespace slug never drives steps 1 or 3 (Craft treats a falsy `->slug()` filter as "no filter," which would match the section's first entry rather than "no match") — those steps return `null` instead. Step 0 and step 2 don't depend on slug, so they're unaffected.
 
-`findExistingEntry()` applies no slug translation — `slugMap` (see [integration.md](integration.md)) only affects the sidebar widget's *outbound* API call, never this Craft-side lookup.
+`findExistingEntry()` applies no slug translation — `slugMap` (see [integration.md](integration.md)) is only an optional override for the sidebar widget's *outbound* API call (which otherwise resolves its own locator — stored ContentIQ id, then homepage `__home__`, then the Craft slug — see [cp-and-widget.md](cp-and-widget.md)), never this Craft-side lookup.
 
 ## Homepage specifics
 

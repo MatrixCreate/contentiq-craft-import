@@ -163,11 +163,19 @@ type="checkbox">` behind a `<label>` styled to look like a lightswitch
   is locked." per entry, which is what drives the sync report's "Locked"
   badge (see above).
 
-**Slug mapping.** The widget's Sync button posts the entry's Craft `slug`;
-`actionWidgetSync()` translates it to the ContentiQ slug via
-`config/contentiq.php`'s `slugMap` (e.g. `homepage => home`) before calling
-`GET /api/v1/pages/{slug}/export` — needed whenever the Craft and ContentiQ
-slugs genuinely differ for the same page.
+**Locator resolution.** The widget's Sync button posts the entry's Craft
+`slug`; `actionWidgetSync()` resolves the ContentiQ locator for
+`GET /api/v1/pages/{locator}/export` itself — an explicit
+`config/contentiq.php` `slugMap` entry always wins, then this entry's stored
+`contentiq_entry_syncs.contentiq_page_id` from a previous sync, then
+ContentiQ's `__home__` locator if the entry is the homepage Single,
+otherwise the Craft slug. A 404 retries once against the plain Craft slug
+when the locator came from a stored id or the homepage guess, then reports
+an error naming how the page was looked up and what to fix (a `slugMap`
+entry for a genuinely different slug, or a full Sync so the entry's
+ContentiQ id gets stored) — distinct from the "not ready for export"
+message ContentiQ returns when the page exists but hasn't been marked
+Ready. See [integration.md](integration.md) for the `slugMap` config key.
 
 **Block notes.** Collected during import from each block's top-level
 `notes` key (`ImportService`, both the single-page and batch/collection
