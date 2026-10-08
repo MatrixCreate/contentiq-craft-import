@@ -49,8 +49,10 @@
  * Developer notes:
  *   'notes' is a block-level key (not inside 'fields') emitted by ContentIQ when the CSM
  *   adds a developer note to a block. It is read directly from $block['notes'] in
- *   ImportService and written to the contentiqNotes field on the outer entry. It is NOT
- *   present in outerFields here because MatrixBuilder reads from $block['fields'] only.
+ *   ImportService and written to the contentiqNotes field on the outer entry, with the
+ *   page-level document.notes PREPENDED (trim(page) . "\n\n" . block; either alone when the
+ *   other is empty; field omitted when both are). It is NOT present in outerFields here
+ *   because MatrixBuilder reads from $block['fields'] only.
  *
  * Blocks NOT in this mapping (handled or skipped elsewhere):
  *   hero          — imported separately into entry.hero Matrix field (not contentBlocks)

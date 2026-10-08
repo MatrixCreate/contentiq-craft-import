@@ -2,6 +2,13 @@
 
 Capped rolling log — older entries roll off verbatim to `docs/_archive/`. Durable knowledge belongs in `docs/`, not accumulated here.
 
+## Page notes prepended + hero carousel mode (2026-10-08)
+
+- `document.notes` is prepended to every outer block entry's `contentiqNotes` (`MatrixBuilder::build()` `$pageNotes`, via `ImportService::_pageNotes()`); no change when absent.
+- Hero `media_mode` (`singleImage`|`carousel`) -> nested `heroMediaMode`; carousel items import via `importFromField()` into `heroCarouselDesktopImages`/`heroCarouselMobileImages` (handles overridable: `heroMediaModeField`, `heroCarouselDesktopField`, `heroCarouselMobileField`).
+- Missing handles warn once and fall back to single image; flat shape warns. `importPage()` now passes the entry type's layout to `_buildHeroField()` so the probe works there.
+- Docs: `docs/block-mapping.md` Hero + Mental model; README config example. Uncommitted, untagged.
+
 ## Sync progress counts selected pages, not staged rows (2026-10-08)
 
 Ben's screenshot: one of two pages selected, bar read "Importing page 2 of 2". `CpController::_progressLabel()` and the bar's percentage both derived from `SyncRunService::counts()` — raw `contentiq_sync_pages` row counts — but the run stages a row for every exported page and `ImportPagesJob` only marks locked/deselected rows `skipped_*` as it reaches each one, so the unselected page counted until the job walked past it.

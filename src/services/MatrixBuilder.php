@@ -157,6 +157,9 @@ class MatrixBuilder extends Component
      *                                   this owner entry (from contentiq_block_syncs). Empty unless the
      *                                   preserveBlockIdentity config flag is on AND the owner entry
      *                                   already exists — see ImportService::importPage().
+     * @param string  $pageNotes         The page-level `document.notes` text (already a string; '' when absent).
+     *                                   PREPENDED to every outer block entry's `contentiqNotes` — no site has a
+     *                                   page-level notes field, so the page note rides on each block entry.
      * @return array{
      *   matrixData: array<string, array>,
      *   blockReport: array<int, array{type: string, fields: string[], skipped: bool}>,
@@ -167,7 +170,7 @@ class MatrixBuilder extends Component
      *   pendingNestedButtons: array<string|int, array{richText?: array, textBlocks?: array<string, array>}>
      * }
      */
-    public function build(array $blocks, bool $dryRun = false, string $hostPageSlug = '', array $existingBlockMap = []): array
+    public function build(array $blocks, bool $dryRun = false, string $hostPageSlug = '', array $existingBlockMap = [], string $pageNotes = ''): array
     {
         $matrixData           = [];
         $blockReport          = [];
@@ -250,12 +253,14 @@ class MatrixBuilder extends Component
 
             $allFields = array_merge($outerFields, $innerMatrixData);
 
-            // Populate contentiqNotes from the block-level notes key if present.
+            // Populate contentiqNotes from the page-level notes (prepended) and the block-level notes key.
             // For grouped blocks, combine notes from all blocks in the group.
             $notesSources = isset($item['_groupedBlocks'])
                 ? array_column($item['_groupedBlocks'], 'notes')
                 : [$item['notes'] ?? ''];
             $notes = implode("\n\n", array_filter(array_map('trim', $notesSources)));
+            // Page-level notes lead; byte-identical to the block-only output when empty.
+            $notes = implode("\n\n", array_filter([trim($pageNotes), $notes], static fn(string $n): bool => $n !== ''));
             if ($notes !== '') {
                 $allFields['contentiqNotes'] = $notes;
             }

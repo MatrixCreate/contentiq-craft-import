@@ -37,6 +37,10 @@ return [
                                              // is also true. See docs/assets.md.
     'matrixField'         => 'contentBlocks',
     'seoField'            => 'seo',
+    // Hero carousel handles (nested inside the 'hero' ContentBlock) — only if your fork named them differently:
+    // 'heroMediaModeField'       => 'heroMediaMode',
+    // 'heroCarouselDesktopField' => 'heroCarouselDesktopImages',
+    // 'heroCarouselMobileField'  => 'heroCarouselMobileImages',
     'postDate'            => ['pages' => true, 'collections' => true], // document.original_publication_date -> Craft postDate
     'redirects'           => ['enabled' => true, 'httpCode' => 301],   // document.legacy_url -> Retour static redirects (requires nystudio107/craft-retour)
 ];
@@ -66,7 +70,7 @@ Each entry edit screen shows a **ContentiQ** sidebar widget with:
 - **Sync** — pulls and re-imports just this entry from the API
 - **Lock** — a lightswitch that stops this entry being overwritten by a sync (a never-synced entry is locked by default)
 - **Synced at** — the last sync time, with a **Reload** link that appears after a fresh sync (the entry's fields aren't re-rendered live)
-- **Notes** — developer notes attached to content blocks in ContentiQ
+- **Notes** — developer notes attached to content blocks in ContentiQ (the page-level note is prepended to each block's note)
 
 See [docs/cp-and-widget.md](docs/cp-and-widget.md#entry-sidebar-widget) for the full behaviour.
 

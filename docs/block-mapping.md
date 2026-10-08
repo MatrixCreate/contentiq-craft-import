@@ -32,6 +32,14 @@ second, unrelated node shape — the raw ProseMirror `content` AST ContentiQ
 stores for collection children — is rendered by the same class through a
 parallel set of methods; see "NodesRenderer" below.
 
+**Notes → `contentiqNotes`.** A block's `notes` is written to `contentiqNotes`
+on its outer entry (grouped blocks' notes joined with `"\n\n"`). The page-level
+`document.notes` has no field of its own on any site's `pages` entry type, so
+it is PREPENDED to every outer block entry's `contentiqNotes`:
+`trim(page notes) . "\n\n" . block notes`, either alone when the other is
+empty, field omitted when both are. `ImportService::_pageNotes()` hands it to
+`MatrixBuilder::build()`'s `$pageNotes` param. Hero gets no notes field.
+
 ---
 
 ## The declarative mapping system
@@ -412,6 +420,33 @@ other content — an explicit default beats relying on Craft's own field
 default, consistent with the whole-page-replace sync model everywhere else
 in this plugin. A genuinely empty hero block skips it too, so
 `_buildHeroField()`'s "nothing to write" check still treats it as untouched.
+
+**Carousel (`fields.media_mode`).** ContentBlock shape only. Wire keys:
+`media_mode` (`singleImage`|`carousel`; whitelisted, absent/garbage ⇒
+`singleImage`, same semantics as `hero_style`), `carousel_images[]`,
+`carousel_mobile_images[]` (items shaped like `image`). Nested handles, probed
+on the `hero` ContentBlock's own layout exactly like `heroStyle` (null layout ⇒
+assume present): `heroMediaMode`, `heroCarouselDesktopImages`,
+`heroCarouselMobileImages` — overridable via config keys `heroMediaModeField`,
+`heroCarouselDesktopField`, `heroCarouselMobileField` (README config example).
+
+- `heroMediaMode` is written explicitly on every sync when the field exists.
+- Carousel mode: each item goes through `ImageImportService::importFromField()`
+  like `image` (so it is filed in the page's sitemap folder, deduped by key,
+  and counted/warned the same way); ids are written in payload order, nulls
+  skipped. `desktopImage`/`mobileImage` are left to the payload (empty shapes
+  ⇒ keys not written, same as `textOnly`). `hero_style = textOnly` imports no
+  carousel images whatever the mode.
+- Single-image mode: today's fields, plus any existing carousel field set to
+  `[]` so switching back clears stale picks.
+- If `heroMediaMode` or either carousel field is missing from the layout while
+  the payload says `carousel`: ONE page warning names the missing handle(s),
+  the carousel images are skipped (not promoted to `desktopImage`), and the
+  hero falls back to single-image mode (`heroMediaMode` written as
+  `singleImage` if it exists).
+- Flat (legacy) shape: no carousel support; `media_mode = carousel` warns.
+- Dry run follows the normal `importFromField($dryRun)` path — nothing extra.
+- Additive wire keys; no `schemaVersion` bump (as with `hero_style`).
 
 **Mobile image has no desktop fallback here.** `mobileImage` is set only
 when `fields.mobile_image` is present with a URL; if absent, the key simply

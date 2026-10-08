@@ -1038,6 +1038,185 @@ check(
 );
 
 // -----------------------------------------------------------------------------
+echo "\nImportService — hero carousel (media_mode)\n";
+
+// Recording ImageImportService double: every importFromField() call is logged
+// and returns a deterministic id; an item keyed 'bad' resolves to a null id.
+$carouselImages = new class {
+    public array $calls = [];
+    public function importFromField($item, $dryRun = false)
+    {
+        $this->calls[] = $item['key'] ?? '';
+        if (($item['key'] ?? '') === 'bad') {
+            return ['id' => null, 'filename' => '', 'reused' => false, 'warning' => 'bad image dropped'];
+        }
+        return ['id' => 500 + count($this->calls), 'filename' => $item['key'] ?? '', 'reused' => false, 'warning' => null];
+    }
+};
+$carouselPlugin = new class {
+    public $nodes;
+    public $images;
+    public $imports;
+};
+$carouselPlugin->nodes   = $fakePlugin->nodes;
+$carouselPlugin->images  = $carouselImages;
+$carouselPlugin->imports = $fakePlugin->imports;
+\matrixcreate\contentiqimporter\ContentIQImporter::$plugin = $carouselPlugin;
+
+$mkItem = static fn(string $k): array => ['key' => $k, 'url' => "https://example.com/{$k}.jpg", 'alt' => $k];
+
+$carouselInner = new \craft\models\FieldLayout([
+    'heroStyle'             => new class {},
+    'heroMediaMode'         => new class {},
+    'heroCarouselDesktopImages' => new class {},
+    'heroCarouselMobileImages'  => new class {},
+]);
+$carouselLayout = new \craft\models\FieldLayout(['hero' => new \craft\fields\ContentBlock($carouselInner)]);
+
+$carouselHero = [
+    'fields' => [
+        'heading'                => ['level' => 1, 'text' => 'Welcome'],
+        'hero_style'             => 'textImage',
+        'media_mode'             => 'carousel',
+        'image'                  => [],
+        'mobile_image'           => [],
+        'carousel_images'        => [$mkItem('d1'), $mkItem('bad'), $mkItem('d2')],
+        'carousel_mobile_images' => [$mkItem('m1')],
+    ],
+];
+
+$res = ['warnings' => []];
+$out = callPrivate($importService, '_buildHeroField', [$carouselHero, false, $carouselLayout, &$res]);
+$f   = $out['hero']['fields'] ?? [];
+check('carousel: heroMediaMode written as carousel', 'carousel', $f['heroMediaMode'] ?? null);
+check('carousel: desktop ids in payload order, null skipped', [501, 503], $f['heroCarouselDesktopImages'] ?? null);
+check('carousel: mobile ids', [504], $f['heroCarouselMobileImages'] ?? null);
+check('carousel: desktopImage/mobileImage not written (empty shapes)', [false, false], [array_key_exists('desktopImage', $f), array_key_exists('mobileImage', $f)]);
+check('carousel: item warning reaches the page report', ['bad image dropped'], $res['warnings']);
+
+// Config handle overrides.
+$overrideInner = new \craft\models\FieldLayout([
+    'mode' => new class {}, 'deskPics' => new class {}, 'mobPics' => new class {},
+]);
+$overrideLayout = new \craft\models\FieldLayout(['hero' => new \craft\fields\ContentBlock($overrideInner)]);
+$carouselImages->calls = [];
+$res = ['warnings' => []];
+$out = callPrivate($importService, '_buildHeroField', [$carouselHero, false, $overrideLayout, &$res, [
+    'heroMediaModeField' => 'mode', 'heroCarouselDesktopField' => 'deskPics', 'heroCarouselMobileField' => 'mobPics',
+]]);
+check('config override: handles used', ['carousel', [501, 503], [504]], [
+    $out['hero']['fields']['mode'] ?? null, $out['hero']['fields']['deskPics'] ?? null, $out['hero']['fields']['mobPics'] ?? null,
+]);
+check('config override: only the item warning (no missing-field warning)', ['bad image dropped'], $res['warnings']);
+
+// singleImage: today's fields + empty carousel arrays, mode written.
+$carouselImages->calls = [];
+$singleHero = $carouselHero;
+$singleHero['fields']['media_mode']             = 'singleImage';
+$singleHero['fields']['image']                  = $mkItem('hero');
+$singleHero['fields']['carousel_images']        = [];
+$singleHero['fields']['carousel_mobile_images'] = [];
+$f = callPrivate($importService, '_buildHeroField', [$singleHero, false, $carouselLayout])['hero']['fields'] ?? [];
+check('singleImage: heroMediaMode singleImage', 'singleImage', $f['heroMediaMode'] ?? null);
+check('singleImage: desktopImage as today', [501], $f['desktopImage'] ?? null);
+check('singleImage: carousel arrays cleared', [[], []], [$f['heroCarouselDesktopImages'] ?? null, $f['heroCarouselMobileImages'] ?? null]);
+
+// Absent / garbage media_mode → singleImage, carousel items ignored.
+$carouselImages->calls = [];
+$absentHero = $singleHero;
+unset($absentHero['fields']['media_mode']);
+check('absent media_mode → singleImage', 'singleImage', callPrivate($importService, '_buildHeroField', [$absentHero, false, $carouselLayout])['hero']['fields']['heroMediaMode'] ?? null);
+$garbageHero = $singleHero;
+$garbageHero['fields']['media_mode'] = 'bananas';
+$garbageHero['fields']['carousel_images'] = [$mkItem('x1')];
+$carouselImages->calls = [];
+$f = callPrivate($importService, '_buildHeroField', [$garbageHero, false, $carouselLayout])['hero']['fields'] ?? [];
+check('garbage media_mode → singleImage', 'singleImage', $f['heroMediaMode'] ?? null);
+check('garbage media_mode: carousel items not imported, array []', [['hero'], []], [$carouselImages->calls, $f['heroCarouselDesktopImages'] ?? null]);
+
+// Missing field → one warning naming the handles, fallback, no carousel imports.
+$partialInner = new \craft\models\FieldLayout([
+    'heroStyle' => new class {}, 'heroMediaMode' => new class {}, 'heroCarouselDesktopImages' => new class {},
+]);
+$partialLayout = new \craft\models\FieldLayout(['hero' => new \craft\fields\ContentBlock($partialInner)]);
+$carouselImages->calls = [];
+$res = ['warnings' => []];
+$f = callPrivate($importService, '_buildHeroField', [$carouselHero, false, $partialLayout, &$res])['hero']['fields'] ?? [];
+check(
+    'missing carousel field: one warning naming the missing handle',
+    ["Hero media_mode is 'carousel' but the hero field is missing heroCarouselMobileImages; carousel images were skipped and the hero falls back to single-image mode."],
+    $res['warnings'],
+);
+check('missing carousel field: nothing imported', [], $carouselImages->calls);
+check('missing carousel field: mode falls back to singleImage, existing array cleared', ['singleImage', [], false], [
+    $f['heroMediaMode'] ?? null, $f['heroCarouselDesktopImages'] ?? null, array_key_exists('heroCarouselMobileImages', $f),
+]);
+
+$oldInner = new \craft\models\FieldLayout(['heroStyle' => new class {}]);
+$oldLayout = new \craft\models\FieldLayout(['hero' => new \craft\fields\ContentBlock($oldInner)]);
+$res = ['warnings' => []];
+$f = callPrivate($importService, '_buildHeroField', [$carouselHero, false, $oldLayout, &$res])['hero']['fields'] ?? [];
+check('old site: warns once naming all three handles', 1, count($res['warnings']));
+check('old site: warning lists every handle', true, str_contains($res['warnings'][0] ?? '', 'heroMediaMode, heroCarouselDesktopImages, heroCarouselMobileImages'));
+check('old site: no carousel handles written (no crash)', [false, false, false], [
+    array_key_exists('heroMediaMode', $f), array_key_exists('heroCarouselDesktopImages', $f), array_key_exists('heroCarouselMobileImages', $f),
+]);
+
+// textOnly + carousel → no images at all.
+$carouselImages->calls = [];
+$textOnlyHero = $carouselHero;
+$textOnlyHero['fields']['hero_style'] = 'textOnly';
+$f = callPrivate($importService, '_buildHeroField', [$textOnlyHero, false, $carouselLayout])['hero']['fields'] ?? [];
+check('textOnly + carousel: no images imported', [], $carouselImages->calls);
+check('textOnly + carousel: arrays empty', [[], []], [$f['heroCarouselDesktopImages'] ?? null, $f['heroCarouselMobileImages'] ?? null]);
+
+// Flat shape + carousel → warning, nothing imported, no carousel keys.
+$carouselImages->calls = [];
+$res = ['warnings' => []];
+$flatOut = callPrivate($importService, '_buildHeroField', [$carouselHero, false, $flatLayout, &$res]);
+check(
+    'flat shape + carousel: warns',
+    ["Hero media_mode is 'carousel' but this entry type uses the flat hero shape, which has no carousel support; carousel images were skipped."],
+    $res['warnings'],
+);
+check('flat shape + carousel: nothing imported', [], $carouselImages->calls);
+check('flat shape + carousel: no carousel keys', false, array_key_exists('heroMediaMode', $flatOut) || array_key_exists('heroCarouselDesktopImages', $flatOut));
+
+// Empty hero block with only media_mode stays untouched.
+check('media_mode alone does not make an empty hero non-empty', null, callPrivate($importService, '_buildHeroField', [['fields' => ['media_mode' => 'singleImage']], false, $carouselLayout]));
+
+\matrixcreate\contentiqimporter\ContentIQImporter::$plugin = $fakePlugin;
+
+// -----------------------------------------------------------------------------
+echo "\nMatrixBuilder — page-level notes prepended to contentiqNotes\n";
+
+$pageNotesOf = static fn(mixed $notes): mixed => callPrivate($importService, '_pageNotes', [['document' => ['notes' => $notes]]]);
+check('_pageNotes: null → empty string', '', $pageNotesOf(null));
+check('_pageNotes: whitespace-only → empty string', '', $pageNotesOf("  \n\t "));
+check('_pageNotes: int → empty string', '', $pageNotesOf(123));
+check('_pageNotes: array → empty string', '', $pageNotesOf([]));
+check('_pageNotes: missing document → empty string', '', callPrivate($importService, '_pageNotes', [[]]));
+check('_pageNotes: trims surrounding whitespace', 'Note', $pageNotesOf('  Note  '));
+
+$notesBuilder = new \matrixcreate\contentiqimporter\services\MatrixBuilder();
+$notesBuilder->prepare(['blockOverrides' => []]);
+$notesBlock = static fn(?string $notes): array => ['type' => 'text', 'fields' => ['columns' => 'singleColumn', 'nodes' => []]] + ($notes === null ? [] : ['notes' => $notes]);
+
+$b = $notesBuilder->build([$notesBlock('Block note.')], false, '', [], "  Page note.\n");
+check('page + block notes: page first, blank line, block', "Page note.\n\nBlock note.", $b['matrixData']['new1']['fields']['contentiqNotes'] ?? null);
+$b = $notesBuilder->build([$notesBlock(null)], false, '', [], 'Page note.');
+check('page notes only: page note alone', 'Page note.', $b['matrixData']['new1']['fields']['contentiqNotes'] ?? null);
+$b = $notesBuilder->build([$notesBlock('Block note.')]);
+check('no page notes: block note exactly as before', 'Block note.', $b['matrixData']['new1']['fields']['contentiqNotes'] ?? null);
+$b = $notesBuilder->build([$notesBlock(null)], false, '', [], '   ');
+check('neither: field omitted', false, array_key_exists('contentiqNotes', $b['matrixData']['new1']['fields'] ?? []));
+
+$tamBlock = static fn(string $n): array => ['type' => 'text_and_media', 'notes' => $n, 'fields' => []];
+$b = $notesBuilder->build([$tamBlock('One.'), $tamBlock('Two.')], false, '', [], 'Page note.');
+$groupedNotes = array_values(array_filter(array_map(static fn($e) => $e['fields']['contentiqNotes'] ?? null, $b['matrixData'])));
+check('grouped blocks: joined block notes with page note prepended once', ["Page note.\n\nOne.\n\nTwo."], $groupedNotes);
+
+// -----------------------------------------------------------------------------
 echo "\nImportService — collection-child legacy-field clearing / Body-Text-content replacement (§7.6/§7.6.1, rulings O2/O4)\n";
 
 $docWithH1 = [

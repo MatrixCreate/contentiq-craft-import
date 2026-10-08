@@ -365,7 +365,7 @@ class ImportService extends Component
                 $this->_resolveProtectedGalleryFolderIds($blocks, $assetTargets['pageFolder'], $assetTargets['isSitemap'], $dryRun),
             );
 
-            $built = ContentIQImporter::$plugin->matrixBuilder->build($contentBlocks, $dryRun, $slug, $existingBlockMap);
+            $built = ContentIQImporter::$plugin->matrixBuilder->build($contentBlocks, $dryRun, $slug, $existingBlockMap, $this->_pageNotes($data));
 
             $result['blocks']      = $built['blockReport'];
             $result['images']      = $built['imageReport'];
@@ -391,7 +391,7 @@ class ImportService extends Component
 
             // Both pages and homepage use the same hero ContentBlock field.
             $heroData = $heroBlock !== null
-                ? $this->_buildHeroField($heroBlock, $dryRun, result: $result)
+                ? $this->_buildHeroField($heroBlock, $dryRun, $entryType->getFieldLayout(), $result, $config)
                 : null;
 
             // -----------------------------------------------------------------------
@@ -1794,6 +1794,13 @@ class ImportService extends Component
             'matrixField'    => 'contentBlocks',
             'seoField'       => 'seo',
             'blockOverrides' => [],
+            // Hero ContentBlock carousel handles (nested inside the 'hero'
+            // field) — see _buildHeroInnerFields() and docs/block-mapping.md
+            // "Hero". Starter-convention defaults; override per-project in
+            // config/contentiq.php if a fork named them differently.
+            'heroMediaModeField'       => 'heroMediaMode',          // Dropdown: singleImage|carousel
+            'heroCarouselDesktopField' => 'heroCarouselDesktopImages',  // Assets (many)
+            'heroCarouselMobileField'  => 'heroCarouselMobileImages',   // Assets (many)
             // DIFF-AWARE Matrix writes — off by default. This rewrites the core
             // Matrix save path and cannot be integration-tested outside a live
             // Craft instance (no runtime/test harness here — see tests/). Flip
@@ -2358,6 +2365,9 @@ class ImportService extends Component
      *         'mobileImage'   => [$assetId],             // Assets (optional)
      *         'actionButtons' => [...],                  // Matrix of actionButton entries
      *         'heroStyle'     => 'textImage',            // Dropdown: textImage|textOnly
+     *         'heroMediaMode' => 'singleImage',          // Dropdown: singleImage|carousel
+     *         'heroCarouselDesktopImages' => [$assetId, …],  // Assets (many)
+     *         'heroCarouselMobileImages'  => [$assetId, …],  // Assets (many)
      *       ]],
      *     ]
      *
@@ -2374,8 +2384,9 @@ class ImportService extends Component
      *       'heroActionButtons' => [...],
      *     ]
      *
-     *   heroStyle is ContentBlock-shape only (§7.5 flat sites predate the field and
-     *   have no flat 'heroStyle' handle) — see _buildHeroInnerFields().
+     *   heroStyle and the carousel fields (heroMediaMode / heroCarouselDesktopImages /
+     *   heroCarouselMobileImages) are ContentBlock-shape only (§7.5 flat sites predate
+     *   them and have no flat handles) — see _buildHeroInnerFields().
      *
      * Which shape to emit is decided by _detectHeroShape() probing
      * $targetFieldLayout — never assumed. The inner field VALUES are shape-
@@ -2393,9 +2404,12 @@ class ImportService extends Component
      *                                             throwaway array so existing 3-arg callers
      *                                             (e.g. tests/run-transforms.php's shape probes)
      *                                             keep working unchanged.
+     * @param array            $config            Merged contentiq config — only the hero carousel
+     *                                             handle keys are read (see _buildHeroInnerFields());
+     *                                             empty falls back to the Starter-convention handles.
      * @return array<string, mixed>|null
      */
-    private function _buildHeroField(array $heroBlock, bool $dryRun, ?FieldLayout $targetFieldLayout = null, array &$result = []): ?array
+    private function _buildHeroField(array $heroBlock, bool $dryRun, ?FieldLayout $targetFieldLayout = null, array &$result = [], array $config = []): ?array
     {
         // The 'hero' ContentBlock field has its own (nested) field layout, distinct
         // from $targetFieldLayout (the page/homepage entry type's layout). heroStyle
@@ -2406,13 +2420,15 @@ class ImportService extends Component
             ? $heroContentBlockField->getFieldLayout()
             : null;
 
-        $innerFields = $this->_buildHeroInnerFields($heroBlock, $dryRun, $heroInnerLayout, $result);
+        $isFlat = $this->_detectHeroShape($targetFieldLayout) === 'flat';
+
+        $innerFields = $this->_buildHeroInnerFields($heroBlock, $dryRun, $heroInnerLayout, $result, $config, $isFlat);
 
         if (empty($innerFields)) {
             return null;
         }
 
-        if ($this->_detectHeroShape($targetFieldLayout) === 'flat') {
+        if ($isFlat) {
             // Flat handles directly on the entry — 'heading' → 'heroTitle', etc.
             $flatHandles = [
                 'heading'       => 'heroTitle',
@@ -2453,6 +2469,21 @@ class ImportService extends Component
      *   desktopImage → Assets
      *   actionButtons → Matrix of actionButton entries
      *   heroStyle    → Dropdown (textImage/textOnly)
+     *   heroMediaMode / heroCarouselDesktopImages / heroCarouselMobileImages → carousel (handles
+     *                  overridable via config heroMediaModeField / heroCarouselDesktopField /
+     *                  heroCarouselMobileField)
+     *
+     * The carousel handles get the same layout guard as heroStyle (same
+     * UnknownPropertyException trap, below). `media_mode` is whitelisted
+     * (singleImage|carousel, default singleImage). In carousel mode each item of
+     * `carousel_images` / `carousel_mobile_images` goes through
+     * ImageImportService::importFromField() exactly like `image` and the ids are
+     * written in payload order (nulls skipped); `image`/`mobile_image` are left as
+     * the (empty) payload dictates — same as textOnly. If the mode or either
+     * carousel field is missing from a KNOWN layout, ONE warning names the missing
+     * handle(s) and the hero falls back to single-image behaviour. hero_style
+     * textOnly imports no carousel images whatever the mode. The flat shape has no
+     * carousel support (warns instead).
      *
      * heroStyle is only added when $heroInnerLayout is null (caller couldn't resolve
      * the 'hero' ContentBlock field's own nested layout, e.g. flat-shape sites — see
@@ -2474,9 +2505,12 @@ class ImportService extends Component
      *                                         to a throwaway array so existing 3-arg callers
      *                                         (e.g. tests/run-transforms.php's shape probes)
      *                                         keep working unchanged.
+     * @param array            $config         Merged contentiq config (carousel handle overrides).
+     * @param bool             $isFlat         True when the destination uses the flat hero shape —
+     *                                         carousel is unsupported there and nothing is imported.
      * @return array Inner fields array (empty if nothing to set).
      */
-    private function _buildHeroInnerFields(array $heroBlock, bool $dryRun, ?FieldLayout $heroInnerLayout = null, array &$result = []): array
+    private function _buildHeroInnerFields(array $heroBlock, bool $dryRun, ?FieldLayout $heroInnerLayout = null, array &$result = [], array $config = [], bool $isFlat = false): array
     {
         $fields      = $heroBlock['fields'] ?? [];
         $innerFields = [];
@@ -2549,6 +2583,45 @@ class ImportService extends Component
                 : [];
         }
 
+        // Carousel — media_mode whitelist (default singleImage, garbage → default).
+        $mediaMode   = in_array($fields['media_mode'] ?? null, ['singleImage', 'carousel'], true)
+            ? $fields['media_mode']
+            : 'singleImage';
+        $modeHandle    = (string)($config['heroMediaModeField'] ?? 'heroMediaMode');
+        $desktopHandle = (string)($config['heroCarouselDesktopField'] ?? 'heroCarouselDesktopImages');
+        $mobileHandle  = (string)($config['heroCarouselMobileField'] ?? 'heroCarouselMobileImages');
+
+        // Null layout = unknown → assume present (same rule as heroStyle).
+        $hasHandle = static fn(string $h): bool => $heroInnerLayout === null || $heroInnerLayout->getFieldByHandle($h) !== null;
+
+        $carouselActive = false;
+        if ($mediaMode === 'carousel' && $isFlat) {
+            $result['warnings'][] = "Hero media_mode is 'carousel' but this entry type uses the flat hero shape, which has no carousel support; carousel images were skipped.";
+        } elseif ($mediaMode === 'carousel') {
+            $missing = array_values(array_filter(
+                [$modeHandle, $desktopHandle, $mobileHandle],
+                static fn(string $h): bool => !$hasHandle($h),
+            ));
+            if ($missing !== []) {
+                $result['warnings'][] = "Hero media_mode is 'carousel' but the hero field is missing " . implode(', ', $missing) . '; carousel images were skipped and the hero falls back to single-image mode.';
+            } else {
+                $carouselActive = true;
+            }
+        }
+
+        // hero_style textOnly means no images at all, whatever the media mode.
+        if ($carouselActive && ($fields['hero_style'] ?? null) !== 'textOnly') {
+            $desktopIds = $this->_importHeroCarouselImages($fields['carousel_images'] ?? null, $dryRun, $result);
+            $mobileIds  = $this->_importHeroCarouselImages($fields['carousel_mobile_images'] ?? null, $dryRun, $result);
+
+            if ($desktopIds !== []) {
+                $innerFields[$desktopHandle] = $desktopIds;
+            }
+            if ($mobileIds !== []) {
+                $innerFields[$mobileHandle] = $mobileIds;
+            }
+        }
+
         // actionButtons — Matrix of actionButton entries with Hyper fields.
         $buttons = $fields['buttons'] ?? [];
         if (!empty($buttons) && is_array($buttons)) {
@@ -2596,7 +2669,74 @@ class ImportService extends Component
                 : 'textImage';
         }
 
+        // heroMediaMode is written explicitly on every sync (like heroStyle), and any
+        // carousel field not filled above is set to [] so a switch back to single
+        // image clears stale picks. Same emptiness gate as heroStyle; ContentBlock
+        // shape only.
+        if (!empty($innerFields) && !$isFlat) {
+            if ($hasHandle($modeHandle)) {
+                $innerFields[$modeHandle] = $carouselActive ? 'carousel' : 'singleImage';
+            }
+            foreach ([$desktopHandle, $mobileHandle] as $carouselHandle) {
+                if (!array_key_exists($carouselHandle, $innerFields) && $hasHandle($carouselHandle)) {
+                    $innerFields[$carouselHandle] = [];
+                }
+            }
+        }
+
         return $innerFields;
+    }
+
+    /**
+     * Imports a hero carousel image list through ImageImportService::importFromField()
+     * (same path, folder, dedupe and dry-run behaviour as the single hero image).
+     * Returns asset ids in payload order; items without a URL or that fail to
+     * resolve are skipped. Item-level warnings reach the page report.
+     *
+     * @param mixed $items  The raw `carousel_images` / `carousel_mobile_images` value.
+     * @param bool  $dryRun
+     * @param array &$result Result array, mutated with item warnings.
+     * @return int[]
+     */
+    private function _importHeroCarouselImages(mixed $items, bool $dryRun, array &$result): array
+    {
+        if (!is_array($items)) {
+            return [];
+        }
+
+        $ids = [];
+        foreach ($items as $item) {
+            if (!is_array($item) || empty($item['url'])) {
+                continue;
+            }
+
+            $imageResult = ContentIQImporter::$plugin->images->importFromField($item, $dryRun);
+
+            if (!empty($imageResult['warning'])) {
+                $result['warnings'][] = $imageResult['warning'];
+            }
+
+            if ($imageResult !== null && $imageResult['id'] !== null) {
+                $ids[] = $imageResult['id'];
+            }
+        }
+
+        return $ids;
+    }
+
+    /**
+     * The page-level `document.notes` text, trimmed; '' when absent/non-string.
+     * Handed to MatrixBuilder::build() to be prepended to every outer block
+     * entry's contentiqNotes.
+     *
+     * @param array $data Decoded top-level JSON object for the page.
+     * @return string
+     */
+    private function _pageNotes(array $data): string
+    {
+        $notes = $data['document']['notes'] ?? null;
+
+        return is_string($notes) ? trim($notes) : '';
     }
 
     /**
@@ -4261,7 +4401,7 @@ class ImportService extends Component
         }
         $result['blockNotes'] = implode("\n\n", $noteLines);
 
-        $built = ContentIQImporter::$plugin->matrixBuilder->build($contentBlocks, $dryRun, $slug);
+        $built = ContentIQImporter::$plugin->matrixBuilder->build($contentBlocks, $dryRun, $slug, [], $this->_pageNotes($data));
 
         $result['blocks']   = $built['blockReport'];
         $result['images']   = $built['imageReport'];
@@ -4273,7 +4413,7 @@ class ImportService extends Component
         // caseStudy/team use a *flat* handle shape instead of the ContentBlock
         // shape on some sites (see _buildHeroField()'s shape probe).
         $heroData = $heroBlock !== null
-            ? $this->_buildHeroField($heroBlock, $dryRun, $targetFieldLayout, $result)
+            ? $this->_buildHeroField($heroBlock, $dryRun, $targetFieldLayout, $result, $config)
             : null;
 
         // Resolve CTA blocks — same routing as importPage() (see its step 10):
