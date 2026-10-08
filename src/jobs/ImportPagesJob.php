@@ -386,6 +386,7 @@ class ImportPagesJob extends BaseBatchedJob implements RetryableJobInterface
                     'images'        => [],
                     'pageAssets'    => $assetsOnly['pageAssets'],
                     'pageFiles'     => $assetsOnly['pageFiles'],
+                    'folders'       => $assetsOnly['folders'],
                     // Nothing is written this run for a locked entry, so
                     // 'blocks' stays genuinely empty. blockNotes has a real
                     // stored value from the last successful sync — surface

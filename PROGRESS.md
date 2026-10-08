@@ -2,6 +2,12 @@
 
 Capped rolling log — older entries roll off verbatim to `docs/_archive/`. Durable knowledge belongs in `docs/`, not accumulated here.
 
+## Empty asset folders travel to Craft (2026-10-08)
+
+- Export entries now carry `folders: [{name, sort_order}]`; `ImportService::_ensurePageFolders()` creates each at `withSubfolder(pageFolder, name)` in the images volume (sitemap strategy, real run only, deduped, locked entries too via `importPageAssetsOnly()`), before `_importPageAssets()`.
+- Reports `folders.created` (new folders only) on the page result: "N new folder(s)" in `sync-result.twig`/`result.twig`, `Page folders: N created` on the CLI; omitted when zero. Persisted via the existing per-page result JSON.
+- Tests in `tests/run-transforms.php` stub `resolveFolderByPath()`; real Craft folder creation and Craft's real sanitiser are untested here. Docs: `docs/assets.md` "Empty folders", README. Uncommitted, untagged.
+
 ## Page notes prepended + hero carousel mode (2026-10-08)
 
 - `document.notes` is prepended to every outer block entry's `contentiqNotes` (`MatrixBuilder::build()` `$pageNotes`, via `ImportService::_pageNotes()`); no change when absent.

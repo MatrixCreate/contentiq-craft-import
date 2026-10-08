@@ -129,11 +129,14 @@
     {% set filesFailed = page.pageFiles.failed ?? 0 %}
     {% set assetsTotal = assetsCreated + assetsReused + assetsFailed %}
     {% set filesTotal = filesCreated + filesReused + filesFailed %}
-    {% if assetsTotal or filesTotal %}
+    {% set foldersCreated = page.folders.created ?? 0 %}
+    {% if assetsTotal or filesTotal or foldersCreated %}
         <div class="light" style="font-size:12px; margin-top:2px;">
             {% if assetsTotal %}{{ assetsCreated }} new asset{{ assetsCreated == 1 ? '' : 's' }}, {{ assetsReused }} reused ({{ assetsRelocated }} relocated){% if assetsFailed %}, <span style="color:var(--warning-color);">{{ assetsFailed }} failed</span>{% endif %}{% endif %}
             {%- if assetsTotal and filesTotal %} &middot; {% endif -%}
             {% if filesTotal %}{{ filesCreated }} new file{{ filesCreated == 1 ? '' : 's' }}, {{ filesReused }} reused ({{ filesRelocated }} relocated){% if filesFailed %}, <span style="color:var(--warning-color);">{{ filesFailed }} failed</span>{% endif %}{% endif %}
+            {%- if (assetsTotal or filesTotal) and foldersCreated %} &middot; {% endif -%}
+            {% if foldersCreated %}{{ foldersCreated }} new folder{{ foldersCreated == 1 ? '' : 's' }}{% endif %}
         </div>
     {% endif %}
 {% endmacro %}

@@ -118,7 +118,8 @@
                        still renders this row instead of silently vanishing. #}
                     {% set pageAssetsTotal = (page.pageAssets.created ?? 0) + (page.pageAssets.reused ?? 0) + (page.pageAssets.failed ?? 0) %}
                     {% set pageFilesTotal = (page.pageFiles.created ?? 0) + (page.pageFiles.reused ?? 0) + (page.pageFiles.failed ?? 0) %}
-                    {% if (page.warnings ?? [])|length or page.error ?? null or blockNotes != '' or routingNotes != '' or pageAssetsTotal or pageFilesTotal %}
+                    {% set pageFoldersCreated = page.folders.created ?? 0 %}
+                    {% if (page.warnings ?? [])|length or page.error ?? null or blockNotes != '' or routingNotes != '' or pageAssetsTotal or pageFilesTotal or pageFoldersCreated %}
                         <tr>
                             <td colspan="6" style="padding-left:32px;">
                                 {% if page.error ?? null %}
@@ -142,11 +143,13 @@
                                    column (block/hero/SEO/card images only). Present on a
                                    locked-skip row too — asset filing is exempt from the
                                    lock, see ImportService::importPageAssetsOnly(). #}
-                                {% if pageAssetsTotal or pageFilesTotal %}
+                                {% if pageAssetsTotal or pageFilesTotal or pageFoldersCreated %}
                                     <div class="light">
                                         {% if pageAssetsTotal %}{{ (page.pageAssets.created ?? 0) }} new page asset{{ (page.pageAssets.created ?? 0) == 1 ? '' : 's' }}, {{ (page.pageAssets.reused ?? 0) }} reused ({{ (page.pageAssets.relocated ?? 0) }} relocated){% if page.pageAssets.failed ?? 0 %}, <span style="color:var(--warning-color);">{{ page.pageAssets.failed }} failed</span>{% endif %}{% endif %}
                                         {%- if pageAssetsTotal and pageFilesTotal %} &middot; {% endif -%}
                                         {% if pageFilesTotal %}{{ (page.pageFiles.created ?? 0) }} new page file{{ (page.pageFiles.created ?? 0) == 1 ? '' : 's' }}, {{ (page.pageFiles.reused ?? 0) }} reused ({{ (page.pageFiles.relocated ?? 0) }} relocated){% if page.pageFiles.failed ?? 0 %}, <span style="color:var(--warning-color);">{{ page.pageFiles.failed }} failed</span>{% endif %}{% endif %}
+                                        {%- if (pageAssetsTotal or pageFilesTotal) and pageFoldersCreated %} &middot; {% endif -%}
+                                        {% if pageFoldersCreated %}{{ pageFoldersCreated }} new page folder{{ pageFoldersCreated == 1 ? '' : 's' }}{% endif %}
                                     </div>
                                 {% endif %}
                             </td>

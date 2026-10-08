@@ -172,6 +172,7 @@ class ImportService extends Component
      *   images:        [{filename, reused}],
      *   pageAssets:    {created: int, reused: int, relocated: int, failed: int},
      *   pageFiles:     {created: int, reused: int, relocated: int, failed: int},
+     *   folders:       {created: int},
      *   warnings:      string[],
      *   error:         string|null,
      * }
@@ -275,6 +276,9 @@ class ImportService extends Component
             //    transaction further down.
             // -----------------------------------------------------------------------
             $assetTargets = $this->_preparePageAssetTargets($data, $config, $dryRun);
+
+            // Empty per-page folders first, so asset filing below finds them.
+            $this->_ensurePageFolders($data, $assetTargets, $dryRun, $result);
 
             $pageAssetsResult     = $this->_importPageAssets($data, $assetTargets, $dryRun);
             $result['pageAssets'] = $pageAssetsResult['pageAssets'];
@@ -973,7 +977,7 @@ class ImportService extends Component
      *
      * @param array $data   Decoded top-level JSON object for a single page.
      * @param bool  $dryRun If true, reports would-be counts without downloading.
-     * @return array{pageAssets: array{created: int, reused: int, relocated: int, failed: int}, pageFiles: array{created: int, reused: int, relocated: int, failed: int}, warnings: string[], assetIds: array<string, int>}
+     * @return array{pageAssets: array{created: int, reused: int, relocated: int, failed: int}, pageFiles: array{created: int, reused: int, relocated: int, failed: int}, folders: array{created: int}, warnings: string[], assetIds: array<string, int>}
      */
     public function importPageAssetsOnly(array $data, bool $dryRun = false): array
     {
@@ -981,8 +985,13 @@ class ImportService extends Component
             $config       = $this->_getConfig();
             $assetTargets = $this->_preparePageAssetTargets($data, $config, $dryRun);
 
+            // Locked entries get their empty per-page folders too.
+            $folderResult = ['folders' => ['created' => 0], 'warnings' => []];
+            $this->_ensurePageFolders($data, $assetTargets, $dryRun, $folderResult);
+
             $assetsResult             = $this->_importPageAssets($data, $assetTargets, $dryRun);
-            $assetsResult['warnings'] = $this->_mergeProducerWarnings($data, $assetsResult['warnings']);
+            $assetsResult['folders']  = $folderResult['folders'];
+            $assetsResult['warnings'] = $this->_mergeProducerWarnings($data, array_merge($assetsResult['warnings'], $folderResult['warnings']));
 
             return $assetsResult;
         } catch (Throwable $e) {
@@ -991,6 +1000,7 @@ class ImportService extends Component
             return [
                 'pageAssets' => $this->_emptyAssetCounts(),
                 'pageFiles'  => $this->_emptyAssetCounts(),
+                'folders'    => ['created' => 0],
                 // ContentIQ's own top-level warnings[] still surface here —
                 // see _mergeProducerWarnings() — this is a locked-page result
                 // shown directly in the sync report (SyncJob/CpController/
@@ -1332,6 +1342,9 @@ class ImportService extends Component
         // own dry-run early return further down.
         $assetTargets = $this->_preparePageAssetTargets($data, $config, $dryRun);
 
+        // Empty per-page folders first — see importPage()'s step 4.
+        $this->_ensurePageFolders($data, $assetTargets, $dryRun, $result);
+
         $pageAssetsResult     = $this->_importPageAssets($data, $assetTargets, $dryRun);
         $result['pageAssets'] = $pageAssetsResult['pageAssets'];
         $result['pageFiles']  = $pageAssetsResult['pageFiles'];
@@ -1657,6 +1670,9 @@ class ImportService extends Component
             // Matrix/hero/SEO/card image field.
             'pageAssets'    => $this->_emptyAssetCounts(),
             'pageFiles'     => $this->_emptyAssetCounts(),
+            // Empty per-page asset folders newly created in Craft this run
+            // (sitemap strategy, real run only) — see _ensurePageFolders().
+            'folders'       => ['created' => 0],
         ];
     }
 
@@ -1920,6 +1936,79 @@ class ImportService extends Component
             'documentsReady' => $documentsReady,
             'warnings'       => $warnings,
         ];
+    }
+
+    /**
+     * Ensures a Craft folder exists for every ContentIQ per-page asset folder
+     * in the export's `folders[]` (`{name, sort_order}`), so an EMPTY folder
+     * (no asset ever filed into it) still appears in Craft — otherwise a
+     * folder name rides only on `assets[]`/`files[]` items and the sub-folder
+     * is created only when an asset is filed into it. Additive wire key: an
+     * older ContentIQ that omits `folders` is a no-op, as is a non-array
+     * value or a name that is empty / sanitises to nothing.
+     *
+     * Runs ONLY under `assetFolderStrategy: 'sitemap'` and ONLY on a real run
+     * — never on a dry run / CP Preview (docs/assets.md: dry run never
+     * creates a folder record). Each folder is `AssetFolderPath::withSubfolder()`
+     * of the RAW page folder path (`$targets['pageFolder']`, not a
+     * `VolumeFolder->path`, which carries a trailing slash) — the same path
+     * `_importPageAssets()` files into — in the IMAGES volume, resolved via
+     * `ImageImportService::resolveFolderByPath()` (read-only first, so only
+     * folders that did not already exist are counted). Names are deduped
+     * after sanitising (same-named ContentIQ folders collapse into one).
+     * Craft never deletes or renames a folder here.
+     *
+     * A failure on one folder is a warning, not a page failure. Adds to
+     * `$result['folders']['created']` and, on failure, `$result['warnings']`.
+     *
+     * @param array $data    Decoded top-level JSON object for a single page.
+     * @param array $targets `_preparePageAssetTargets()`'s return value.
+     * @param bool  $dryRun
+     * @param array $result  Page result (or any array with `folders`/`warnings`), updated in place.
+     * @return void
+     */
+    private function _ensurePageFolders(array $data, array $targets, bool $dryRun, array &$result): void
+    {
+        if ($dryRun || empty($targets['isSitemap']) || !is_array($data['folders'] ?? null)) {
+            return;
+        }
+
+        $images     = ContentIQImporter::$plugin->images;
+        $pageFolder = $targets['pageFolder'];
+        $paths      = [];
+
+        foreach ($data['folders'] as $folder) {
+            $name = is_array($folder) ? ($folder['name'] ?? null) : null;
+
+            if (!is_string($name) || trim($name) === '') {
+                continue;
+            }
+
+            $path = AssetFolderPath::withSubfolder($pageFolder, $name);
+
+            // withSubfolder() falls back to the page folder itself when the
+            // name sanitises to nothing — not a sub-folder, nothing to ensure.
+            if ($path === $pageFolder) {
+                continue;
+            }
+
+            $paths[$path] = true;
+        }
+
+        foreach (array_keys($paths) as $path) {
+            try {
+                if ($images->resolveFolderByPath($path, true) !== null) {
+                    continue;
+                }
+
+                if ($images->resolveFolderByPath($path, false) !== null) {
+                    $result['folders']['created'] = ($result['folders']['created'] ?? 0) + 1;
+                }
+            } catch (Throwable $e) {
+                $result['warnings'][] = "Could not create asset folder \"{$path}\": " . $e->getMessage();
+                Craft::warning('ContentIQImporter: page folder creation failed: ' . $e->getMessage(), __METHOD__);
+            }
+        }
     }
 
     /**

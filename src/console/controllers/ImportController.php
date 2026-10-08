@@ -557,6 +557,10 @@ class ImportController extends Controller
                         $this->stdout('  Page files: ' . $this->_formatAssetCounts($assetsOnly['pageFiles']) . "\n");
                     }
 
+                    if (($assetsOnly['folders']['created'] ?? 0) > 0) {
+                        $this->stdout('  Page folders: ' . $assetsOnly['folders']['created'] . " created\n");
+                    }
+
                     foreach ($assetsOnly['warnings'] as $warning) {
                         $this->warning($warning);
                     }
@@ -578,6 +582,7 @@ class ImportController extends Controller
                         'images'        => [],
                         'pageAssets'    => $assetsOnly['pageAssets'],
                         'pageFiles'     => $assetsOnly['pageFiles'],
+                        'folders'       => $assetsOnly['folders'],
                         'warnings'      => array_merge(['Skipped — entry is locked.'], $assetsOnly['warnings']),
                         'error'         => null,
                     ];
@@ -668,6 +673,12 @@ class ImportController extends Controller
 
         if ($pageFiles !== null && $this->_hasAnyAssetActivity($pageFiles)) {
             $this->stdout('  Page files: ' . $this->_formatAssetCounts($pageFiles) . "\n");
+        }
+
+        // Empty per-page asset folders newly created in Craft (sitemap
+        // strategy, real run only) — omitted when zero.
+        if (($result['folders']['created'] ?? 0) > 0) {
+            $this->stdout('  Page folders: ' . $result['folders']['created'] . " created\n");
         }
 
         foreach ($result['warnings'] as $warning) {

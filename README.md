@@ -63,6 +63,8 @@ Then reference them in the plugin settings: **CP → Settings → Plugins → Co
 
 The **Sync** screen in the CP loads the full ContentiQ sitemap (including pages never yet imported into Craft) and lets you select what to pull. Submitting runs via Craft's queue — the screen polls for completion and shows a hierarchical report when done. See [the life of a sync](docs/README.md#the-life-of-a-sync) for the full sequence and [docs/cp-and-widget.md](docs/cp-and-widget.md) for a tour of the screen.
 
+- With `assetFolderStrategy: 'sitemap'`, a sync also creates the page's empty ContentiQ asset folders in Craft (the export's `folders` array; real runs only, locked entries included) and reports how many were new — see [docs/assets.md](docs/assets.md#page-level-assetsfiles-and-the-sitemap-folder-strategy).
+
 ### Per-entry sync
 
 Each entry edit screen shows a **ContentiQ** sidebar widget with:

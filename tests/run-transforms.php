@@ -3187,6 +3187,97 @@ check('plan(): missing document.slug — skippedMalformed count', 1, $missingSlu
 check('plan(): missing document.slug — one warning recorded', 1, count($missingSlugPlan['warnings']));
 
 // -----------------------------------------------------------------------------
+// Slice 3 — empty per-page asset folders (`folders[]` on the wire).
+// _ensurePageFolders() creates a Craft sub-folder for every {name, sort_order}
+// in `folders`, sitemap strategy + real run only, counting only folders that
+// did not already exist. ImageImportService::resolveFolderByPath() is stubbed:
+// $dryRun=true is the read-only existence probe, $dryRun=false the creating
+// call. Sanitising uses the stand-in craft\helpers\Assets (lowercase +
+// hyphens), NOT Craft's real prepareAssetName() — so real-sanitiser parity is
+// untested here (it is the same AssetFolderPath::withSubfolder() the asset
+// filing uses, covered above).
+// -----------------------------------------------------------------------------
+echo "\nImportService — _ensurePageFolders() empty page folders (Slice 3)\n";
+
+require_once __DIR__ . '/fixtures/assets-helper-stub.php';
+
+$folderImages = new class {
+    /** @var string[] Paths that "already exist". */
+    public array $existing = [];
+    /** @var string[] Paths created by a non-dry-run call. */
+    public array $created = [];
+    public int $dryProbes = 0;
+
+    public function resolveFolderByPath(string $path, bool $dryRun)
+    {
+        if ($dryRun) {
+            $this->dryProbes++;
+
+            return in_array($path, $this->existing, true) ? new \stdClass() : null;
+        }
+
+        $this->created[] = $path;
+
+        return new \stdClass();
+    }
+};
+$folderPlugin = new class {
+    public $images;
+};
+$folderPlugin->images = $folderImages;
+\matrixcreate\contentiqimporter\ContentIQImporter::$plugin = $folderPlugin;
+
+$runEnsure = function(array $data, bool $isSitemap, bool $dryRun, array $existing = []) use ($importService, $folderImages) {
+    $folderImages->existing  = $existing;
+    $folderImages->created   = [];
+    $folderImages->dryProbes = 0;
+    $result = ['folders' => ['created' => 0], 'warnings' => []];
+    callPrivate($importService, '_ensurePageFolders', [
+        $data,
+        ['pageFolder' => 'contentiq/isle-of-wight', 'isSitemap' => $isSitemap, 'documentsReady' => true, 'warnings' => []],
+        $dryRun,
+        &$result,
+    ]);
+
+    return $result;
+};
+
+$threeFolders = ['folders' => [
+    ['name' => 'Hero', 'sort_order' => 0],
+    ['name' => 'Gallery', 'sort_order' => 1],
+    ['name' => 'Lunch Menu', 'sort_order' => 2],
+]];
+
+$r = $runEnsure($threeFolders, true, false);
+check('sitemap + real run: 3 names create 3 folders', 3, $r['folders']['created']);
+check('sitemap + real run: folders at page path + sanitised name', ['contentiq/isle-of-wight/hero', 'contentiq/isle-of-wight/gallery', 'contentiq/isle-of-wight/lunch-menu'], $folderImages->created);
+
+$r = $runEnsure($threeFolders, true, false, ['contentiq/isle-of-wight/gallery']);
+check('existing folder is skipped and not counted', 2, $r['folders']['created']);
+check('existing folder is not re-ensured', ['contentiq/isle-of-wight/hero', 'contentiq/isle-of-wight/lunch-menu'], $folderImages->created);
+
+$r = $runEnsure($threeFolders, true, true);
+check('dry run: nothing created', [0, []], [$r['folders']['created'], $folderImages->created]);
+check('dry run: no volume call at all', 0, $folderImages->dryProbes);
+
+$r = $runEnsure($threeFolders, false, false);
+check('flat strategy: nothing created, nothing touched', [0, [], 0], [$r['folders']['created'], $folderImages->created, $folderImages->dryProbes]);
+
+$r = $runEnsure(['assets' => []], true, false);
+check('absent folders key (older ContentiQ) is a no-op', [0, [], 0], [$r['folders']['created'], $folderImages->created, $folderImages->dryProbes]);
+
+$r = $runEnsure(['folders' => 'nope'], true, false);
+check('non-array folders value is a no-op', 0, $r['folders']['created']);
+
+$r = $runEnsure(['folders' => [['name' => '***', 'sort_order' => 0], ['name' => '', 'sort_order' => 1], ['name' => null], 'junk', ['name' => 'Ok']]], true, false);
+check('names sanitising to empty / blank / non-string are skipped', ['contentiq/isle-of-wight/ok'], $folderImages->created);
+
+$r = $runEnsure(['folders' => [['name' => 'Gallery'], ['name' => 'gallery'], ['name' => 'GALLERY!']]], true, false);
+check('names that sanitise identically create one folder', [1, ['contentiq/isle-of-wight/gallery']], [$r['folders']['created'], $folderImages->created]);
+
+\matrixcreate\contentiqimporter\ContentIQImporter::$plugin = $previousPlugin;
+
+// -----------------------------------------------------------------------------
 // Summary.
 // -----------------------------------------------------------------------------
 echo "\n" . ($failures === 0 ? "OK" : "FAILED") . ": {$passes} passed, {$failures} failed\n";

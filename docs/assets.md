@@ -150,6 +150,22 @@ but especially `'sitemap'`: without it, previewing an import (CLI
 walks every page) would silently create the entire per-page `VolumeFolder`
 tree just from clicking Preview, never actually importing anything into it.
 
+**Empty folders.** Under `'sitemap'`, ContentIQ also sends a `folders` array
+on every export entry — `[{name, sort_order}]`, the page's own asset folders,
+`[]` when none — so a folder with no assets in it still reaches Craft
+(previously a sub-folder existed only once an asset was filed into it).
+`ImportService::_ensurePageFolders()` creates each one at
+`{page folder}/{sanitised name}` in the images volume, before the page's
+assets are filed, and counts only folders that did not already exist as
+`folders.created` on the page result (shown as "N new folder(s)" in the Sync
+Report and `Page folders: N created` on the CLI; omitted when zero). It runs
+for locked entries too (like asset filing), never on a dry run / CP Preview,
+and is a no-op under `'flat'` or when `folders` is absent (older ContentIQ).
+Names that sanitise to the same segment collapse into one folder. Craft never
+deletes or renames folders: renaming a folder in ContentIQ leaves the old
+(possibly empty) one behind, and Craft lists folders alphabetically, so
+`sort_order` is not reflected.
+
 ---
 
 ## Idempotency, step by step
