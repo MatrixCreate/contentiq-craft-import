@@ -337,22 +337,8 @@ class ImportService extends Component
                 }
             }
 
-            // Collect block notes for the sidebar widget.
-            $noteLines = [];
-            foreach ($blocks as $block) {
-                $note = $block['notes'] ?? '';
-                if (is_string($note) && trim($note) !== '') {
-                    $blockType = $block['type'] ?? 'unknown';
-                    $acronyms = ['usp' => 'USP', 'faq' => 'FAQ', 'cta' => 'CTA'];
-                    $blockLabel = ucwords(str_replace('_', ' ', $blockType));
-                    $blockLabel = strtr($blockLabel, array_combine(
-                        array_map('ucfirst', array_keys($acronyms)),
-                        array_values($acronyms),
-                    ));
-                    $noteLines[] = $blockLabel . "\n" . trim($note);
-                }
-            }
-            $result['blockNotes'] = implode("\n\n", $noteLines);
+            // Collect block notes (page note first) for the sidebar widget.
+            $result['blockNotes'] = implode("\n\n", $this->_collectNoteLines($data, $blocks));
 
             // R9 (Image Gallery folder mode, docs/assets.md) — protect this
             // page's folder-mode gallery folder(s) from the sitemap
@@ -2725,6 +2711,43 @@ class ImportService extends Component
     }
 
     /**
+     * Builds the "Label\nnote" line groups behind `$result['blockNotes']`
+     * (contentiq_entry_syncs.notes, the CP sync report and the entry sidebar
+     * widget). When the page carries `document.notes`, a leading "Page\nnote"
+     * group comes first; one group per block with non-empty notes follows.
+     * Callers join the groups with "\n\n".
+     *
+     * @param array   $data   Decoded top-level JSON object for the page.
+     * @param array[] $blocks The page's blocks[] (hero included).
+     * @return string[]
+     */
+    private function _collectNoteLines(array $data, array $blocks): array
+    {
+        $noteLines = [];
+
+        $pageNotes = $this->_pageNotes($data);
+        if ($pageNotes !== '') {
+            $noteLines[] = "Page\n" . $pageNotes;
+        }
+
+        $acronyms = ['usp' => 'USP', 'faq' => 'FAQ', 'cta' => 'CTA'];
+        foreach ($blocks as $block) {
+            $note = $block['notes'] ?? '';
+            if (is_string($note) && trim($note) !== '') {
+                $blockType  = $block['type'] ?? 'unknown';
+                $blockLabel = ucwords(str_replace('_', ' ', $blockType));
+                $blockLabel = strtr($blockLabel, array_combine(
+                    array_map('ucfirst', array_keys($acronyms)),
+                    array_values($acronyms),
+                ));
+                $noteLines[] = $blockLabel . "\n" . trim($note);
+            }
+        }
+
+        return $noteLines;
+    }
+
+    /**
      * The page-level `document.notes` text, trimmed; '' when absent/non-string.
      * Handed to MatrixBuilder::build() to be prepended to every outer block
      * entry's contentiqNotes.
@@ -4384,22 +4407,8 @@ class ImportService extends Component
             }
         }
 
-        // Collect block notes for the sidebar widget.
-        $noteLines = [];
-        foreach ($blocks as $block) {
-            $note = $block['notes'] ?? '';
-            if (is_string($note) && trim($note) !== '') {
-                $blockType = $block['type'] ?? 'unknown';
-                $acronyms = ['usp' => 'USP', 'faq' => 'FAQ', 'cta' => 'CTA'];
-                $blockLabel = ucwords(str_replace('_', ' ', $blockType));
-                $blockLabel = strtr($blockLabel, array_combine(
-                    array_map('ucfirst', array_keys($acronyms)),
-                    array_values($acronyms),
-                ));
-                $noteLines[] = $blockLabel . "\n" . trim($note);
-            }
-        }
-        $result['blockNotes'] = implode("\n\n", $noteLines);
+        // Collect block notes (page note first) for the sidebar widget.
+        $result['blockNotes'] = implode("\n\n", $this->_collectNoteLines($data, $blocks));
 
         $built = ContentIQImporter::$plugin->matrixBuilder->build($contentBlocks, $dryRun, $slug, [], $this->_pageNotes($data));
 

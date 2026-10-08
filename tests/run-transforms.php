@@ -1198,6 +1198,38 @@ check('_pageNotes: array → empty string', '', $pageNotesOf([]));
 check('_pageNotes: missing document → empty string', '', callPrivate($importService, '_pageNotes', [[]]));
 check('_pageNotes: trims surrounding whitespace', 'Note', $pageNotesOf('  Note  '));
 
+$noteBlocks = [
+    ['type' => 'text', 'notes' => 'Block note.', 'fields' => []],
+    ['type' => 'faq', 'notes' => '  ', 'fields' => []],
+    ['type' => 'usp', 'notes' => 'Usp note.', 'fields' => []],
+];
+check(
+    'blockNotes: page group first, then block groups',
+    ["Page\nPage note.", "Text\nBlock note.", "USP\nUsp note."],
+    callPrivate($importService, '_collectNoteLines', [['document' => ['notes' => ' Page note. ']], $noteBlocks]),
+);
+check(
+    'blockNotes: unchanged when document.notes absent',
+    ["Text\nBlock note.", "USP\nUsp note."],
+    callPrivate($importService, '_collectNoteLines', [['document' => []], $noteBlocks]),
+);
+check(
+    'blockNotes: page note alone',
+    ["Page\nPage note."],
+    callPrivate($importService, '_collectNoteLines', [['document' => ['notes' => 'Page note.']], []]),
+);
+
+// importPage() cannot run without live Craft (see the note above), so this is the
+// smallest real composition: the payload's document.notes through ImportService's
+// own _pageNotes() into MatrixBuilder::build(), exactly as importPage() wires it.
+$e2ePayload = ['document' => ['slug' => 'x', 'notes' => 'Page note.'], 'blocks' => [
+    ['type' => 'text', 'notes' => 'Block note.', 'fields' => ['columns' => 'singleColumn', 'nodes' => []]],
+]];
+$e2eBuilder = new \matrixcreate\contentiqimporter\services\MatrixBuilder();
+$e2eBuilder->prepare(['blockOverrides' => []]);
+$e2eBuilt = $e2eBuilder->build($e2ePayload['blocks'], false, 'x', [], callPrivate($importService, '_pageNotes', [$e2ePayload]));
+check('payload → _pageNotes → build: contentiqNotes', "Page note.\n\nBlock note.", $e2eBuilt['matrixData']['new1']['fields']['contentiqNotes'] ?? null);
+
 $notesBuilder = new \matrixcreate\contentiqimporter\services\MatrixBuilder();
 $notesBuilder->prepare(['blockOverrides' => []]);
 $notesBlock = static fn(?string $notes): array => ['type' => 'text', 'fields' => ['columns' => 'singleColumn', 'nodes' => []]] + ($notes === null ? [] : ['notes' => $notes]);
