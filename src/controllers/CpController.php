@@ -916,12 +916,15 @@ class CpController extends Controller
     /**
      * Polls the status of a sync run.
      *
-     * Returns `{status, phase, step, counts, progressLabel, stale}`. `status`
-     * keeps the legacy vocabulary `sync.twig`'s `pollForCompletion()` already
-     * polls on (`pending` while not terminal, then `success`|`warnings`|
-     * `errors`) so its "still polling?" check needs no change; `phase`/`step`
-     * drive the progress bar, and `phase === 'failed'` is what tells the
-     * frontend to offer Resume instead of redirecting to the report.
+     * Returns `{status, phase, step, counts, progress, progressLabel,
+     * stale}`. `status` keeps the legacy vocabulary `sync.twig`'s
+     * `pollForCompletion()` already polls on (`pending` while not terminal,
+     * then `success`|`warnings`|`errors`) so its "still polling?" check
+     * needs no change; `phase`/`step` drive the progress bar, `progress`
+     * (`{done, total}` in selected pages, importing phase only — see
+     * `_importProgress()`) drives its fill, and `phase === 'failed'` is what
+     * tells the frontend to offer Resume instead of redirecting to the
+     * report.
      *
      * @return Response
      */
@@ -976,14 +979,18 @@ class CpController extends Controller
             ]);
         }
 
-        $counts = $service->counts($runId);
+        $counts   = $service->counts($runId);
+        $progress = $run->phase === SyncRun::PHASE_IMPORTING
+            ? $this->_importProgress($run, $counts)
+            : null;
 
         return $this->asJson([
             'status'        => 'pending',
             'phase'         => $run->phase,
             'step'          => $run->step,
             'counts'        => $counts,
-            'progressLabel' => $this->_progressLabel($run, $counts),
+            'progress'      => $progress,
+            'progressLabel' => $this->_progressLabel($run, $progress),
             'stale'         => false,
         ]);
     }
@@ -1727,22 +1734,55 @@ class CpController extends Controller
     }
 
     /**
+     * Importing-phase progress counted in pages that will actually be
+     * imported, not rows walked — `sync.twig`'s "Importing page N of M" and
+     * its bar fill both read this. The run stages a row for every exported
+     * page, locked and deselected ones included, and ImportPagesJob only
+     * marks those `skipped_*` as it reaches them; counting raw rows showed
+     * "Importing page 2 of 2" for a run where one of two pages was
+     * selected. `total` is the rows not yet skipped minus the pending rows
+     * {@see SyncRunService::forecastPendingSkips()} predicts will be, and
+     * `done` is the rows already imported or failed. The forecast is an
+     * estimate, so `done` is clamped to `total` and the label clamps its
+     * "N" the same way.
+     *
+     * @param SyncRun $run
+     * @param array $counts {@see SyncRunService::counts()}'s return shape.
+     * @return array{done: int, total: int}
+     */
+    private function _importProgress(SyncRun $run, array $counts): array
+    {
+        $deselected = $run->options['newSelections'] ?? [];
+        $deselected = is_array($deselected)
+            ? array_values(array_map('intval', array_filter($deselected, 'is_scalar')))
+            : [];
+
+        $forecastSkips = ContentIQImporter::$plugin->syncRuns->forecastPendingSkips($run->id, $deselected);
+
+        $total = max(0, $counts['total'] - $counts['skipped'] - $forecastSkips);
+        $done  = min($total, $counts['imported'] + $counts['failed']);
+
+        return ['done' => $done, 'total' => $total];
+    }
+
+    /**
      * Human-readable progress label for a non-terminal run, driven by
-     * `phase`/`step` and (for `importing`) the row counts — what
-     * `sync.twig`'s progress bar renders. Terminal runs pass `null`
+     * `phase`/`step` and (for `importing`) the selected-page progress —
+     * what `sync.twig`'s progress bar renders. Terminal runs pass `null`
      * (`progressLabel` in the status JSON) — the frontend redirects/shows an
      * error instead of continuing to show progress text.
      *
      * @param SyncRun $run
-     * @param array $counts {@see SyncRunService::counts()}'s return shape.
+     * @param array|null $progress {@see self::_importProgress()}'s return
+     *   shape during the importing phase, `null` in every other phase.
      * @return string
      */
-    private function _progressLabel(SyncRun $run, array $counts): string
+    private function _progressLabel(SyncRun $run, ?array $progress): string
     {
         return match ($run->phase) {
             SyncRun::PHASE_STAGING => 'Preparing…',
-            SyncRun::PHASE_IMPORTING => $counts['total'] > 0
-                ? 'Importing page ' . min($counts['total'] - $counts['pending'] + 1, $counts['total']) . ' of ' . $counts['total']
+            SyncRun::PHASE_IMPORTING => ($progress['total'] ?? 0) > 0
+                ? 'Importing page ' . min($progress['done'] + 1, $progress['total']) . ' of ' . $progress['total']
                 : 'Importing…',
             SyncRun::PHASE_POSTPASS => 'Resolving links…',
             SyncRun::PHASE_FINALISING => match ($run->step) {

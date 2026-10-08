@@ -577,21 +577,21 @@
             if (errorElBottom) errorElBottom.style.display = 'none';
         }
 
-        // Renders the status JSON's phase/step/counts as a short label +
+        // Renders the status JSON's phase/step/progress as a short label +
         // fill-width bar. `progressLabel` is server-computed (see
         // CpController::_progressLabel()) — this just adds a percentage from
-        // `counts` (importing phase only; every other phase has no
-        // meaningful item count to bar-fill against, so it just pulses at a
-        // fixed width for those).
+        // `progress` (`{done, total}` in selected pages, importing phase
+        // only; every other phase has no meaningful item count to bar-fill
+        // against, so it just pulses at a fixed width for those).
         function updateProgress(data) {
             var label = data.progressLabel || '';
             if (progressText) progressText.textContent = label;
             if (progressTextBottom) progressTextBottom.textContent = label;
 
             var pct = 5;
-            var counts = data.counts || {};
-            if (data.phase === 'importing' && counts.total) {
-                pct = Math.min(100, Math.round(((counts.total - counts.pending) / counts.total) * 100));
+            var progress = data.progress || {};
+            if (data.phase === 'importing' && progress.total) {
+                pct = Math.min(100, Math.round((progress.done / progress.total) * 100));
             } else if (data.phase === 'postpass' || data.phase === 'finalising') {
                 pct = 90;
             } else if (data.phase === 'staging') {

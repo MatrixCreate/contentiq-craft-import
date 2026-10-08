@@ -2,6 +2,12 @@
 
 Capped rolling log — older entries roll off verbatim to `docs/_archive/`. Durable knowledge belongs in `docs/`, not accumulated here.
 
+## Sync progress counts selected pages, not staged rows (2026-10-08)
+
+Ben's screenshot: one of two pages selected, bar read "Importing page 2 of 2". `CpController::_progressLabel()` and the bar's percentage both derived from `SyncRunService::counts()` — raw `contentiq_sync_pages` row counts — but the run stages a row for every exported page and `ImportPagesJob` only marks locked/deselected rows `skipped_*` as it reaches each one, so the unselected page counted until the job walked past it.
+
+Fix: new `SyncRunService::forecastPendingSkips()` predicts which pending rows the job will skip (page id mapped to a locked `contentiq_entry_syncs` row, or in `options.newSelections` with no mapping) — the same two checks the job applies, minus `findExistingEntry()`'s slug fallbacks, so it's an estimate. New `_importProgress()` turns that into `{ done, total }` in selected pages (both clamped), the status JSON gains a `progress` key, the label reads from it, and `sync.twig`'s bar fills from `progress.done / progress.total` instead of `counts`. `ImportPagesJob`'s own queue-manager description still says "Importing page N of M" in walked rows — that's Craft's queue UI, not the Sync screen, and left alone. Docs: `docs/cp-and-widget.md` status-polling section.
+
 ## Structure order follows the ContentiQ sitemap (2026-09-16, 1.34.0)
 
 Pages were positioned with `Structures::append()/appendToRoot()` on every run, so any page written in a later, partial sync landed LAST among its siblings and Craft's Pages structure drifted from the ContentiQ sitemap. Every export `document` already carried `sort_order` (per-parent, ties by page id) and `parent_slug`; nothing read them.

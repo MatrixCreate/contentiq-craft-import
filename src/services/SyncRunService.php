@@ -584,6 +584,63 @@ class SyncRunService extends Component
     }
 
     /**
+     * Forecasts how many of this run's still-`pending` rows ImportPagesJob
+     * will skip rather than import, so the Sync screen's "Importing page N
+     * of M" can count only the pages the user actually selected instead of
+     * every row in the run (the run stages one row per exported page —
+     * locked and deselected ones included — and only marks them
+     * `skipped_*` as the job reaches each one).
+     *
+     * Two predicted skip classes, mutually exclusive by construction:
+     *
+     * - Locked: the page id maps (via contentiq_entry_syncs) to an entry
+     *   whose lock is set. StageRunJob applies the Sync screen's lock
+     *   selection before the importing phase begins, so this is current
+     *   by the time anything polls during that phase.
+     * - Deselected: the page id is in `$deselectedIds` (the run's
+     *   `options.newSelections`) and has no sync mapping at all — the
+     *   "genuinely new" condition ImportPagesJob itself requires before
+     *   honouring a deselection.
+     *
+     * This mirrors ImportPagesJob's checks closely but not exactly — the
+     * job resolves entries through ImportService::findExistingEntry(),
+     * whose slug/homepage fallbacks aren't replicated here — so callers
+     * must treat the result as an estimate and clamp accordingly.
+     *
+     * @param int $runId
+     * @param int[] $deselectedIds ContentIQ page ids deselected on the Sync screen.
+     * @return int
+     */
+    public function forecastPendingSkips(int $runId, array $deselectedIds): int
+    {
+        $mappedPageIds = (new Query())
+            ->select(['contentiq_page_id'])
+            ->from('{{%contentiq_entry_syncs}}')
+            ->where(['not', ['contentiq_page_id' => null]]);
+
+        $lockedPageIds = (clone $mappedPageIds)->andWhere(['locked' => true]);
+
+        $lockedPending = (int)(new Query())
+            ->from('{{%contentiq_sync_pages}}')
+            ->where(['run_id' => $runId, 'status' => self::STATUS_PENDING])
+            ->andWhere(['in', 'contentiq_page_id', $lockedPageIds])
+            ->count();
+
+        if (empty($deselectedIds)) {
+            return $lockedPending;
+        }
+
+        $deselectedPending = (int)(new Query())
+            ->from('{{%contentiq_sync_pages}}')
+            ->where(['run_id' => $runId, 'status' => self::STATUS_PENDING])
+            ->andWhere(['contentiq_page_id' => $deselectedIds])
+            ->andWhere(['not in', 'contentiq_page_id', $mappedPageIds])
+            ->count();
+
+        return $lockedPending + $deselectedPending;
+    }
+
+    /**
      * A slug → entry_id map from this run's imported rows — the map
      * ImportPagesJob/PostPassJob rebuild per batch (§3.4 of
      * CRAFT-IMPORT-QUEUE-SPEC.md) instead of carrying it in memory across

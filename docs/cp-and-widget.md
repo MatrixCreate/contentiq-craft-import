@@ -130,16 +130,17 @@ never-imported pages to actually pull in.
 Once a run is queued, `sync.twig` polls `sync/status` (`CpController::actionSyncStatus()`) on an interval until the run leaves `pending`. The JSON shape:
 
 ```
-{ status, phase, step, counts, progressLabel, stale }
+{ status, phase, step, counts, progress, progressLabel, stale }
 ```
 
 - **`status`** — the legacy vocabulary (`pending`|`success`|`warnings`|`errors`) the polling loop's own "keep going?" check still reads, unchanged by this pipeline so that check needed no rewrite.
 - **`phase`**/**`step`** — `SyncRun`'s `PHASE_*`/`STEP_*` constants (see [import-pipeline.md](import-pipeline.md#the-job-chain--phase-by-phase)); `phase === 'failed'` is what tells the frontend to show the Resume button instead of redirecting to the report.
 - **`counts`** — `SyncRunService::counts($runId)`: `total`, `pending`, `imported`, `skipped`, `failed`, `postpassDone`, `acked`, `locked` — row counts straight off `contentiq_sync_pages`, live for a still-running run.
-- **`progressLabel`** — a short server-computed string (`CpController::_progressLabel()`) like "Importing page 37 of 412" or "Locking synced entries…", built from `phase`/`step`/`counts`.
+- **`progress`** — `{ done, total }` during the `importing` phase, `null` otherwise (`CpController::_importProgress()`). Counted in *selected* pages, not rows: the run stages a row for every exported page — locked and deselected ones included — and `ImportPagesJob` only marks those `skipped_*` as it reaches them, so raw row counts showed "Importing page 2 of 2" for a run where one of two pages was selected. `total` is the rows not yet skipped minus the pending rows `SyncRunService::forecastPendingSkips()` predicts will be (page id mapped to a locked entry, or deselected with no mapping at all); `done` is the rows already imported or failed, clamped to `total`. The forecast mirrors the job's own checks but not `findExistingEntry()`'s slug/homepage fallbacks, so it's an estimate — hence the clamps.
+- **`progressLabel`** — a short server-computed string (`CpController::_progressLabel()`) like "Importing page 37 of 412" or "Locking synced entries…", built from `phase`/`step`/`progress`.
 - **`stale`** — `true` only on the one poll that just detected and failed a stalled run (see "Staleness" in [import-pipeline.md](import-pipeline.md#staleness)); every subsequent poll of that same (now `failed`) run reports `stale: false` again, since by then it's a normal terminal failure with its own error message.
 
-**The progress bar** (`#sync-progress-bar`/`#sync-progress-bar-bottom`, two copies — top and bottom of the screen, kept in lockstep) fills from a percentage the JS derives from `counts`, not from the server: `importing` uses `(counts.total - counts.pending) / counts.total`; `postpass`/`finalising` show a fixed high percentage (there's no cheap per-row postpass/finalise progress to compute); `staging` shows a low fixed percentage (the whole export is being decoded, nothing to count yet).
+**The progress bar** (`#sync-progress-bar`/`#sync-progress-bar-bottom`, two copies — top and bottom of the screen, kept in lockstep) fills from a percentage the JS derives client-side: `importing` uses `progress.done / progress.total` (selected pages, see above — never `counts`, which include rows the job will skip); `postpass`/`finalising` show a fixed high percentage (there's no cheap per-row postpass/finalise progress to compute); `staging` shows a low fixed percentage (the whole export is being decoded, nothing to count yet).
 
 **Resume.** Whenever a poll returns `phase: 'failed'`, a Resume button appears alongside the error message. Clicking it POSTs `contentiq-importer/cp/resume-run` (`CpController::actionResumeRun()`) with the run id; on success, polling resumes exactly as it did for the original submission. The button is never shown for any other phase — a run that's still going has nothing to resume, and a `done` run redirects straight to the report instead of staying on this screen.
 
