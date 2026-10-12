@@ -27,6 +27,7 @@ class Install extends Migration
         $this->_createGlobalsSyncTable();
         $this->_createAssetSyncsTable();
         $this->_createCtaSyncsTable();
+        $this->_createCardSyncsTable();
         $this->_createBlockSyncsTable();
 
         return true;
@@ -38,6 +39,7 @@ class Install extends Migration
     public function safeDown(): bool
     {
         $this->dropTableIfExists('{{%contentiq_block_syncs}}');
+        $this->dropTableIfExists('{{%contentiq_card_syncs}}');
         $this->dropTableIfExists('{{%contentiq_cta_syncs}}');
         $this->dropTableIfExists('{{%contentiq_asset_syncs}}');
         $this->dropTableIfExists('{{%contentiq_globals_sync}}');
@@ -267,6 +269,36 @@ class Install extends Migration
         $this->addForeignKey(
             null,
             '{{%contentiq_cta_syncs}}',
+            'element_id',
+            '{{%elements}}',
+            'id',
+            'CASCADE',
+        );
+    }
+
+    /**
+     * Creates the contentiq_card_syncs table ((page_id, block_id, position) → element id map).
+     *
+     * @return void
+     */
+    private function _createCardSyncsTable(): void
+    {
+        $this->createTable('{{%contentiq_card_syncs}}', [
+            'id'          => $this->primaryKey(),
+            'page_id'     => $this->integer()->notNull(),
+            'block_id'    => $this->string(255)->notNull(),
+            'position'    => $this->integer()->notNull(),
+            'element_id'  => $this->integer()->notNull(),
+            'dateCreated' => $this->dateTime()->notNull(),
+            'dateUpdated' => $this->dateTime()->notNull(),
+            'uid'         => $this->uid(),
+        ]);
+
+        $this->createIndex(null, '{{%contentiq_card_syncs}}', ['page_id', 'block_id', 'position'], true);
+
+        $this->addForeignKey(
+            null,
+            '{{%contentiq_card_syncs}}',
             'element_id',
             '{{%elements}}',
             'id',

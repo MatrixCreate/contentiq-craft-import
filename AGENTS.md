@@ -34,7 +34,7 @@ client installs, distributed via Packagist.
 
 **Declarative mapping — data over code.** `src/config/defaults.php` is the single source of truth for ContentiQ block type → Craft entry/field shape. Adding a block type is a config edit, not a `MatrixBuilder` change. Per-project overrides (`blockOverrides`, `content_types`, `slugMap`) replace a definition wholesale — never merged field-by-field. See [docs/block-mapping.md](docs/block-mapping.md).
 
-**Idempotency via sync tables keyed on ContentiQ ids.** Every write path that can run twice has a table mapping a ContentiQ id to the Craft element it produced (`contentiq_entry_syncs`, `contentiq_office_syncs`, `contentiq_asset_syncs`, `contentiq_cta_syncs`, `contentiq_block_syncs`). Re-running a sync updates the same Craft element instead of duplicating it — this is what makes "just re-sync" a safe answer to almost every support question.
+**Idempotency via sync tables keyed on ContentiQ ids.** Every write path that can run twice has a table mapping a ContentiQ id to the Craft element it produced (`contentiq_entry_syncs`, `contentiq_office_syncs`, `contentiq_asset_syncs`, `contentiq_cta_syncs`, `contentiq_card_syncs`, `contentiq_block_syncs`). Re-running a sync updates the same Craft element instead of duplicating it — this is what makes "just re-sync" a safe answer to almost every support question.
 
 **Per-page error isolation.** `ImportService::importPage()` wraps its entire body in one `try`/`catch`, converting any exception into a fatal *result*, never letting it propagate. One bad page in a batch sync never aborts the other 99. See [docs/import-pipeline.md](docs/import-pipeline.md#per-page-error-isolation).
 

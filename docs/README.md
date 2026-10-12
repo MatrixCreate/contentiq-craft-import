@@ -18,6 +18,7 @@ a walk through what actually happens when someone clicks Sync.
 - **[Block mapping](block-mapping.md)** — the declarative `defaults.php` mapping system, `MatrixBuilder`, `NodesRenderer`'s two rich-text paths, text-column splitting, text-and-media grouping, cards' two-pass reference resolution, hero, CTA entry creation, the diff-aware `preserveBlockIdentity` write path, and how to explore a target project's own Craft field layout.
 - **[Globals & offices](globals.md)** — the separate, per-run-consent-gated import of company info, offices, branding, social networks, trust signals, and scripts; the sync-owned field boundary; office idempotency; and the read-only URL-prefix drift check.
 - **[Assets](assets.md)** — how `ImageImportService` downloads and idempotently reuses images, the SSRF and path-traversal guards, the CLI webroot requirement, and multi-image custom blocks.
+- **[Cards migration](cards-migrate.md)** — the one-time `contentiq-importer/cards/migrate` command that converts legacy Manual Entry Cards blocks to standalone Card entries.
 - **[CP screens & sidebar widget](cp-and-widget.md)** — a tour of every Control Panel screen, the sync tree and report anatomy, and the per-entry sidebar widget's lock toggle, block notes, and sync button.
 
 ---

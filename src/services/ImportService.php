@@ -355,7 +355,7 @@ class ImportService extends Component
                 $this->_resolveProtectedGalleryFolderIds($blocks, $assetTargets['pageFolder'], $assetTargets['isSitemap'], $dryRun),
             );
 
-            $built = ContentIQImporter::$plugin->matrixBuilder->build($contentBlocks, $dryRun, $slug, $existingBlockMap, $this->_pageNotes($data));
+            $built = ContentIQImporter::$plugin->matrixBuilder->build($contentBlocks, $dryRun, $slug, $existingBlockMap, $this->_pageNotes($data), $pageId);
 
             $result['blocks']      = $built['blockReport'];
             $result['images']      = $built['imageReport'];
@@ -794,14 +794,16 @@ class ImportService extends Component
      * After all pages in a run are imported (so the slug→entry ID map is
      * complete), each deferred ref set recorded by MatrixBuilder is applied to
      * its block:
-     *   - pages (2+ refs): populate the block's `entries` relation in order.
-     *   - pages (single ref, D6): write one manual `card` row with the `entry`
-     *     relation + useEntryCardDetails, so Craft's single-entry auto-expansion
-     *     never fires (pages mode is literal).
+     *   - pages: populate the block's `entries` relation in order (a single ref
+     *     is written the same way — the template expands a single selected
+     *     parent to its children; the old nested `card` row is gone).
      *   - children (arbitrary parent): `entries` = [parent] — the template's
      *     single-entry expansion renders the parent's children. If the parent
      *     cannot be resolved (not in the batch, not in Craft), fall back to
-     *     manual cards parsed from the block's own intro prose.
+     *     cards parsed from the block's own intro prose — standalone Cards
+     *     entries (same writer as detected mode, keyed by the ref set's
+     *     pageId/blockId), or nested manual cards on installs with no Cards
+     *     section. A resolved parent prunes any earlier fallback cards.
      *   - children (parent == host page): nothing deferred (useChildPages set
      *     in pass 1).
      *
@@ -815,7 +817,7 @@ class ImportService extends Component
      * this directly, so PASS 3's link sweep always runs alongside it.
      *
      * @param array $allCardRefs   Deferred ref sets keyed by entryId; each value is a LIST
-     *                             of {blockIndex, mode, refs?|parent?, intro?, singlePageMode?}.
+     *                             of {blockIndex, mode, refs?|parent?, intro?, pageId?, blockId?}.
      * @param array $slugToEntryId In-run slug→entry ID map from pass 1.
      * @param bool  $dryRun        If true, resolve and warn but write nothing.
      * @return array<int, string[]> Warnings keyed by owner entry ID.
@@ -866,27 +868,15 @@ class ImportService extends Component
                 $mode  = $refSet['mode'] ?? '';
                 $dirty = false;
 
-                if ($mode === 'pages' && !empty($refSet['singlePageMode'])) {
-                    // D6: one literal page — a single manual card row rendering
-                    // from the referenced entry's own card fields.
-                    $slug       = $refSet['refs'][0]['slug'] ?? '';
-                    $resolvedId = $slug !== '' ? $resolve($slug) : null;
+                // Standalone-card identity (set by MatrixBuilder::build() when
+                // the page id was known) and whether this install writes
+                // standalone cards at all.
+                $pageId           = (int)($refSet['pageId'] ?? 0);
+                $cardBlockId      = isset($refSet['blockId']) ? (string)$refSet['blockId'] : null;
+                $standaloneActive = ContentIQImporter::$plugin->matrixBuilder->standaloneCardsActive(false);
+                $standaloneCfg    = $standaloneActive ? ContentIQImporter::$plugin->matrixBuilder->getStandaloneCardsConfig() : [];
 
-                    if ($resolvedId !== null) {
-                        $block->setFieldValue('entryCards', [
-                            'new1' => [
-                                'type'   => 'card',
-                                'fields' => [
-                                    'entry'               => [$resolvedId],
-                                    'useEntryCardDetails' => true,
-                                ],
-                            ],
-                        ]);
-                        $dirty = true;
-                    } else {
-                        $warn("Card reference slug '{$slug}' not found — card left empty.");
-                    }
-                } elseif ($mode === 'pages') {
+                if ($mode === 'pages') {
                     $entryIds = [];
 
                     foreach ($refSet['refs'] ?? [] as $ref) {
@@ -908,7 +898,8 @@ class ImportService extends Component
                 } elseif ($mode === 'children') {
                     $slug = $refSet['parent']['slug'] ?? '';
                     if ($slug === '') {
-                        // Host-page children — useChildPages was set in pass 1.
+                        // Host-page children — useChildPages was set in pass 1,
+                        // which also pruned any standalone cards this block owned.
                         continue;
                     }
 
@@ -916,25 +907,83 @@ class ImportService extends Component
                     if ($parentEntryId !== null) {
                         $block->setFieldValue('entries', [$parentEntryId]);
                         $dirty = true;
+
+                        // An earlier sync may have written prose-fallback
+                        // standalone cards for this block; the parent resolves
+                        // now, so they are stale.
+                        if ($standaloneActive && $pageId > 0 && $cardBlockId !== null) {
+                            $pruned = ContentIQImporter::$plugin->cards->pruneBlock($pageId, $cardBlockId, 0, $standaloneCfg, $dryRun);
+                            foreach ($pruned['warnings'] as $w) {
+                                $warn($w);
+                            }
+                            if ($dryRun && $pruned['deleted'] > 0) {
+                                $warn("Cards block '{$cardBlockId}' (dry run): would delete {$pruned['deleted']} stale fallback card(s).");
+                            }
+                        }
                     } else {
                         // Parent page isn't in this run or in Craft (not exported
                         // yet). Fall back to manual cards parsed from the block's
                         // own prose so it renders real cards instead of nothing.
                         // The next sync rebuilds the block in automatic mode, so
                         // the fallback self-heals once the parent is exported.
-                        $fallback = ContentIQImporter::$plugin->matrixBuilder
-                            ->buildChildrenFallbackCards($refSet['intro'] ?? []);
+                        if ($standaloneActive && $pageId > 0 && $cardBlockId !== null) {
+                            // Same standalone writer as detected mode.
+                            $fallback = ContentIQImporter::$plugin->matrixBuilder
+                                ->buildChildrenFallbackCardSpecs($refSet['intro'] ?? []);
 
-                        if ($fallback['cardCount'] > 0) {
-                            $block->setFieldValue('cardsInThisBlock', 'manual');
-                            $block->setFieldValue('entryCards', $fallback['cardRows']);
-                            $block->setFieldValue('richText', $fallback['introHtml']);
-                            $dirty = true;
-                            $warn("Children parent slug '{$slug}' not found — created {$fallback['cardCount']} manual cards "
-                                . "from the block content instead. Unlock and re-sync after '{$slug}' is exported "
-                                . 'to switch to automatic child cards.');
+                            if ($fallback['cardCount'] > 0) {
+                                $sync = ContentIQImporter::$plugin->cards
+                                    ->sync($pageId, $cardBlockId, $fallback['specs'], $standaloneCfg, $dryRun);
+                                foreach ($sync['warnings'] as $w) {
+                                    $warn($w);
+                                }
+
+                                $blockFields = ContentIQImporter::$plugin->matrixBuilder->standaloneBlockFields($sync['ids']);
+                                foreach ($blockFields['warnings'] as $w) {
+                                    $warn($w);
+                                }
+                                foreach ($blockFields['fields'] as $handle => $value) {
+                                    $block->setFieldValue($handle, $value);
+                                }
+                                $block->setFieldValue('richText', $fallback['introHtml']);
+                                // Clear legacy nested rows (emit [], never omit) — only if the field exists.
+                                if ($block->getFieldLayout()?->getFieldByHandle('entryCards') !== null) {
+                                    $block->setFieldValue('entryCards', []);
+                                }
+                                $dirty = true;
+
+                                $warn(($dryRun ? '(dry run) would write' : 'Wrote')
+                                    . " standalone cards from the block content because children parent slug '{$slug}' was not found: "
+                                    . "{$sync['created']} created, {$sync['updated']} updated, {$sync['deleted']} deleted. "
+                                    . "Unlock and re-sync after '{$slug}' is exported to switch to automatic child cards.");
+                            } else {
+                                // No repeating card pattern: drop any earlier fallback cards.
+                                $pruned = ContentIQImporter::$plugin->cards
+                                    ->pruneBlock($pageId, $cardBlockId, 0, $standaloneCfg, $dryRun);
+                                foreach ($pruned['warnings'] as $w) {
+                                    $warn($w);
+                                }
+                                $warn("Children parent slug '{$slug}' not found — children cards not populated.");
+                            }
                         } else {
-                            $warn("Children parent slug '{$slug}' not found — children cards not populated.");
+                            // Legacy install (no Cards section): nested manual cards.
+                            $fallback = ContentIQImporter::$plugin->matrixBuilder
+                                ->buildChildrenFallbackCards($refSet['intro'] ?? []);
+
+                            if ($fallback['cardCount'] > 0) {
+                                // Only if the field still exists (deleted from upgraded projects).
+                                if ($block->getFieldLayout()?->getFieldByHandle('cardsInThisBlock') !== null) {
+                                    $block->setFieldValue('cardsInThisBlock', 'manual');
+                                }
+                                $block->setFieldValue('entryCards', $fallback['cardRows']);
+                                $block->setFieldValue('richText', $fallback['introHtml']);
+                                $dirty = true;
+                                $warn("Children parent slug '{$slug}' not found — created {$fallback['cardCount']} manual cards "
+                                    . "from the block content instead. Unlock and re-sync after '{$slug}' is exported "
+                                    . 'to switch to automatic child cards.');
+                            } else {
+                                $warn("Children parent slug '{$slug}' not found — children cards not populated.");
+                            }
                         }
                     }
                 }
@@ -4499,7 +4548,11 @@ class ImportService extends Component
         // Collect block notes (page note first) for the sidebar widget.
         $result['blockNotes'] = implode("\n\n", $this->_collectNoteLines($data, $blocks));
 
-        $built = ContentIQImporter::$plugin->matrixBuilder->build($contentBlocks, $dryRun, $slug, [], $this->_pageNotes($data));
+        // Stable ContentIQ page id — needed by build() for standalone-card
+        // identity, and reused by CTA routing below.
+        $pageId = isset($data['document']['id']) ? (int)$data['document']['id'] : null;
+
+        $built = ContentIQImporter::$plugin->matrixBuilder->build($contentBlocks, $dryRun, $slug, [], $this->_pageNotes($data), $pageId);
 
         $result['blocks']   = $built['blockReport'];
         $result['images']   = $built['imageReport'];
@@ -4524,10 +4577,6 @@ class ImportService extends Component
         $footerGlobalCtaIntent = null;
 
         if (!$dryRun) {
-            // Stable ContentIQ page id — same contract as the page path (see
-            // importPage() step 10).
-            $pageId = isset($data['document']['id']) ? (int)$data['document']['id'] : null;
-
             $footerGlobalCtaIntent = $this->_resolveCtaBlocks(
                 $matrixData,
                 $blockKeyConsumption,

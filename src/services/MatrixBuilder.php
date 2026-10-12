@@ -5,6 +5,7 @@ namespace matrixcreate\contentiqimporter\services;
 use Craft;
 use matrixcreate\contentiqimporter\ContentIQImporter;
 use matrixcreate\contentiqimporter\helpers\AssetFolderPath;
+use matrixcreate\contentiqimporter\helpers\CardTitle;
 use matrixcreate\contentiqimporter\helpers\LinkHelper;
 use yii\base\Component;
 
@@ -77,6 +78,39 @@ class MatrixBuilder extends Component
      * @var bool
      */
     private bool $_isSitemap = false;
+
+    /**
+     * ContentIQ document.id of the page being built (null/0 = unknown). Set per
+     * {@see build()} call; standalone cards need it for their identity key.
+     *
+     * @var int|null
+     */
+    private ?int $_pageId = null;
+
+    /**
+     * Payload block id (or synthetic `cards-N`) of the cards block currently
+     * being built. Set by {@see build()} just before each {@see _buildBlock()}.
+     *
+     * @var string|null
+     */
+    private ?string $_blockId = null;
+
+    /**
+     * Whether the "standalone Cards section missing — falling back" warning
+     * has been raised yet. Deliberately NOT reset per build(): it fires once
+     * per run (the builder is a singleton), not once per page.
+     *
+     * @var bool
+     */
+    private bool $_standaloneFallbackWarned = false;
+
+    /**
+     * Set by {@see _buildStandaloneDetectedCards()}: the block just built
+     * (re)wrote its standalone cards, so {@see build()} must not prune them.
+     *
+     * @var bool
+     */
+    private bool $_cardsWritten = false;
 
     // Public Methods
     // =========================================================================
@@ -160,6 +194,9 @@ class MatrixBuilder extends Component
      * @param string  $pageNotes         The page-level `document.notes` text (already a string; '' when absent).
      *                                   PREPENDED to every outer block entry's `contentiqNotes` — no site has a
      *                                   page-level notes field, so the page note rides on each block entry.
+     * @param int|null $pageId           ContentIQ `document.id` of the page. Required for standalone Cards
+     *                                   (identity key in contentiq_card_syncs); null/0 makes inline cards use
+     *                                   the legacy nested-Matrix path.
      * @return array{
      *   matrixData: array<string, array>,
      *   blockReport: array<int, array{type: string, fields: string[], skipped: bool}>,
@@ -170,7 +207,7 @@ class MatrixBuilder extends Component
      *   pendingNestedButtons: array<string|int, array{richText?: array, textBlocks?: array<string, array>}>
      * }
      */
-    public function build(array $blocks, bool $dryRun = false, string $hostPageSlug = '', array $existingBlockMap = [], string $pageNotes = ''): array
+    public function build(array $blocks, bool $dryRun = false, string $hostPageSlug = '', array $existingBlockMap = [], string $pageNotes = '', ?int $pageId = null): array
     {
         $matrixData           = [];
         $blockReport          = [];
@@ -187,6 +224,10 @@ class MatrixBuilder extends Component
         $pendingNestedButtons = [];
         $counter              = 0;
         $this->_warnings      = [];
+        $this->_pageId        = $pageId;
+        $this->_blockId       = null;
+        $cardsOrdinal         = 0;      // Synthetic block ids for cards blocks without a payload `id`
+        $cardsBlockIds        = [];     // Block ids of every cards block in this payload (prune-stale input)
 
         // Pre-process: group consecutive blocks that use 'grouped' mode.
         $processedBlocks = $this->_groupConsecutiveBlocks($blocks);
@@ -236,6 +277,13 @@ class MatrixBuilder extends Component
             } else {
                 $sourceFields = $item['fields'] ?? [];
 
+                $this->_cardsWritten = false;
+
+                if ($type === 'cards') {
+                    $this->_blockId = isset($item['id']) && $item['id'] !== '' ? (string)$item['id'] : 'cards-' . (++$cardsOrdinal);
+                    $cardsBlockIds[] = $this->_blockId;
+                }
+
                 [$outerFields, $innerMatrixData, $reportedFields, $blockCardRefs, $nestedButtonsMeta] = $this->_buildBlock(
                     $type,
                     $mapping,
@@ -248,6 +296,32 @@ class MatrixBuilder extends Component
                 // Collect deferred card references (kept in memory, never persisted to Craft)
                 if (!empty($blockCardRefs)) {
                     $cardRefs[$counter] = array_merge(['blockIndex' => $counter], $blockCardRefs);
+
+                    // Pass 2 needs the standalone-card identity key. A pages /
+                    // host-parent children block owns no standalone cards, so
+                    // drop any left from an earlier detected/fallback sync now;
+                    // a deferred-parent children block is pruned in pass 2
+                    // (resolved parent) or rewritten there (prose fallback).
+                    if ($type === 'cards' && $this->_pageId > 0 && $this->_blockId !== null) {
+                        $cardRefs[$counter]['pageId']  = $this->_pageId;
+                        $cardRefs[$counter]['blockId'] = $this->_blockId;
+                    }
+                }
+
+                // Every outcome other than "pass 1 wrote the cards" or "pass 2
+                // will (re)write them for a deferred, named parent" leaves the
+                // block owning no standalone cards: prune whatever an earlier
+                // sync created (empty/host parent, pages mode, unknown mode).
+                if ($type === 'cards' && $this->_pageId > 0 && $this->_blockId !== null
+                    && !$this->_cardsWritten
+                    && (string)($blockCardRefs['parent']['slug'] ?? '') === ''
+                    && $this->standaloneCardsActive(false)
+                ) {
+                    $this->_reportCardPrune(
+                        ContentIQImporter::$plugin->cards->pruneBlock($this->_pageId, $this->_blockId, 0, $this->getStandaloneCardsConfig(), $dryRun),
+                        $dryRun,
+                        "Cards block '{$this->_blockId}'",
+                    );
                 }
             }
 
@@ -299,7 +373,7 @@ class MatrixBuilder extends Component
             $innerCount = isset($item['_groupedBlocks']) ? count($item['_groupedBlocks']) : 1;
             $blockReportRow = [
                 'type'   => $type,
-                'fields' => $reportedFields,
+                'fields' => array_values(array_unique($reportedFields)),
                 'skipped' => false,
                 'innerCount' => $innerCount,
             ];
@@ -315,6 +389,18 @@ class MatrixBuilder extends Component
 
             $blockReport[] = $blockReportRow;
         }
+
+        // Cards that belonged to cards blocks no longer in this payload.
+        if ($this->_pageId > 0 && $this->standaloneCardsActive(false)) {
+            $this->_reportCardPrune(
+                ContentIQImporter::$plugin->cards->pruneStale($this->_pageId, $cardsBlockIds, $this->getStandaloneCardsConfig(), $dryRun),
+                $dryRun,
+                'Removed cards blocks',
+            );
+        }
+
+        $this->_pageId  = null;
+        $this->_blockId = null;
 
         return [
             'matrixData'           => $matrixData,
@@ -638,11 +724,19 @@ class MatrixBuilder extends Component
                 // Return without inner matrix — deferred refs travel in memory via $cardRefs
                 return [$outerFields, [], $reportedFields, $cardRefs, $nestedButtonsMeta];
             }
-            // For detected mode, set cardsInThisBlock='manual' and continue to inner card matrix
-            $outerFields['cardsInThisBlock'] = 'manual';
-            $reportedFields[] = 'cardsInThisBlock';
-            $outerFields['useChildPages'] = false;
-            $reportedFields[] = 'useChildPages';
+            // Detected mode, default: inline cards become standalone entries in
+            // the Cards section, related from the block's `entries` field.
+            if ($this->_pageId > 0 && $this->_blockId !== null && $this->standaloneCardsActive()) {
+                return $this->_buildStandaloneDetectedCards($mapping, $sourceFields, $outerFields, $reportedFields, $imageReport, $dryRun, $nestedButtonsMeta);
+            }
+
+            // Legacy fallback (no Cards section / no page id): set
+            // cardsInThisBlock='manual' and continue to the inner card matrix.
+            if ($this->_pageId <= 0 && $this->getStandaloneCardsConfig() !== null) {
+                $this->_warnOnce('Cards: the page has no ContentIQ document id, so inline cards were written as nested manual cards instead of standalone entries.');
+            }
+            $this->_setModeField($outerFields, $reportedFields, 'cardsInThisBlock', 'manual');
+            $this->_setModeField($outerFields, $reportedFields, 'useChildPages', false);
         }
 
         // Build inner Matrix data.
@@ -992,6 +1086,8 @@ class MatrixBuilder extends Component
             'hyperButton'            => $this->_handleHyperButton($craftHandle, $value),
             'buttonLabel'            => $this->_handleButtonLabel($craftHandle, $value),
             'cardButtonLink'         => $this->_handleCardButtonLink($craftHandle, $value),
+            'cardTitle'              => [$craftHandle => CardTitle::plainText($value)],
+            'cardLink'               => $this->_handleStandaloneCardLink($craftHandle, $value),
             'faqNodes'               => $this->_handleFaqNodes($craftHandle, $value),
             'buttonNodes'            => $this->_handleButtonNodes($craftHandle, $value),
             'uspContent'             => $this->_handleUspContent($craftHandle, $value),
@@ -1643,6 +1739,33 @@ class MatrixBuilder extends Component
     }
 
     /**
+     * Converts a ContentIQ card button object to a standalone card's Hyper
+     * `cardLink` value. Unlike {@see _handleCardButtonLink()} it emits no
+     * `showActionButton` key — the `standaloneCard` entry type has no such
+     * field. A button with neither label nor url yields `[]` (never an omitted
+     * key, so a re-sync clears a previously set link).
+     *
+     * @param string $handle
+     * @param mixed  $value  {label, url, target} or null
+     * @return array<string, array>
+     */
+    private function _handleStandaloneCardLink(string $handle, mixed $value): array
+    {
+        if (!is_array($value)) {
+            return [$handle => []];
+        }
+
+        $label = (string)($value['label'] ?? '');
+        $url   = (string)($value['url'] ?? '');
+
+        if ($label === '' && $url === '') {
+            return [$handle => []];
+        }
+
+        return [$handle => [$this->_buildActionButtonLink($label, $url, $value['target'] ?? null)]];
+    }
+
+    /**
      * Extracts the label from a {label, url} button object and renders it as CKEditor HTML.
      *
      * @param string $handle
@@ -1792,14 +1915,252 @@ class MatrixBuilder extends Component
     }
 
     /**
+     * The resolved `cards.standalone` mapping, or null when the project's
+     * (possibly overridden) `cards` block has none — which means "legacy
+     * nested cards only".
+     *
+     * @return array{section: string, entryType: string, relationField: string, fields: array}|null
+     */
+    public function getStandaloneCardsConfig(): ?array
+    {
+        $cfg = $this->_mapping['cards']['standalone'] ?? null;
+
+        return is_array($cfg) ? $cfg : null;
+    }
+
+    /**
+     * Whether inline cards should be written as standalone entries on this
+     * install: `standalone` is configured, the Cards section + entry type
+     * exist, and the entryCards entry type has the relation field.
+     *
+     * When it's configured but unusable, warns (once per run) and returns
+     * false so the caller takes the legacy nested-Matrix path unchanged.
+     *
+     * @param bool $warn Pass false for pure probes (prune bookkeeping) that
+     *                   shouldn't raise the fallback warning on their own.
+     * @return bool
+     */
+    public function standaloneCardsActive(bool $warn = true): bool
+    {
+        $cfg = $this->getStandaloneCardsConfig();
+        if ($cfg === null) {
+            return false;
+        }
+
+        $service = ContentIQImporter::$plugin->cards ?? null;
+        $section = (string)($cfg['section'] ?? 'cards');
+        $type    = (string)($cfg['entryType'] ?? 'standaloneCard');
+
+        if ($service === null || !$service->isAvailable($section, $type)) {
+            if ($warn && !$this->_standaloneFallbackWarned) {
+                $this->_standaloneFallbackWarned = true;
+                $this->_warnOnce("Cards section '{$section}' / entry type '{$type}' not found — falling back to nested manual cards");
+            }
+
+            return false;
+        }
+
+        $relationField = (string)($cfg['relationField'] ?? 'entries');
+        $outerType     = (string)($this->_mapping['cards']['outerType'] ?? 'entryCards');
+
+        if (!$this->_entryTypeHasField($outerType, $relationField)) {
+            if ($warn) {
+                $this->_warnOnce("Cards: '{$outerType}' has no '{$relationField}' field to relate standalone cards from — falling back to nested manual cards.");
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Turns detected-mode cards into standalone-entry specs.
+     *
+     * Pure apart from the image handler: each spec is
+     * `['title' => string, 'fields' => [craftHandle => value]]`. The mapping's
+     * `title` handle is split out as the native title (plain text, falling
+     * back to "Card {1-based position}"); every other handle is resolved via
+     * the normal field handlers. A missing button yields `[]` (not an omitted
+     * key) so a re-sync clears a stale link.
+     *
+     * @param array[] $cards        ContentIQ `cards[]` items.
+     * @param array   &$imageReport Image report array.
+     * @param bool    $dryRun
+     * @return array<int, array{title: string, fields: array<string, mixed>}>
+     */
+    public function buildStandaloneCardSpecs(array $cards, array &$imageReport, bool $dryRun = false): array
+    {
+        $fieldMap = $this->getStandaloneCardsConfig()['fields'] ?? [];
+        $specs    = [];
+
+        foreach (array_values($cards) as $index => $card) {
+            $card   = is_array($card) ? $card : [];
+            $title  = '';
+            $fields = [];
+
+            foreach ($fieldMap as $contentiqKey => [$craftHandle, $handlerType]) {
+                $resolved = $this->_resolveFieldByHandler($handlerType, $craftHandle, $card[$contentiqKey] ?? null, $imageReport, $dryRun);
+
+                foreach ($resolved as $handle => $value) {
+                    if ($handle === 'title') {
+                        $title = (string)$value;
+                    } else {
+                        $fields[$handle] = $value;
+                    }
+                }
+            }
+
+            $specs[] = [
+                'title'  => $title !== '' ? $title : 'Card ' . ($index + 1),
+                'fields' => $fields,
+            ];
+        }
+
+        return $specs;
+    }
+
+    /**
+     * The outer-block fields that relate standalone cards: the relation field
+     * (always), plus `cardsInThisBlock = 'automatic'` and `useChildPages =
+     * false` ONLY when the entryCards layout has those fields. Missing
+     * fields are warned about by the caller, never written.
+     *
+     * @param int[] $ids Standalone card entry ids, in order.
+     * @return array{fields: array<string, mixed>, warnings: string[]}
+     */
+    public function standaloneBlockFields(array $ids): array
+    {
+        $cfg           = $this->getStandaloneCardsConfig() ?? [];
+        $relationField = (string)($cfg['relationField'] ?? 'entries');
+        $outerType     = (string)($this->_mapping['cards']['outerType'] ?? 'entryCards');
+        $fields        = [$relationField => array_values($ids)];
+        $warnings      = [];
+
+        // Upgraded projects have no mode fields at all: nothing written, no warning.
+        foreach (['cardsInThisBlock' => 'automatic', 'useChildPages' => false] as $handle => $value) {
+            if ($this->_entryTypeHasField($outerType, $handle)) {
+                $fields[$handle] = $value;
+            }
+        }
+
+        return ['fields' => $fields, 'warnings' => $warnings];
+    }
+
+    /**
+     * Builds a detected-mode cards block as standalone entries.
+     *
+     * @return array The {@see _buildBlock()} tuple.
+     */
+    private function _buildStandaloneDetectedCards(
+        array $mapping,
+        array $sourceFields,
+        array $outerFields,
+        array $reportedFields,
+        array &$imageReport,
+        bool $dryRun,
+        array $nestedButtonsMeta,
+    ): array {
+        $cfg       = $this->getStandaloneCardsConfig();
+        $outerType = (string)$mapping['outerType'];
+
+        // The intro lands on richText; a layout without it would otherwise
+        // drop the intro silently.
+        if (isset($outerFields['richText']) && !$this->_entryTypeHasField($outerType, 'richText')) {
+            unset($outerFields['richText']);
+            $reportedFields = array_values(array_diff($reportedFields, ['richText']));
+            $this->_warnOnce("Cards: '{$outerType}' has no 'richText' field — the block intro was not written.");
+        }
+
+        $cards = array_values(array_filter($sourceFields['cards'] ?? [], 'is_array'));
+        $specs = $this->buildStandaloneCardSpecs($cards, $imageReport, $dryRun);
+        $sync  = ContentIQImporter::$plugin->cards->sync($this->_pageId, $this->_blockId, $specs, $cfg, $dryRun);
+
+        foreach ($sync['warnings'] as $warning) {
+            $this->_warnOnce($warning);
+        }
+
+        if ($dryRun) {
+            $this->_warnOnce(sprintf(
+                "Cards block '%s' (dry run): would create %d, update %d and delete %d standalone card(s) — nothing written.",
+                $this->_blockId,
+                $sync['created'],
+                $sync['updated'],
+                $sync['deleted'],
+            ));
+        }
+
+        $this->_cardsWritten = true;
+
+        $block = $this->standaloneBlockFields($sync['ids']);
+        foreach ($block['warnings'] as $warning) {
+            $this->_warnOnce($warning);
+        }
+
+        foreach ($block['fields'] as $handle => $value) {
+            $outerFields[$handle] = $value;
+            $reportedFields[]     = $handle;
+        }
+
+        // Clear any legacy nested rows (emit the empty array, never omit it)
+        // — only when the field exists, since an unknown handle would error.
+        $innerMatrix = [];
+        $legacyField = $mapping['innerMatrix']['outerField'] ?? null;
+        if ($legacyField !== null && $this->_entryTypeHasField($outerType, $legacyField)) {
+            $innerMatrix[$legacyField] = [];
+        }
+
+        return [$outerFields, $innerMatrix, $reportedFields, [], $nestedButtonsMeta];
+    }
+
+    /**
+     * Writes a legacy cards mode field (`cardsInThisBlock` / `useChildPages`)
+     * only when the entryCards layout has it. A field removed from the layout
+     * is dropped by Craft, but one deleted from the project throws on set —
+     * and absence is the normal upgraded state, so there is no warning.
+     * Records the handle once in $reportedFields.
+     */
+    private function _setModeField(array &$fields, array &$reportedFields, string $handle, mixed $value): void
+    {
+        $outerType = (string)($this->_mapping['cards']['outerType'] ?? 'entryCards');
+
+        if (!$this->_entryTypeHasField($outerType, $handle)) {
+            return;
+        }
+
+        $fields[$handle] = $value;
+
+        if (!in_array($handle, $reportedFields, true)) {
+            $reportedFields[] = $handle;
+        }
+    }
+
+    /**
+     * Surfaces a prune result: stale-delete warnings always, and in a dry run
+     * the planned delete count.
+     *
+     * @param array{deleted: int, warnings: string[]} $result
+     */
+    private function _reportCardPrune(array $result, bool $dryRun, string $label): void
+    {
+        foreach ($result['warnings'] as $warning) {
+            $this->_warnOnce($warning);
+        }
+
+        if ($dryRun && $result['deleted'] > 0) {
+            $this->_warnOnce(sprintf('%s (dry run): would delete %d standalone card(s) — nothing written.', $label, $result['deleted']));
+        }
+    }
+
+    /**
      * Builds cards block in 'pages' or 'children' mode.
      *
      * Returns outer fields and deferred card references that will be resolved
      * by SyncJob pass 2 (kept in memory, never persisted to Craft).
      *
-     * For single-page selections in pages mode, creates a manual card row instead
-     * of automatic mode (D6 caveat: single-entry auto-expansion in automatic mode
-     * would unintentionally expand the page to its children).
+     * A single-page selection in pages mode is written like any other
+     * selection (`entries` = [page], automatic mode); the template expands a
+     * single selected parent to its children — see docs/block-mapping.md.
      *
      * @param string $cardMode       'pages' or 'children'.
      * @param array  $sourceFields   Block fields from ContentiQ export.
@@ -1835,33 +2196,15 @@ class MatrixBuilder extends Component
 
             $cards = $sourceFields['cards'] ?? [];
 
-            // D6 CAVEAT: Single-page selections must NOT trigger auto-expansion.
-            // Map single-page selections to manual mode with one card row.
-            if (count($cards) === 1) {
-                $card = $cards[0];
-                $page = $card['page'] ?? [];
-                $slug = $page['slug'] ?? null;
-                $entryId = $page['id'] ?? null;
-
-                if ($slug) {
-                    // Manual mode with one card row using entry relation + useEntryCardDetails:true
-                    $additionalFields['cardsInThisBlock'] = 'manual';
-                    $reportedFields[] = 'cardsInThisBlock';
-                    $additionalFields['useChildPages'] = false;
-                    $reportedFields[] = 'useChildPages';
-
-                    // Deferred ref: pass 2 will create the inner card row
-                    $cardRefs['singlePageMode'] = true;
-                    $cardRefs['refs'] = [['slug' => $slug, 'id' => $entryId]];
-                    return [$additionalFields, $cardRefs];
-                }
-            }
-
-            // Multiple pages: use automatic mode with deferred refs
-            $additionalFields['cardsInThisBlock'] = 'automatic';
-            $reportedFields[] = 'cardsInThisBlock';
-            $additionalFields['useChildPages'] = false;
-            $reportedFields[] = 'useChildPages';
+            // A single selected page is written like any other selection:
+            // automatic mode with `entries` = [page]. The front-end template
+            // expands a single selected PARENT entry to its children, so one
+            // card here may render as that page's child cards (documented in
+            // docs/block-mapping.md "Cards block"). The old nested `card` row
+            // with `useEntryCardDetails` is gone — that field exists in no
+            // project.
+            $this->_setModeField($additionalFields, $reportedFields, 'cardsInThisBlock', 'automatic');
+            $this->_setModeField($additionalFields, $reportedFields, 'useChildPages', false);
 
             $pageRefs = [];
             foreach ($cards as $card) {
@@ -1888,19 +2231,16 @@ class MatrixBuilder extends Component
             $parentSlug = $parent['slug'] ?? null;
             $parentId = $parent['id'] ?? null;
 
-            $additionalFields['cardsInThisBlock'] = 'automatic';
-            $reportedFields[] = 'cardsInThisBlock';
+            $this->_setModeField($additionalFields, $reportedFields, 'cardsInThisBlock', 'automatic');
 
             // Check if parent equals host page
             if ($parentSlug && $parentSlug === $hostPageSlug) {
                 // Parent is the host page — use live children query
-                $additionalFields['useChildPages'] = true;
-                $reportedFields[] = 'useChildPages';
+                $this->_setModeField($additionalFields, $reportedFields, 'useChildPages', true);
                 // No deferred ref needed
             } else {
                 // Arbitrary parent — defer resolution to pass 2
-                $additionalFields['useChildPages'] = false;
-                $reportedFields[] = 'useChildPages';
+                $this->_setModeField($additionalFields, $reportedFields, 'useChildPages', false);
                 $cardRefs['parent'] = [
                     'slug' => $parentSlug ?? '',
                     'id' => $parentId,
@@ -1944,8 +2284,69 @@ class MatrixBuilder extends Component
         $none = ['introHtml' => '', 'cardRows' => [], 'cardCount' => 0];
 
         $innerConfig = $this->_mapping['cards']['innerMatrix'] ?? null;
-        if ($innerConfig === null || empty($introNodes)) {
+        $split       = $innerConfig !== null ? $this->_splitChildrenFallbackItems($introNodes) : null;
+        if ($split === null) {
             return $none;
+        }
+
+        // Build rows through the standard mapping. Intro nodes carry no images,
+        // so dryRun=true is safe and guarantees no download side effects.
+        $imageReport = [];
+        $cardRows    = [];
+        $counter     = 0;
+
+        foreach ($split['items'] as $item) {
+            [$innerFields] = $this->_buildSingleInnerEntry($innerConfig, $item, $imageReport, true);
+            $cardRows['new' . (++$counter)] = [
+                'type'   => $innerConfig['innerType'],
+                'fields' => $innerFields,
+            ];
+        }
+
+        return [
+            'introHtml' => ContentIQImporter::$plugin->nodes->render($split['trueIntro']),
+            'cardRows'  => $cardRows,
+            'cardCount' => count($cardRows),
+        ];
+    }
+
+    /**
+     * Standalone-entry twin of {@see buildChildrenFallbackCards()}: the same
+     * prose parsing, but the items become standalone card specs (see
+     * {@see buildStandaloneCardSpecs()}) instead of nested Matrix rows.
+     *
+     * @param array $introNodes ContentNode[] retained in the deferred ref.
+     * @return array{introHtml: string, specs: array<int, array{title: string, fields: array}>, cardCount: int}
+     */
+    public function buildChildrenFallbackCardSpecs(array $introNodes): array
+    {
+        $split = $this->_splitChildrenFallbackItems($introNodes);
+        if ($split === null) {
+            return ['introHtml' => '', 'specs' => [], 'cardCount' => 0];
+        }
+
+        $imageReport = [];
+        $specs       = $this->buildStandaloneCardSpecs($split['items'], $imageReport, true);
+
+        return [
+            'introHtml' => ContentIQImporter::$plugin->nodes->render($split['trueIntro']),
+            'specs'     => $specs,
+            'cardCount' => count($specs),
+        ];
+    }
+
+    /**
+     * Splits a children-mode block's intro nodes into the true intro and
+     * detected-mode-shaped card items (see {@see buildChildrenFallbackCards()}
+     * for the card pattern rule). Null when there is no repeating card pattern.
+     *
+     * @param array $introNodes
+     * @return array{trueIntro: array, items: array[]}|null
+     */
+    private function _splitChildrenFallbackItems(array $introNodes): ?array
+    {
+        if (empty($introNodes)) {
+            return null;
         }
 
         // Pre-scan: count qualifying heading levels to find the card pattern.
@@ -1965,7 +2366,7 @@ class MatrixBuilder extends Component
         $cardHeadingLevel = $cardLevels[0] ?? null;
 
         if ($cardHeadingLevel === null) {
-            return $none;
+            return null;
         }
 
         // Split: true intro before the first card heading, then one item per
@@ -2006,25 +2407,7 @@ class MatrixBuilder extends Component
             $items[] = $current;
         }
 
-        // Build rows through the standard mapping. Intro nodes carry no images,
-        // so dryRun=true is safe and guarantees no download side effects.
-        $imageReport = [];
-        $cardRows    = [];
-        $counter     = 0;
-
-        foreach ($items as $item) {
-            [$innerFields] = $this->_buildSingleInnerEntry($innerConfig, $item, $imageReport, true);
-            $cardRows['new' . (++$counter)] = [
-                'type'   => $innerConfig['innerType'],
-                'fields' => $innerFields,
-            ];
-        }
-
-        return [
-            'introHtml' => ContentIQImporter::$plugin->nodes->render($trueIntro),
-            'cardRows'  => $cardRows,
-            'cardCount' => count($cardRows),
-        ];
+        return ['trueIntro' => $trueIntro, 'items' => $items];
     }
 
     /**

@@ -295,6 +295,8 @@ require __DIR__ . '/fixtures/craft-stubs.php';
 // autoloading (no Craft bootstrap here).
 require __DIR__ . '/../src/helpers/UrlSafety.php';
 require __DIR__ . '/../src/helpers/LinkHelper.php';
+require __DIR__ . '/../src/helpers/CardTitle.php';
+require __DIR__ . '/../src/services/CardsService.php';
 require __DIR__ . '/../src/services/NodesRenderer.php';
 require __DIR__ . '/../src/services/MatrixBuilder.php';
 
@@ -661,6 +663,317 @@ check(
     true,
     $cardEntries['new3']['fields']['cardLink'][0]['newWindow'] ?? null,
 );
+
+// -----------------------------------------------------------------------------
+// Standalone cards (1.38.0) — detected-mode cards become Cards-section entries.
+//
+// The stub harness has no element saves or DB, so CardsService is replaced by a
+// recording double; what is asserted is everything MatrixBuilder owns: spec
+// extraction (title derivation, link array, empty button → [], body HTML), the
+// outer-block fields, the layout probes + warnings, the legacy fallback, the
+// identity key handed to the service, and pruning calls. CardsService's own
+// create/update/delete behaviour needs a live Craft install.
+// -----------------------------------------------------------------------------
+echo "\nCardTitle — plain-text native title\n";
+
+use matrixcreate\contentiqimporter\helpers\CardTitle;
+
+check('title: plain heading', 'Rooms', CardTitle::derive(['level' => 3, 'text' => 'Rooms'], 1));
+check('title: tags stripped, entities decoded, whitespace collapsed', 'Bed & Breakfast now', CardTitle::derive(['text' => "<em>Bed &amp;\n Breakfast</em>   now"], 1));
+check('title: nbsp entity collapses to one space', 'A B', CardTitle::derive(['text' => 'A&nbsp;&nbsp;B'], 1));
+check('title: string heading accepted', 'Spa', CardTitle::derive('Spa', 1));
+check('title: missing heading falls back to Card N (1-based)', 'Card 3', CardTitle::derive(null, 3));
+check('title: whitespace-only falls back', 'Card 2', CardTitle::derive(['text' => " \n "], 2));
+check('title: tag-only falls back', 'Card 1', CardTitle::derive(['text' => '<br>'], 1));
+check('title: capped at 255 characters', 255, mb_strlen(CardTitle::derive(['text' => str_repeat('é', 400)], 1)));
+
+echo "\nMatrixBuilder — standalone cards\n";
+
+$cardsDouble = new class {
+    public bool $available = true;
+    public array $syncCalls = [];
+    public array $pruneBlockCalls = [];
+    public array $pruneStaleCalls = [];
+    public array $syncResult = ['ids' => [101, 102, 103], 'created' => 3, 'updated' => 0, 'deleted' => 0, 'warnings' => []];
+
+    public function isAvailable(string $section, string $entryType): bool
+    {
+        return $this->available;
+    }
+
+    public function sync(int $pageId, string $blockId, array $specs, array $cfg, bool $dryRun): array
+    {
+        $this->syncCalls[] = compact('pageId', 'blockId', 'specs', 'cfg', 'dryRun');
+
+        return $this->syncResult;
+    }
+
+    public function pruneBlock(int $pageId, string $blockId, int $keep, array $cfg, bool $dryRun): array
+    {
+        $this->pruneBlockCalls[] = [$pageId, $blockId, $keep, $dryRun];
+
+        return ['deleted' => 2, 'warnings' => []];
+    }
+
+    public function pruneStale(int $pageId, array $present, array $cfg, bool $dryRun): array
+    {
+        $this->pruneStaleCalls[] = [$pageId, $present, $dryRun];
+
+        return ['deleted' => 0, 'warnings' => []];
+    }
+};
+
+$cardsPlugin = new class {
+    public $nodes;
+    public $images;
+    public $imports;
+    public $cards;
+};
+$cardsPlugin->nodes   = $fakePlugin->nodes;
+$cardsPlugin->images  = $fakeImages;
+$cardsPlugin->imports = $fakeImports;
+$cardsPlugin->cards   = $cardsDouble;
+$previousCardsPlugin  = \matrixcreate\contentiqimporter\ContentIQImporter::$plugin;
+\matrixcreate\contentiqimporter\ContentIQImporter::$plugin = $cardsPlugin;
+
+$standaloneBuilder = static function (array $layoutFields = ['entries', 'richText', 'cardsInThisBlock', 'useChildPages', 'entryCards']): \matrixcreate\contentiqimporter\services\MatrixBuilder {
+    $b = new \matrixcreate\contentiqimporter\services\MatrixBuilder();
+    $b->prepare(['blockOverrides' => []]);
+    $b->entryTypeFieldProbe = static fn(string $type, string $handle): bool => $type === 'entryCards' && in_array($handle, $layoutFields, true);
+
+    return $b;
+};
+
+$detectedCardsBlock = [
+    'type'   => 'cards',
+    'id'     => 'Cards-0',
+    'fields' => [
+        'mode'  => 'detected',
+        'intro' => [['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Intro.']]]],
+        'cards' => [
+            [
+                'heading' => ['level' => 3, 'text' => 'With a button'],
+                'body'    => [['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Body one.']]]],
+                'button'  => ['label' => 'Read more', 'url' => '/about', 'target' => '_blank'],
+            ],
+            [
+                'body'   => [],
+                'button' => ['label' => '', 'url' => null],
+            ],
+            [
+                'heading' => ['level' => 3, 'text' => '<b>Third</b> &amp; last'],
+            ],
+        ],
+    ],
+];
+
+$sb    = $standaloneBuilder();
+$built = $sb->build([$detectedCardsBlock], false, 'home', [], '', 42);
+$call  = $cardsDouble->syncCalls[0] ?? [];
+$specs = $call['specs'] ?? [];
+$outer = $built['matrixData']['new1']['fields'] ?? [];
+
+check('standalone: sync keyed by (page id, block id)', [42, 'Cards-0', false], [$call['pageId'] ?? null, $call['blockId'] ?? null, $call['dryRun'] ?? null]);
+check('standalone: section/entryType config handed to the service', ['cards', 'standaloneCard'], [$call['cfg']['section'] ?? null, $call['cfg']['entryType'] ?? null]);
+check('standalone: one spec per card', 3, count($specs));
+check('standalone: title from heading', 'With a button', $specs[0]['title'] ?? null);
+check('standalone: missing heading → Card 2', 'Card 2', $specs[1]['title'] ?? null);
+check('standalone: title tags stripped + entities decoded', 'Third & last', $specs[2]['title'] ?? null);
+check('standalone: body is NodesRenderer HTML', '<p>Body one.</p>', $specs[0]['fields']['cardText'] ?? null);
+check(
+    'standalone: button → Hyper Url link, newWindow from target',
+    [[
+        'type'      => 'verbb\\hyper\\links\\Url',
+        'handle'    => 'default-verbb-hyper-links-url',
+        'linkValue' => '/about',
+        'linkText'  => 'Read more',
+        'linkClass' => 'btn btn-primary',
+        'newWindow' => true,
+    ]],
+    $specs[0]['fields']['cardLink'] ?? null,
+);
+check('standalone: empty label AND url → []', [], $specs[1]['fields']['cardLink'] ?? null);
+check('standalone: absent button → []', [], $specs[2]['fields']['cardLink'] ?? null);
+check('standalone: no showActionButton key on any spec', [false, false, false], array_map(static fn(array $sp): bool => array_key_exists('showActionButton', $sp['fields']), $specs));
+check('standalone: no image → empty cardImage', [], $specs[0]['fields']['cardImage'] ?? null);
+check('standalone: entries holds the synced ids', [101, 102, 103], $outer['entries'] ?? null);
+check('standalone: cardsInThisBlock automatic + useChildPages false', ['automatic', false], [$outer['cardsInThisBlock'] ?? null, $outer['useChildPages'] ?? null]);
+check('standalone: intro still on richText', '<p>Intro.</p>', $outer['richText'] ?? null);
+check('standalone: legacy entryCards cleared with an empty array', [], $outer['entryCards'] ?? 'MISSING');
+check('standalone: no warnings when everything is present', [], $built['warnings']);
+check('standalone: stale-prune called with this payload\'s cards block ids', [[42, ['Cards-0'], false]], $cardsDouble->pruneStaleCalls);
+
+// Layout probes — fields missing from entryCards are warned about, not written.
+$cardsDouble->syncCalls = [];
+$sb    = $standaloneBuilder(['entries']);
+$built = $sb->build([$detectedCardsBlock], false, 'home', [], '', 42);
+$outer = $built['matrixData']['new1']['fields'] ?? [];
+check('probe: missing cardsInThisBlock/useChildPages are not written', [false, false], [array_key_exists('cardsInThisBlock', $outer), array_key_exists('useChildPages', $outer)]);
+check('probe: entries still written', [101, 102, 103], $outer['entries'] ?? null);
+check('probe: missing richText drops the intro with a warning', [false, 1], [
+    array_key_exists('richText', $outer),
+    count(array_filter($built['warnings'], static fn(string $w): bool => str_contains($w, "no 'richText' field"))),
+]);
+check('probe: missing legacy entryCards field → no empty-array write', false, array_key_exists('entryCards', $outer));
+check('probe: absent mode fields are the normal upgraded state — no warning', 0, count(array_filter($built['warnings'], static fn(string $w): bool => str_contains($w, 'cardsInThisBlock') || str_contains($w, 'useChildPages'))));
+
+// No `entries` field → standalone is unusable: legacy nested cards + warning.
+$cardsDouble->syncCalls = [];
+$sb    = $standaloneBuilder(['richText', 'entryCards', 'cardsInThisBlock', 'useChildPages']);
+$built = $sb->build([$detectedCardsBlock], false, 'home', [], '', 42);
+check('no entries field: nothing synced', 0, count($cardsDouble->syncCalls));
+check('no entries field: legacy manual cards written', 'manual', $built['matrixData']['new1']['fields']['cardsInThisBlock'] ?? null);
+check('no entries field: warned', 1, count(array_filter($built['warnings'], static fn(string $w): bool => str_contains($w, "no 'entries' field"))));
+
+// Missing Cards section / entry type → legacy path unchanged, warned once per run.
+$cardsDouble->syncCalls = [];
+$cardsDouble->pruneBlockCalls = [];
+$cardsDouble->pruneStaleCalls = [];
+$cardsDouble->available = false;
+$sb     = $standaloneBuilder();
+$built  = $sb->build([$detectedCardsBlock], false, 'home', [], '', 42);
+$built2 = $sb->build([$detectedCardsBlock], false, 'home', [], '', 43);
+$legacyEntries = $built['matrixData']['new1']['fields']['entryCards'] ?? [];
+check('fallback: nothing synced', 0, count($cardsDouble->syncCalls));
+check('fallback: nested manual cards as before', ['manual', 3], [$built['matrixData']['new1']['fields']['cardsInThisBlock'] ?? null, count($legacyEntries)]);
+check('fallback: legacy cards keep showActionButton', true, $legacyEntries['new1']['fields']['showActionButton'] ?? null);
+check('fallback: warns that the section was not found', 1, count(array_filter($built['warnings'], static fn(string $w): bool => str_contains($w, "Cards section 'cards' / entry type 'standaloneCard' not found — falling back to nested manual cards"))));
+check('fallback: warning is raised once per run, not per page', 0, count(array_filter($built2['warnings'], static fn(string $w): bool => str_contains($w, 'falling back'))));
+check('fallback: no pruning when standalone is inactive', [[], []], [$cardsDouble->pruneBlockCalls, $cardsDouble->pruneStaleCalls]);
+$cardsDouble->available = true;
+
+// No page id → legacy path (no identity to key on).
+$cardsDouble->syncCalls = [];
+$built = $standaloneBuilder()->build([$detectedCardsBlock], false, 'home');
+check('no page id: legacy nested cards, nothing synced', ['manual', 0], [$built['matrixData']['new1']['fields']['cardsInThisBlock'] ?? null, count($cardsDouble->syncCalls)]);
+
+// Block without a payload id → synthetic cards-N identity.
+$cardsDouble->syncCalls = [];
+$noIdBlock = $detectedCardsBlock;
+unset($noIdBlock['id']);
+$standaloneBuilder()->build([$noIdBlock, $noIdBlock], false, 'home', [], '', 42);
+check('synthetic block ids: cards-1, cards-2', ['cards-1', 'cards-2'], array_map(static fn(array $c): string => $c['blockId'], $cardsDouble->syncCalls));
+
+// Dry run: passed through, planned counts reported, nothing relies on writes.
+$cardsDouble->syncCalls   = [];
+$cardsDouble->syncResult  = ['ids' => [], 'created' => 3, 'updated' => 0, 'deleted' => 1, 'warnings' => []];
+$built = $standaloneBuilder()->build([$detectedCardsBlock], true, 'home', [], '', 42);
+check('dry run: service told dryRun=true', true, $cardsDouble->syncCalls[0]['dryRun'] ?? null);
+check('dry run: planned counts reported', 1, count(array_filter($built['warnings'], static fn(string $w): bool => str_contains($w, 'would create 3, update 0 and delete 1'))));
+$cardsDouble->syncResult = ['ids' => [101, 102, 103], 'created' => 3, 'updated' => 0, 'deleted' => 0, 'warnings' => []];
+
+// pages / children modes own no standalone cards: block pruned in pass 1 (host-parent) or deferred (parent set).
+$cardsDouble->pruneBlockCalls = [];
+$built = $standaloneBuilder()->build([[
+    'type' => 'cards', 'id' => 'Cards-1',
+    'fields' => ['mode' => 'pages', 'cards' => [['page' => ['slug' => 'rooms', 'id' => 7]]]],
+]], false, 'home', [], '', 42);
+check('pages mode: block pruned to zero cards', [[42, 'Cards-1', 0, false]], $cardsDouble->pruneBlockCalls);
+check('pages mode: ref set carries pageId + blockId for pass 2', [42, 'Cards-1'], [$built['cardRefs'][0]['pageId'] ?? null, $built['cardRefs'][0]['blockId'] ?? null]);
+
+$cardsDouble->pruneBlockCalls = [];
+$built = $standaloneBuilder()->build([[
+    'type' => 'cards', 'id' => 'Cards-2',
+    'fields' => ['mode' => 'children', 'parent' => ['slug' => 'elsewhere', 'id' => 9], 'intro' => []],
+]], false, 'home', [], '', 42);
+check('children mode, deferred parent: pruning left to pass 2', [], $cardsDouble->pruneBlockCalls);
+check('children mode, deferred parent: ref set carries identity', [42, 'Cards-2'], [$built['cardRefs'][0]['pageId'] ?? null, $built['cardRefs'][0]['blockId'] ?? null]);
+
+// Mode fields absent from the project (upgraded state): never emitted, never warned.
+$noModeFields = static fn(array $block, array $layout = ['entries', 'richText']): array => $standaloneBuilder($layout)->build([$block], false, 'home', [], '', 42);
+$pagesBlock    = ['type' => 'cards', 'id' => 'Cards-5', 'fields' => ['mode' => 'pages', 'cards' => [['page' => ['slug' => 'rooms', 'id' => 7]]]]];
+$hostBlock     = ['type' => 'cards', 'id' => 'Cards-6', 'fields' => ['mode' => 'children', 'parent' => ['slug' => 'home', 'id' => 1]]];
+$parentBlock   = ['type' => 'cards', 'id' => 'Cards-7', 'fields' => ['mode' => 'children', 'parent' => ['slug' => 'elsewhere', 'id' => 9]]];
+foreach (['pages' => $pagesBlock, 'children host' => $hostBlock, 'children parent' => $parentBlock] as $label => $blk) {
+    $r = $noModeFields($blk);
+    $f = $r['matrixData']['new1']['fields'];
+    check("absent mode fields, {$label}: no cardsInThisBlock/useChildPages keys, no warnings", [false, false, []], [
+        array_key_exists('cardsInThisBlock', $f), array_key_exists('useChildPages', $f), $r['warnings'],
+    ]);
+    check("absent mode fields, {$label}: not in the report", [], array_values(array_intersect($r['blockReport'][0]['fields'], ['cardsInThisBlock', 'useChildPages'])));
+}
+$r = $noModeFields($hostBlock, ['entries', 'richText', 'cardsInThisBlock', 'useChildPages']);
+check('host-parent children mode: useChildPages => true when the field exists', [true, 'automatic'], [
+    $r['matrixData']['new1']['fields']['useChildPages'] ?? null, $r['matrixData']['new1']['fields']['cardsInThisBlock'] ?? null,
+]);
+check('mode fields reported once per block', 1, count(array_keys($r['blockReport'][0]['fields'], 'useChildPages', true)));
+
+// Single selected page: no nested card row, no useEntryCardDetails; pass 2 writes entries.
+$single = $standaloneBuilder()->build([[
+    'type'   => 'cards',
+    'fields' => ['mode' => 'pages', 'cards' => [['page' => ['slug' => 'rooms', 'id' => 7]]]],
+]], false, 'home', [], '', 42);
+$singleFields = $single['matrixData']['new1']['fields'];
+check(
+    'pages mode, single page: automatic + deferred ref, no manual card row',
+    ['automatic', false, [['slug' => 'rooms', 'id' => 7]], false, false],
+    [
+        $singleFields['cardsInThisBlock'] ?? null,
+        $singleFields['useChildPages'] ?? null,
+        $single['cardRefs'][0]['refs'] ?? null,
+        array_key_exists('entryCards', $singleFields),
+        isset($single['cardRefs'][0]['singlePageMode']),
+    ],
+);
+
+// Every non-writing outcome for a still-present cards block prunes its cards.
+$cardsDouble->pruneBlockCalls = [];
+$standaloneBuilder()->build([[
+    'type' => 'cards', 'id' => 'Cards-3',
+    'fields' => ['mode' => 'children', 'parent' => ['slug' => '', 'id' => null], 'intro' => []],
+]], false, 'home', [], '', 42);
+check('children mode, empty parent slug (not host): pruned in pass 1', [[42, 'Cards-3', 0, false]], $cardsDouble->pruneBlockCalls);
+
+$cardsDouble->pruneBlockCalls = [];
+$standaloneBuilder()->build([[
+    'type' => 'cards', 'id' => 'Cards-4',
+    'fields' => ['mode' => 'children'],
+]], false, 'home', [], '', 42);
+check('children mode, host parent: pruned in pass 1', [[42, 'Cards-4', 0, false]], $cardsDouble->pruneBlockCalls);
+
+$cardsDouble->pruneBlockCalls = [];
+$standaloneBuilder()->build([$detectedCardsBlock], false, 'home', [], '', 42);
+check('detected mode: rewritten, not pruned by block', [], $cardsDouble->pruneBlockCalls);
+
+// Author for new cards: owner page's author, else first admin, else none.
+check('author: owner author wins', 7, \matrixcreate\contentiqimporter\services\CardsService::chooseAuthorId(7, 1));
+check('author: falls back to first admin', 1, \matrixcreate\contentiqimporter\services\CardsService::chooseAuthorId(null, 1));
+check('author: owner id 0 treated as none', 1, \matrixcreate\contentiqimporter\services\CardsService::chooseAuthorId(0, 1));
+check('author: neither → null (cards not created, warned)', null, \matrixcreate\contentiqimporter\services\CardsService::chooseAuthorId(null, null));
+
+// Children prose fallback produces standalone specs through the same extractor.
+$fallbackProse = [
+    ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Lead-in.']]],
+    ['type' => 'heading', 'level' => 3, 'text' => 'First'],
+    ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'One.']]],
+    ['type' => 'ctaButton', 'label' => 'Go', 'url' => '/go'],
+    ['type' => 'heading', 'level' => 3, 'text' => 'Second'],
+    ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Two.']]],
+];
+$fb = $standaloneBuilder()->buildChildrenFallbackCardSpecs($fallbackProse);
+check('children fallback specs: count + intro', [2, '<p>Lead-in.</p>'], [$fb['cardCount'], $fb['introHtml']]);
+check('children fallback specs: titles + body + link', ['First', '<p>One.</p>', 'Go', 'Second', []], [
+    $fb['specs'][0]['title'],
+    $fb['specs'][0]['fields']['cardText'],
+    $fb['specs'][0]['fields']['cardLink'][0]['linkText'] ?? null,
+    $fb['specs'][1]['title'],
+    $fb['specs'][1]['fields']['cardLink'],
+]);
+check('children fallback specs: no repeating pattern → none', 0, $standaloneBuilder()->buildChildrenFallbackCardSpecs([['type' => 'heading', 'level' => 3, 'text' => 'Only']])['cardCount']);
+check('children fallback legacy rows unchanged', 2, $standaloneBuilder()->buildChildrenFallbackCards($fallbackProse)['cardCount']);
+
+// blockOverrides replacing `cards` without a `standalone` key keeps the nested behaviour.
+$cardsDouble->syncCalls = [];
+$overrideBuilder = new \matrixcreate\contentiqimporter\services\MatrixBuilder();
+$defaultsForOverride = require __DIR__ . '/../src/config/defaults.php';
+$legacyCards = $defaultsForOverride['cards'];
+unset($legacyCards['standalone']);
+$overrideBuilder->prepare(['blockOverrides' => ['cards' => $legacyCards]]);
+$overrideBuilder->entryTypeFieldProbe = static fn(string $t, string $h): bool => $t === 'entryCards';
+$built = $overrideBuilder->build([$detectedCardsBlock], false, 'home', [], '', 42);
+check('override without standalone key: legacy nested cards, nothing synced', ['manual', 0], [$built['matrixData']['new1']['fields']['cardsInThisBlock'] ?? null, count($cardsDouble->syncCalls)]);
+
+\matrixcreate\contentiqimporter\ContentIQImporter::$plugin = $previousCardsPlugin;
 
 // -----------------------------------------------------------------------------
 // MatrixBuilder — image_gallery block mapping (Phase 1 images mode + Phase 2

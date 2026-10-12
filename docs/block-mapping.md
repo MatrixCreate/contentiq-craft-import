@@ -317,35 +317,134 @@ price-list buttons.
 
 ## Cards block
 
-Cards import directly to `entryCards` (inner type `card`). ContentiQ's
-`fields.mode` selects one of three paths, all resolved in
+ContentiQ's `fields.mode` selects one of three paths, all resolved in
 `MatrixBuilder::_buildBlock()`'s cards special-case and
-`_buildCardsByMode()`:
+`_buildCardsByMode()`; the block itself is always an `entryCards` outer
+entry:
 
-- **`detected`** — inline card items in the payload; imported as ordinary
-  `repeated`-mode manual cards (`cardsInThisBlock: manual`). No deferral.
+- **`detected`** — inline card items in the payload. **Default (1.38.0): each
+  card becomes a STANDALONE entry** in the Cards channel section and is
+  related from the block's `entries` field (see "Standalone cards" below).
+  The nested `card` Matrix rows (`cardsInThisBlock: manual`) are now only a
+  fallback for installs with no Cards section.
 - **`pages`** — the block references specific pages by slug.
 - **`children`** — the block references a parent page whose children should
   render as cards.
 
-**`detected` mode's button writes `cardLink` + `showActionButton`, not a
-label.** The target `card` entry type has no `actionButtonLabel` field —
-only `cardLink` (a verbb Hyper field, Entry and Url link types) and
-`showActionButton` (Lightswitch). `MatrixBuilder::_handleCardButtonLink()`
-converts a card's `{label, url}` button into a Hyper Url link array on
-`cardLink` and flips `showActionButton` on; a card with no real button
-(empty label and url) emits `cardLink: []` and leaves `showActionButton`
-off. A project whose `card` entry type still carries the older
-`actionButtonLabel` field can restore the label-only mapping via
-`blockOverrides`, pointing the cards block's `button` field at the
-`buttonLabel` handler instead. This mapping only ever writes a Hyper Url
-link — see "Hyper link fields" below for the pass-3 sweep that upgrades it to
-a live Entry link once its target has a Craft entry.
+### Standalone cards (detected mode, default)
+
+Configured by the `standalone` key of the `cards` mapping in `defaults.php`:
+
+```php
+'standalone' => [
+    'section'       => 'cards',          // channel section handle
+    'entryType'     => 'standaloneCard', // entry type handle
+    'relationField' => 'entries',        // entries field on the entryCards block
+    'fields' => [                        // contentiqKey => [craftHandle, handler]
+        'heading' => ['title',     'cardTitle'],
+        'body'    => ['cardText',  'nodes'],
+        'image'   => ['cardImage', 'image'],
+        'button'  => ['cardLink',  'cardLink'],
+    ],
+],
+```
+
+Target entry type: native title plus `cardImage` (Assets), `cardText`
+(CKEditor) and `cardLink` (verbb Hyper). There is **no `showActionButton`**
+on a standalone card and the importer never writes one.
+
+Field mapping:
+
+- **Title** — the heading reduced to plain text: tags stripped, entities
+  decoded, whitespace collapsed, capped at 255 characters, falling back to
+  `Card {position}` (1-based) when empty (`helpers/CardTitle`).
+- **Body** — the usual `NodesRenderer` HTML into `cardText`.
+- **Image** — the existing `ImageImportService` path into `cardImage` (the
+  field is single-asset; one id is written).
+- **Button** — `{label, url, target}` becomes the Hyper Url link
+  (`LinkHelper::hyperUrlLink()`, same shape as every other button, wrapped
+  in a one-item list). A button with neither label nor url writes `[]`, never
+  an omitted key, so a re-sync clears a stale link. Pass 3 later upgrades the
+  Url link to an Entry link where the target exists (see "Hyper link fields").
+
+`cardsInThisBlock` / `useChildPages` are legacy mode fields that upgraded projects have deleted entirely; their absence from the `entryCards` layout is the normal state, so in every mode (pass 1, pass 2 and the legacy branch) they are written only when present and never warned about (setting a field that no longer exists would throw).
+
+The outer block gets `entries => [ids]` in card order. `cardsInThisBlock =
+'automatic'` and `useChildPages = false` are written **only if those fields
+exist** in the `entryCards` layout (probed with `_entryTypeHasField()`); a
+missing one is warned about, not written. A missing `entries` field makes
+standalone unusable (fallback below); a missing `richText` drops the block
+intro with a warning. The legacy `entryCards` Matrix is emitted as `[]` (when
+the field exists) so no stale nested rows survive.
+
+**Fallback.** `MatrixBuilder::standaloneCardsActive()` resolves the section
+and entry type by handle (via `CardsService::isAvailable()`, memoized). If
+either is missing it warns once per run — *"Cards section 'cards' / entry
+type 'standaloneCard' not found — falling back to nested manual cards"* —
+and the existing nested path (`innerMatrix`, `cardsInThisBlock: manual`,
+`showActionButton` and all) runs unchanged. It is also used when the page has
+no ContentIQ document id (nothing to key identity on). A project that
+overrides the whole `cards` block via `blockOverrides` without a `standalone`
+key keeps the nested behaviour (overrides replace blocks wholesale).
+
+#### Identity, idempotency and pruning
+
+Payload cards carry no per-card id, so identity is
+`(page_id, block_id, position)` in **`contentiq_card_syncs`**:
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | PK | |
+| `page_id` | int, not null | ContentIQ `document.id` |
+| `block_id` | varchar(255), not null | payload block `id` (stable across exports — see `preserveBlockIdentity` below); a block without one gets a synthetic `cards-N` (N = ordinal among the page's cards blocks) |
+| `position` | int, not null | 0-based card index within the block |
+| `element_id` | int, not null | FK → `elements.id`, `ON DELETE CASCADE` |
+| `dateCreated`, `dateUpdated`, `uid` | | |
+
+Unique index on `(page_id, block_id, position)`. Created by
+`m261009_000001_add_card_syncs_table` and by `Install.php`.
+
+`CardsService::sync()` (modelled on the CTA entry map): for each card
+position, if a map row exists **and** its element is live and a
+`standaloneCard` in the Cards section, the entry is **updated in place**;
+otherwise a new entry is created and the row upserted. Cards are saved
+**with validation**, and new cards get an explicit **author** — queue jobs and
+the console have no logged-in user, and the `cards` section requires an author:
+the owner page entry's author (looked up via `contentiq_entry_syncs`), else the
+first admin user (same rule as `cards/migrate`); with neither, the cards are
+not created and a warning says why. Existing cards keep their author. Saves are
+validated; a failure becomes a page warning (and, for an update,
+the existing entry stays related). A stale or foreign mapping (element gone,
+trashed, wrong section/type) is treated as unmapped.
+
+**Pruning** then deletes (Craft soft-delete, not disable):
+
+- mapped cards of the block at `position >= new count`;
+- mapped cards for any `block_id` of the page that is no longer a cards block
+  in the payload (`CardsService::pruneStale()`, called at the end of
+  `MatrixBuilder::build()`);
+- all cards of a block still present in the payload that no longer writes
+  them: `pages` mode, `children` mode with the host page or an empty parent
+  slug, or an unrecognised mode (all pruned in pass 1); and `children` with a
+  named parent that now resolves (pruned in pass 2). The only paths that keep
+  cards are the ones that rewrite them.
+
+Rows are removed with their elements (soft-delete doesn't cascade the FK).
+
+**Dry run** creates, updates and deletes nothing: `CardsService` only reads,
+and the planned counts surface as page warnings ("Cards block 'X' (dry run):
+would create N, update M and delete K standalone card(s)").
+
+Card text links are not yet covered by the pass-3 link sweep (it walks the
+owner entry and CTA entries only).
+
+### `pages` / `children`
 
 **`pages`/`children` defer to pass 2.** These two modes carry no card items
 in the block itself — only refs (slugs/ids). MatrixBuilder records a
 deferred ref set per block (`result['cardRefs'][$blockIndex]`, in memory
-only) and returns without building an inner Matrix at all.
+only; it now also carries the `pageId` and `blockId` standalone cards key on)
+and returns without building an inner Matrix at all.
 `ImportService::resolveCardReferences(array $allCardRefs, array
 $slugToEntryId, ...)` runs this pass **after** the whole run's slug → entry
 ID map is complete, from every entry point that reaches
@@ -359,11 +458,14 @@ run has processed. Resolved blocks are located by `blockIndex` in the
 owner's saved `contentBlocks` and **saved directly as elements** — the owner
 page entry is never re-saved for this.
 
-**Single-ref `pages` mode (D6 caveat).** A `pages`-mode block with exactly
-one card becomes a manual card row (`entry: [$id], useEntryCardDetails:
-true`) instead of automatic mode — automatic mode with a single entry
-triggers Craft's own auto-expansion-to-children behaviour, which is not what
-a genuine single-page card selection means here.
+**Single-ref `pages` mode.** A `pages`-mode block with exactly one card is
+written like any other selection: automatic mode with `entries: [$id]`. (It
+used to become a nested manual `card` row with `entry` +
+`useEntryCardDetails`; that field exists in no project, so the row is gone.)
+**The front-end template expands a single selected parent entry to its
+children**, so a one-page selection renders that page's child cards rather
+than a card for the page itself — a known property of the template, not
+something the importer works around.
 
 **`children` mode, parent == host page** → `useChildPages: true`, resolved
 entirely in pass 1 (a live query, nothing to defer). **Arbitrary parent** →
@@ -371,17 +473,21 @@ deferred; pass 2 sets `entries: [$parentId]` and the template expands to its
 children.
 
 **Children-mode fallback when the parent never resolves** (parent page not
-yet exported/in Craft). Rather than leave the block empty,
-`MatrixBuilder::buildChildrenFallbackCards()` parses the block's own
-retained `intro` nodes back into manual cards, using the same pattern
+yet exported/in Craft). Rather than leave the block empty, the block's own
+retained `intro` nodes are parsed back into cards, using the same pattern
 ContentiQ's own detected-mode serialisers use: the card heading level is the
 most prominent heading level ≥2 that appears 2+ times. Nodes before the
 first such heading become the true intro (rewritten into `richText` so card
 content isn't duplicated as prose above the grid); each heading afterwards
 starts one card (body = following paragraphs/lists, CTA button if present —
-last one wins). No repeating pattern ⇒ no fallback, block stays empty. The
-fallback self-heals: once the parent is exported and resolvable, the next
-sync rebuilds the block in automatic mode and replaces these rows.
+last one wins). No repeating pattern ⇒ no fallback, block stays empty (and
+earlier fallback cards are pruned). With standalone cards active
+(`MatrixBuilder::buildChildrenFallbackCardSpecs()`) these go through the same
+`CardsService::sync()` writer as detected mode, keyed by the ref set's
+`(pageId, blockId)`; otherwise `buildChildrenFallbackCards()` builds the
+legacy nested rows. The fallback self-heals: once the parent is exported and
+resolvable, the next sync rebuilds the block in automatic mode and (pass 2)
+prunes the fallback cards.
 
 ---
 

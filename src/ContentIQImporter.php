@@ -16,6 +16,7 @@ use craft\helpers\Html;
 use craft\helpers\UrlHelper;
 use craft\services\UserPermissions;
 use matrixcreate\contentiqimporter\models\Settings;
+use matrixcreate\contentiqimporter\services\CardsService;
 use matrixcreate\contentiqimporter\services\ContentIQApiService;
 use matrixcreate\contentiqimporter\services\GlobalsImportService;
 use matrixcreate\contentiqimporter\services\ImageImportService;
@@ -33,6 +34,7 @@ use yii\base\Event;
  * ContentIQ plugin.
  *
  * @property-read ContentIQApiService $api
+ * @property-read CardsService $cards
  * @property-read GlobalsImportService $globals
  * @property-read ImageImportService $images
  * @property-read ImportService $imports
@@ -54,7 +56,7 @@ class ContentIQImporter extends Plugin
     // =========================================================================
 
     /** @var string */
-    public const VERSION = '1.3.0';
+    public const VERSION = '1.38.0';
 
     // Static Properties
     // =========================================================================
@@ -78,7 +80,7 @@ class ContentIQImporter extends Plugin
     /**
      * @var string
      */
-    public string $schemaVersion = '1.4.0';
+    public string $schemaVersion = '1.5.0';
 
     // Public Methods
     // =========================================================================
@@ -94,6 +96,7 @@ class ContentIQImporter extends Plugin
 
         $this->setComponents([
             'api' => ContentIQApiService::class,
+            'cards' => CardsService::class,
             'globals' => GlobalsImportService::class,
             'images' => ImageImportService::class,
             'imports' => ImportService::class,

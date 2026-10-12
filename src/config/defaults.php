@@ -185,6 +185,29 @@ return [
         'outerFields' => [
             'intro' => ['richText', 'nodes'],  // ContentNode[] → HTML above card grid
         ],
+        // DEFAULT for inline (detected-mode) cards: each card becomes a
+        // standalone entry in the `section` channel, related from the block's
+        // `relationField`. Identity/pruning live in contentiq_card_syncs —
+        // see docs/block-mapping.md "Cards block". Fields are
+        // contentiqKey => [craftHandle, handlerType]; the handle 'title' is the
+        // entry's native title (plain text, falls back to "Card N").
+        // Omit this key (blockOverrides replaces the whole 'cards' block) to
+        // keep the nested-Matrix behaviour.
+        'standalone' => [
+            'section'       => 'cards',
+            'entryType'     => 'standaloneCard',
+            'relationField' => 'entries',
+            'fields'        => [
+                'heading' => ['title',     'cardTitle'],  // {level,text} → plain-text native title
+                'body'    => ['cardText',  'nodes'],      // ContentNode[] → HTML via NodesRenderer
+                'image'   => ['cardImage', 'image'],
+                'button'  => ['cardLink',  'cardLink'],   // {label,url,target} → Hyper Url link, or []
+            ],
+        ],
+        // LEGACY fallback: nested `card` Matrix rows (cardsInThisBlock =
+        // 'manual'). Used only when the standalone section / entry type does
+        // not exist on the install (or `standalone` is omitted), and by the
+        // pass-2 children fallback on such installs.
         'innerMatrix' => [
             'outerField' => 'entryCards',
             'innerType'  => 'card',
