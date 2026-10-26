@@ -256,7 +256,9 @@ Downloads go through `Craft::createGuzzleClient()`, not `file_get_contents()`
 — this is what makes self-signed dev-domain certs (e.g. `contentiq.test`)
 work, and it respects any project `config/guzzle.php` overrides. Failures
 are non-fatal by design: `_download()` returns `null` on any exception, HTTP
-status ≥ 300, an empty/missing temp file, or a body over the 25MB cap;
+status ≥ 300, an empty/missing temp file, or a body over the size cap (25MB for images/documents; `maxVideoBytes`,
+default 200 MiB, for files with a video extension — mp4/webm/mov/m4v/ogv —
+which also get a 300s timeout instead of 30s);
 `importFromField()` propagates that `null` up, and every caller treats a
 `null` result as "leave this field empty and continue" rather than aborting
 the whole page/block/globals import.

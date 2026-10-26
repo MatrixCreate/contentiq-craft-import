@@ -35,6 +35,7 @@ return [
     // 'allowPrivateAssetUrls' => true,     // LOCAL DEV ONLY — bypasses the SSRF guard for a
                                              // loopback-resolving dev domain; inert unless devMode
                                              // is also true. See docs/assets.md.
+    // 'maxVideoBytes'     => 200 * 1024 * 1024, // Download cap for video files (Text & Media video); images stay at 25 MiB
     'matrixField'         => 'contentBlocks',
     'seoField'            => 'seo',
     // Hero carousel handles (nested inside the 'hero' ContentBlock) — only if your fork named them differently:

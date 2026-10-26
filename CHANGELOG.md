@@ -2,6 +2,16 @@
 
 Earlier history lives in the [GitHub releases](https://github.com/MatrixCreate/contentiq-craft-import/releases).
 
+## 1.39.0 - 2026-10-26
+
+### Added
+
+- Text & Media `media_type` (`image` | `backgroundImage` | `video`) is read per inner block; absent `media_type` falls back to the legacy `layout: 'background'` rule.
+- Text & Media video: `mediaType: video` with a nested `videoBlock` (written as `{fields: {…}}`, the shape Craft's ContentBlock reads; `videoSource` streaming | asset, `videoUrl`, `videoAsset`). Uploaded video files are imported into the images volume page folder. Missing starter handles raise a page-report warning and fall back to an empty image block; a failed video asset import raises a page-report warning.
+- Text & Media video `poster` (either source) is written to `videoBlock.alternativePosterImage`; a missing handle raises a page-report warning.
+- `maxVideoBytes` config (default 200 MiB) caps downloads of video files (chosen by file extension), with a 300 s download timeout; images and documents keep the 25 MiB cap and 30 s timeout.
+- A failed video poster import raises a page-report warning.
+
 ## 1.38.0 - 2026-10-09
 
 ### Changed

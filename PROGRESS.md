@@ -2,6 +2,12 @@
 
 Capped rolling log — older entries roll off verbatim to `docs/_archive/`. Durable knowledge belongs in `docs/`, not accumulated here.
 
+## Text & Media media type, video + poster (2026-10-26, 1.39.0)
+
+- `MatrixBuilder::_handleTextMediaMedia()` reads `media_type` (legacy `layout: 'background'` fallback); `_buildTextMediaVideo()` writes `videoBlock` as `['fields' => …]` (`videoSource`, `videoUrl`, `videoAsset`, `alternativePosterImage`). A flat array is silently dropped by Craft's ContentBlock, and the standalone runner can't see that; only a real sync proves it.
+- `maxVideoBytes` (200 MiB) + 300 s timeout for video extensions. Page-report warnings for missing handles and failed video/poster imports.
+- Docs: `docs/block-mapping.md` T&M, `docs/assets.md`, README. Cross-repo recap: workspace root `recap-TEXT-MEDIA-MEDIA-TYPE.md`.
+
 ## Empty asset folders travel to Craft (2026-10-08)
 
 - Export entries now carry `folders: [{name, sort_order}]`; `ImportService::_ensurePageFolders()` creates each at `withSubfolder(pageFolder, name)` in the images volume (sitemap strategy, real run only, deduped, locked entries too via `importPageAssetsOnly()`), before `_importPageAssets()`.

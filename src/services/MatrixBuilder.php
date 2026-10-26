@@ -3,6 +3,7 @@
 namespace matrixcreate\contentiqimporter\services;
 
 use Craft;
+use craft\fields\ContentBlock;
 use matrixcreate\contentiqimporter\ContentIQImporter;
 use matrixcreate\contentiqimporter\helpers\AssetFolderPath;
 use matrixcreate\contentiqimporter\helpers\CardTitle;
@@ -33,7 +34,8 @@ class MatrixBuilder extends Component
      * Overrides the live entry-type field-layout probe used by
      * {@see _entryTypeHasField()}.
      *
-     * Signature: `fn(string $entryTypeHandle, string $fieldHandle): bool`. Only
+     * Signature: `fn(string $entryTypeHandle, string $fieldHandle): bool`. The
+     * entry type handle may be `entryType:contentBlockHandle` to probe a ContentBlock's nested layout. Only
      * set by the standalone test runner, which has no Craft application to ask.
      *
      * @var callable|null
@@ -440,8 +442,17 @@ class MatrixBuilder extends Component
         }
 
         try {
-            $entryType = Craft::$app->getEntries()->getEntryTypeByHandle($entryTypeHandle);
-            $hasField  = $entryType?->getFieldLayout()?->getFieldByHandle($fieldHandle) !== null;
+            // "entryType:contentBlockHandle" probes a field nested inside a
+            // ContentBlock field's own layout (e.g. textAndMediaBlock:videoBlock).
+            [$typeHandle, $blockHandle] = array_pad(explode(':', $entryTypeHandle, 2), 2, null);
+            $layout = Craft::$app->getEntries()->getEntryTypeByHandle($typeHandle)?->getFieldLayout();
+
+            if ($blockHandle !== null) {
+                $blockField = $layout?->getFieldByHandle($blockHandle);
+                $layout     = $blockField instanceof ContentBlock ? $blockField->getFieldLayout() : null;
+            }
+
+            $hasField = $layout?->getFieldByHandle($fieldHandle) !== null;
         } catch (\Throwable $e) {
             Craft::warning("ContentIQ could not inspect the '{$entryTypeHandle}' field layout: {$e->getMessage()}", __METHOD__);
             $hasField = false;
@@ -1148,31 +1159,45 @@ class MatrixBuilder extends Component
     }
 
     /**
-     * Resolves the mediaType and image fields for a text_and_media inner block.
+     * Resolves the mediaType and media fields for a text_and_media inner block.
      *
-     * The block's `layout` selects the Craft media treatment:
-     *   - 'background' → mediaType 'backgroundImage'; the images render as a
-     *     full-bleed CSS background, so they are routed to the desktop/mobile
-     *     background image fields the template reads (NOT the standard image field).
-     *     `image` is the desktop background; the optional `mobile_image` is the
-     *     mobile background, falling back to the desktop image when not supplied.
-     *   - anything else → mediaType 'image'; the image is set on the image field
-     *     (the left/right position comes from the outer entry's blockLayout).
+     * The block's `media_type` selects the Craft media treatment (whitelisted:
+     * image | backgroundImage | video). When `media_type` is absent (a
+     * ContentIQ release predating it) the legacy `layout === 'background'`
+     * maps to backgroundImage, anything else to image. ContentIQ also still
+     * emits `layout: 'background'` as a legacy shadow when media_type is
+     * backgroundImage; {@see _handleTextMediaLayout()} maps it to the default.
+     *   - image → the image is set on the image field (left/right position
+     *     comes from the outer entry's blockLayout).
+     *   - backgroundImage → routed to the desktop/mobile background image
+     *     fields the template reads. `image` is the desktop background; the
+     *     optional `mobile_image` is the mobile background, falling back to
+     *     the desktop image when not supplied.
+     *   - video → mediaType 'video' plus a `videoBlock` ContentBlock value;
+     *     see {@see _buildTextMediaVideo()}.
      *
      * Receives the entire inner block fields array (via the '_block' source key).
      *
-     * @param mixed $value        The inner block fields array ({nodes, image, mobile_image, layout}).
+     * @param mixed $value        The inner block fields array ({nodes, image, mobile_image, layout, media_type, video}).
      * @param array &$imageReport Image report array, mutated by the image handler.
      * @param bool  $dryRun
      * @return array<string, mixed>
      */
     private function _handleTextMediaMedia(mixed $value, array &$imageReport, bool $dryRun): array
     {
-        $fields = is_array($value) ? $value : [];
-        $layout = (string)($fields['layout'] ?? '');
-        $image  = $fields['image'] ?? null;
+        $fields    = is_array($value) ? $value : [];
+        $image     = $fields['image'] ?? null;
+        $mediaType = $fields['media_type'] ?? null;
 
-        if ($layout === 'background') {
+        if (!in_array($mediaType, ['image', 'backgroundImage', 'video'], true)) {
+            $mediaType = (string)($fields['layout'] ?? '') === 'background' ? 'backgroundImage' : 'image';
+        }
+
+        if ($mediaType === 'video') {
+            return $this->_buildTextMediaVideo($fields['video'] ?? null, $imageReport, $dryRun);
+        }
+
+        if ($mediaType === 'backgroundImage') {
             $desktopIds = $this->_handleImage('desktopBackgroundImage', $image, $imageReport, $dryRun)['desktopBackgroundImage'];
 
             // Optional mobile background — fall back to the desktop image when absent
@@ -1190,6 +1215,114 @@ class MatrixBuilder extends Component
         }
 
         return ['mediaType' => 'image'] + $this->_handleImage('image', $image, $imageReport, $dryRun);
+    }
+
+    /**
+     * Builds the mediaType + `videoBlock` values for a Text & Media video block.
+     *
+     * Wire shape: `video` = `{source: 'asset'|'streaming', asset: {key,url,mime,filename}|null, url: string|null}`.
+     *   - streaming → `videoBlock = {fields: {videoSource: 'streaming', videoUrl: <url>}}`
+     *     (OembedField accepts a plain URL string).
+     *   - asset → `videoBlock = {fields: {videoSource: 'asset', videoAsset: [assetId]}}`,
+     *     the file imported via ImageImportService into the page's images
+     *     folder (like images; the larger `maxVideoBytes` cap applies).
+     *
+     * Wire `video.poster` (an image object; empty shape = none) is written to
+     * `alternativePosterImage` as `[assetId]` for either source, via the normal
+     * image import path. `playVideo` is a CMS-editor choice and never written.
+     * The values are wrapped in `['fields' => …]` because Craft's ContentBlock
+     * field only reads that key from serialized data (hero precedent).
+     *
+     * Missing target handles are non-fatal (hero precedent):
+     * a page-report warning is raised and the block falls back to an image
+     * block with no image. An empty video (no URL / no asset) still sets
+     * mediaType 'video' with a warning; a failed asset import does too.
+     *
+     * @param mixed $video        The wire `video` object.
+     * @param array &$imageReport Image report array, mutated by the image handler.
+     * @param bool  $dryRun
+     * @return array<string, mixed>
+     */
+    private function _buildTextMediaVideo(mixed $video, array &$imageReport, bool $dryRun): array
+    {
+        $innerType = 'textAndMediaBlock';
+        $block     = 'videoBlock';
+        $video     = is_array($video) ? $video : [];
+        $source    = ($video['source'] ?? null) === 'asset' ? 'asset' : 'streaming';
+
+        $fallback = ['mediaType' => 'image'];
+
+        if (!$this->_entryTypeHasField($innerType, $block)) {
+            $this->_warnOnce("Text & Media video: the {$innerType} entry type has no '{$block}' field, so video blocks were imported as empty image blocks. Update the starter or map the video manually.");
+
+            return $fallback;
+        }
+
+        $hasNested = fn(string $handle): bool => $this->_entryTypeHasField("{$innerType}:{$block}", $handle);
+
+        $videoValues = [];
+
+        if ($source === 'streaming') {
+            $url = trim((string)($video['url'] ?? ''));
+
+            if (!$hasNested('videoSource')) {
+                $this->_warnOnce("Text & Media video: the {$block} field has no 'videoSource' field; the streaming URL was written without selecting a source (the starter default is streaming).");
+            } else {
+                $videoValues['videoSource'] = 'streaming';
+            }
+
+            if ($url === '' || !preg_match('#^https?://#i', $url)) {
+                $this->_warnings[] = $url === ''
+                    ? 'Text & Media video block has no streaming URL — the video was left empty.'
+                    : "Text & Media video URL \"{$url}\" is not an http(s) URL — the video was left empty.";
+            } elseif (!$hasNested('videoUrl')) {
+                $this->_warnOnce("Text & Media video: the {$block} field has no 'videoUrl' field; streaming URLs were skipped.");
+            } else {
+                $videoValues['videoUrl'] = $url;
+            }
+        } else {
+            if (!$hasNested('videoSource') || !$hasNested('videoAsset')) {
+                $this->_warnOnce("Text & Media video: the {$block} field is missing 'videoSource' or 'videoAsset'; uploaded video files were skipped and the block was imported as an empty image block.");
+
+                return $fallback;
+            }
+
+            $videoValues['videoSource'] = 'asset';
+            $asset                      = $video['asset'] ?? null;
+
+            if (!is_array($asset) || empty($asset['url'])) {
+                $this->_warnings[] = 'Text & Media video block has no video file — the video was left empty.';
+            } else {
+                $ids = $this->_handleImage('videoAsset', $asset, $imageReport, $dryRun)['videoAsset'];
+
+                if ($ids === [] && !$dryRun) {
+                    $name = (string)($asset['filename'] ?? $asset['key'] ?? $asset['url']);
+                    $this->_warnings[] = "Text & Media video file \"{$name}\" could not be imported (download failed, over the maxVideoBytes limit, or the volume rejected the file type) — the video was left empty.";
+                }
+
+                $videoValues['videoAsset'] = $ids;
+            }
+        }
+
+        // Optional poster (either source): empty-shape image object = no poster.
+        $poster = $video['poster'] ?? null;
+
+        if (is_array($poster) && !empty($poster['url'])) {
+            if (!$hasNested('alternativePosterImage')) {
+                $this->_warnOnce("Text & Media video: the {$block} field has no 'alternativePosterImage' field; video poster images were skipped.");
+            } else {
+                $posterIds = $this->_handleImage('alternativePosterImage', $poster, $imageReport, $dryRun)['alternativePosterImage'];
+
+                if ($posterIds === [] && !$dryRun) {
+                    $this->_warnings[] = 'Text & Media video poster image could not be imported — the video was left without a poster.';
+                }
+
+                $videoValues['alternativePosterImage'] = $posterIds;
+            }
+        }
+
+        // ContentBlock::_createContentBlockFromSerializedData() only reads $value['fields'].
+        return ['mediaType' => 'video', $block => ['fields' => $videoValues]];
     }
 
     /**

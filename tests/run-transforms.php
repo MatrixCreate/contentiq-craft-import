@@ -2094,6 +2094,10 @@ $missingDocsImages = new class {
     {
     }
 
+    public function setMaxVideoBytes($bytes)
+    {
+    }
+
     public function prepare($volumeHandle, $folderPath, $dryRun = false, $relocate = false, $legacyFolderPath = null)
     {
     }
@@ -3589,6 +3593,128 @@ $r = $runEnsure(['folders' => [['name' => 'Gallery'], ['name' => 'gallery'], ['n
 check('names that sanitise identically create one folder', [1, ['contentiq/isle-of-wight/gallery']], [$r['folders']['created'], $folderImages->created]);
 
 \matrixcreate\contentiqimporter\ContentIQImporter::$plugin = $previousPlugin;
+
+// -----------------------------------------------------------------------------
+echo "\nMatrixBuilder — Text & Media media_type (image | backgroundImage | video)\n";
+
+$tmImages = new class {
+    public array $calls = [];
+    public bool $fail = false;
+    public function importFromField($value, $dryRun)
+    {
+        $this->calls[] = $value['key'] ?? $value['url'];
+        if ($this->fail) {
+            return null;
+        }
+        return ['id' => 100 + count($this->calls), 'filename' => basename((string)$value['url']), 'reused' => false];
+    }
+};
+$tmPlugin = new class {
+    public $nodes;
+    public $images;
+    public $imports;
+};
+$tmPlugin->nodes   = $fakePlugin->nodes;
+$tmPlugin->images  = $tmImages;
+$tmPlugin->imports = $fakeImports;
+$previousTmPlugin  = \matrixcreate\contentiqimporter\ContentIQImporter::$plugin;
+\matrixcreate\contentiqimporter\ContentIQImporter::$plugin = $tmPlugin;
+
+/**
+ * Builds one text_and_media block; $handles lists the field handles the
+ * (faked) starter layout has: 'textAndMediaBlock:videoBlock' style keys.
+ */
+$buildTm = static function(array $fields, array $handles = ['textAndMediaBlock:videoBlock', 'textAndMediaBlock:videoBlock:videoSource', 'textAndMediaBlock:videoBlock:videoUrl', 'textAndMediaBlock:videoBlock:videoAsset', 'textAndMediaBlock:videoBlock:alternativePosterImage']) use ($tmImages): array {
+    $tmImages->calls = [];
+    $builder = new \matrixcreate\contentiqimporter\services\MatrixBuilder();
+    $builder->prepare(['blockOverrides' => []]);
+    $builder->entryTypeFieldProbe = static function(string $type, string $handle) use ($handles): bool {
+        // Nested probes arrive as ("textAndMediaBlock:videoBlock", "videoSource").
+        return in_array("{$type}:{$handle}", $handles, true);
+    };
+    $res = $builder->build([['type' => 'text_and_media', 'fields' => $fields]]);
+    $inner = array_values($res['matrixData'][array_key_first($res['matrixData'])]['fields']['textAndMediaBlocks'] ?? []);
+
+    return ['inner' => $inner[0]['fields'] ?? [], 'warnings' => $res['warnings'] ?? []];
+};
+
+$img = ['key' => 'p/a.jpg', 'url' => 'https://x.test/a.jpg', 'alt' => '', 'credit' => '', 'caption' => ''];
+$mob = ['key' => 'p/m.jpg', 'url' => 'https://x.test/m.jpg'];
+
+$r = $buildTm(['media_type' => 'image', 'layout' => 'image_left', 'image' => $img]);
+check('media_type image: mediaType image + image set', ['image', [101]], [$r['inner']['mediaType'] ?? null, $r['inner']['image'] ?? null]);
+
+$r = $buildTm(['media_type' => 'backgroundImage', 'layout' => 'background', 'image' => $img, 'mobile_image' => $mob]);
+check('media_type backgroundImage: desktop + mobile routed', ['backgroundImage', [101], [102]], [$r['inner']['mediaType'] ?? null, $r['inner']['desktopBackgroundImage'] ?? null, $r['inner']['mobileBackgroundImage'] ?? null]);
+
+$r = $buildTm(['media_type' => 'backgroundImage', 'layout' => 'background', 'image' => $img]);
+check('backgroundImage without mobile: mobile falls back to desktop', [[101], [101]], [$r['inner']['desktopBackgroundImage'] ?? null, $r['inner']['mobileBackgroundImage'] ?? null]);
+
+$r = $buildTm(['layout' => 'background', 'image' => $img]);
+check('legacy: absent media_type + layout background => backgroundImage', 'backgroundImage', $r['inner']['mediaType'] ?? null);
+
+$r = $buildTm(['layout' => 'image_right', 'image' => $img]);
+check('legacy: absent media_type + image_right => image', 'image', $r['inner']['mediaType'] ?? null);
+
+$r = $buildTm(['media_type' => 'bogus', 'layout' => 'image_right', 'image' => $img]);
+check('garbage media_type falls back to layout rule (image)', 'image', $r['inner']['mediaType'] ?? null);
+
+$tmLayoutRes = (function() use ($buildTm, $img) {
+    $builder = new \matrixcreate\contentiqimporter\services\MatrixBuilder();
+    $builder->prepare(['blockOverrides' => []]);
+    $res = $builder->build([['type' => 'text_and_media', 'fields' => ['media_type' => 'backgroundImage', 'layout' => 'background', 'image' => $img]]]);
+    return $res['matrixData'][array_key_first($res['matrixData'])]['fields']['blockLayout'] ?? null;
+})();
+check("legacy shadow layout 'background' keeps outer blockLayout at text-left", 'text-left', $tmLayoutRes);
+
+$r = $buildTm(['media_type' => 'video', 'layout' => 'image_right', 'image' => null, 'video' => ['source' => 'streaming', 'asset' => null, 'url' => 'https://youtu.be/abc']]);
+check('video streaming: value shape', ['video', ['fields' => ['videoSource' => 'streaming', 'videoUrl' => 'https://youtu.be/abc']]], [$r['inner']['mediaType'] ?? null, $r['inner']['videoBlock'] ?? null]);
+check('video streaming: no asset import, no warnings', [[], []], [$tmImages->calls, $r['warnings']]);
+
+$vid = ['key' => 'p/clip.mp4', 'url' => 'https://x.test/clip.mp4', 'mime' => 'video/mp4', 'filename' => 'clip.mp4'];
+$r = $buildTm(['media_type' => 'video', 'image' => null, 'video' => ['source' => 'asset', 'asset' => $vid, 'url' => null]]);
+check('video asset: value shape', ['video', ['fields' => ['videoSource' => 'asset', 'videoAsset' => [101]]]], [$r['inner']['mediaType'] ?? null, $r['inner']['videoBlock'] ?? null]);
+check('video asset: imported via ImageImportService, no warnings', [['p/clip.mp4'], []], [$tmImages->calls, $r['warnings']]);
+
+$tmImages->fail = true;
+$r = $buildTm(['media_type' => 'video', 'image' => null, 'video' => ['source' => 'asset', 'asset' => $vid, 'url' => null]]);
+check('video asset import null: videoAsset empty + page-report warning', [[], 1], [$r['inner']['videoBlock']['fields']['videoAsset'] ?? 'MISSING', count($r['warnings'])]);
+$tmImages->fail = false;
+
+$r = $buildTm(['media_type' => 'video', 'image' => null, 'video' => ['source' => 'streaming', 'asset' => null, 'url' => '']]);
+check('empty streaming video: mediaType video kept + warning', ['video', 1], [$r['inner']['mediaType'] ?? null, count($r['warnings'])]);
+
+$r = $buildTm(['media_type' => 'video', 'image' => null, 'video' => ['source' => 'streaming', 'url' => 'javascript:alert(1)']]);
+check('non-http streaming URL is not written + warning', [false, 1], [isset($r['inner']['videoBlock']['fields']['videoUrl']), count($r['warnings'])]);
+
+$r = $buildTm(['media_type' => 'video', 'image' => null, 'video' => null]);
+check('null video object: mediaType video + warning, nothing fatal', ['video', 1], [$r['inner']['mediaType'] ?? null, count($r['warnings'])]);
+
+$r = $buildTm(['media_type' => 'video', 'image' => null, 'video' => ['source' => 'streaming', 'url' => 'https://vimeo.com/1']], []);
+check('missing videoBlock handle: falls back to image + warning', ['image', false, 1], [$r['inner']['mediaType'] ?? null, isset($r['inner']['videoBlock']), count($r['warnings'])]);
+
+$r = $buildTm(['media_type' => 'video', 'image' => null, 'video' => ['source' => 'asset', 'asset' => $vid]], ['textAndMediaBlock:videoBlock', 'textAndMediaBlock:videoBlock:videoSource', 'textAndMediaBlock:videoBlock:videoUrl']);
+check('missing videoAsset handle: skipped, image fallback + warning, no import', ['image', 1, []], [$r['inner']['mediaType'] ?? null, count($r['warnings']), $tmImages->calls]);
+
+$r = $buildTm(['media_type' => 'video', 'image' => null, 'video' => ['source' => 'streaming', 'url' => 'https://vimeo.com/1']], ['textAndMediaBlock:videoBlock', 'textAndMediaBlock:videoBlock:videoUrl']);
+check('missing videoSource handle (streaming): URL still written + warning', [['fields' => ['videoUrl' => 'https://vimeo.com/1']], 1], [$r['inner']['videoBlock'] ?? null, count($r['warnings'])]);
+
+$poster = ['key' => 'p/poster.jpg', 'url' => 'https://x.test/poster.jpg', 'alt' => 'Poster', 'credit' => '', 'caption' => ''];
+$empty  = ['key' => '', 'url' => '', 'alt' => '', 'credit' => '', 'caption' => ''];
+
+$r = $buildTm(['media_type' => 'video', 'image' => null, 'video' => ['source' => 'streaming', 'url' => 'https://youtu.be/abc', 'poster' => $poster]]);
+check('video streaming + poster: alternativePosterImage written', [['fields' => ['videoSource' => 'streaming', 'videoUrl' => 'https://youtu.be/abc', 'alternativePosterImage' => [101]]], []], [$r['inner']['videoBlock'] ?? null, $r['warnings']]);
+
+$r = $buildTm(['media_type' => 'video', 'image' => null, 'video' => ['source' => 'asset', 'asset' => $vid, 'poster' => $poster]]);
+check('video asset + poster: both imported, poster id second', [['fields' => ['videoSource' => 'asset', 'videoAsset' => [101], 'alternativePosterImage' => [102]]], ['p/clip.mp4', 'p/poster.jpg']], [$r['inner']['videoBlock'] ?? null, $tmImages->calls]);
+
+$r = $buildTm(['media_type' => 'video', 'image' => null, 'video' => ['source' => 'streaming', 'url' => 'https://youtu.be/abc', 'poster' => $empty]]);
+check('empty-shape poster: key absent, no import, no warning', [false, [], []], [isset($r['inner']['videoBlock']['fields']['alternativePosterImage']), $tmImages->calls, $r['warnings']]);
+
+$r = $buildTm(['media_type' => 'video', 'image' => null, 'video' => ['source' => 'streaming', 'url' => 'https://youtu.be/abc', 'poster' => $poster]], ['textAndMediaBlock:videoBlock', 'textAndMediaBlock:videoBlock:videoSource', 'textAndMediaBlock:videoBlock:videoUrl']);
+check('missing alternativePosterImage handle: warning, rest of video written', [['fields' => ['videoSource' => 'streaming', 'videoUrl' => 'https://youtu.be/abc']], 1, []], [$r['inner']['videoBlock'] ?? null, count($r['warnings']), $tmImages->calls]);
+
+\matrixcreate\contentiqimporter\ContentIQImporter::$plugin = $previousTmPlugin;
 
 // -----------------------------------------------------------------------------
 // Summary.

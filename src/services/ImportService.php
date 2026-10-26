@@ -1842,6 +1842,10 @@ class ImportService extends Component
             // inert in production even if left on by accident. See
             // docs/assets.md.
             'allowPrivateAssetUrls' => false,
+            // Download size cap for video files (Text & Media video, asset
+            // source). Images/documents keep the fixed 25 MiB cap. See
+            // ImageImportService::setMaxVideoBytes() and docs/assets.md.
+            'maxVideoBytes' => 200 * 1024 * 1024,
             'matrixField'    => 'contentBlocks',
             'seoField'       => 'seo',
             'blockOverrides' => [],
@@ -1945,6 +1949,7 @@ class ImportService extends Component
         // the raw config value through unconditionally here is safe even in
         // production (see ImageImportService::_privateUrlBypassActive()).
         ContentIQImporter::$plugin->images->setAllowPrivateAssetUrls((bool)($config['allowPrivateAssetUrls'] ?? false));
+        ContentIQImporter::$plugin->images->setMaxVideoBytes((int)($config['maxVideoBytes'] ?? 200 * 1024 * 1024));
 
         $volumeHandle = $config['assetVolume'] ?? 'images';
 

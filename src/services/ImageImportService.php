@@ -54,6 +54,24 @@ use yii\base\Exception;
  */
 class ImageImportService extends Component
 {
+    // Public Constants
+    // =========================================================================
+
+    /**
+     * Download cap for images and documents: 25 MiB.
+     */
+    public const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
+
+    /**
+     * Default download cap for video files: 200 MiB (`maxVideoBytes` config).
+     */
+    public const DEFAULT_MAX_VIDEO_BYTES = 200 * 1024 * 1024;
+
+    /**
+     * Filename extensions treated as video for the larger size cap.
+     */
+    public const VIDEO_EXTENSIONS = ['mp4', 'webm', 'mov', 'm4v', 'ogv'];
+
     // Private Properties
     // =========================================================================
 
@@ -163,6 +181,14 @@ class ImageImportService extends Component
      * @var bool
      */
     private bool $_allowPrivateAssetUrls = false;
+
+    /**
+     * Download size cap, in bytes, for video files (by extension) — see
+     * `setMaxVideoBytes()`. Images and documents keep `MAX_IMAGE_BYTES`.
+     *
+     * @var int
+     */
+    private int $_maxVideoBytes = self::DEFAULT_MAX_VIDEO_BYTES;
 
     /**
      * Whether the private-URL bypass notice has already been logged this
@@ -377,6 +403,20 @@ class ImageImportService extends Component
     }
 
     /**
+     * Sets the download size cap for video files — `maxVideoBytes` in
+     * config/contentiq.php (default 200 MiB). Applies only to filenames with a
+     * video extension (see `VIDEO_EXTENSIONS`); images keep the 25 MiB cap.
+     * Values below 1 fall back to the default.
+     *
+     * @param int $bytes
+     * @return void
+     */
+    public function setMaxVideoBytes(int $bytes): void
+    {
+        $this->_maxVideoBytes = $bytes > 0 ? $bytes : self::DEFAULT_MAX_VIDEO_BYTES;
+    }
+
+    /**
      * Resets cached volume/folder/relocation/private-URL-bypass state. Call
      * between import runs if needed.
      *
@@ -395,6 +435,7 @@ class ImageImportService extends Component
         $this->_documentRelocate         = false;
         $this->_documentLegacyFolderPath = null;
         $this->_allowPrivateAssetUrls    = false;
+        $this->_maxVideoBytes            = self::DEFAULT_MAX_VIDEO_BYTES;
         $this->_privateUrlBypassLogged   = false;
     }
 
@@ -1021,6 +1062,10 @@ class ImageImportService extends Component
      * one — harmless, since the asset's own `contentiq_asset_syncs` key
      * mapping (not the filename) is what makes it resolvable next sync.
      *
+     * The `$maxBytes` cap is 25 MiB (`MAX_IMAGE_BYTES`), or `maxVideoBytes`
+     * (default 200 MiB) when the filename has a video extension, in which
+     * case the request timeout is also raised to 300s.
+     *
      * The `$maxBytes` cap is enforced three times, cheapest/earliest first:
      * an `on_headers` callback rejects a declared `Content-Length` over the
      * cap before a single body byte streams to disk; a `progress` callback
@@ -1065,13 +1110,14 @@ class ImageImportService extends Component
         // unbounded body doesn't get imported as an asset. Declared before
         // the request so the on_headers/progress callbacks below can also
         // enforce it during transfer, not just on the file that lands.
-        $maxBytes        = 25 * 1024 * 1024;
+        $isVideo         = in_array(strtolower(pathinfo($filename, PATHINFO_EXTENSION)), self::VIDEO_EXTENSIONS, true);
+        $maxBytes        = $isVideo ? $this->_maxVideoBytes : self::MAX_IMAGE_BYTES;
         $oversizeMessage = "Downloaded file exceeds the {$maxBytes}-byte limit: $url";
 
         try {
             $response = Craft::createGuzzleClient()->request('GET', $url, [
                 RequestOptions::SINK            => $tempPath,
-                RequestOptions::TIMEOUT         => 30,
+                RequestOptions::TIMEOUT         => $isVideo ? 300 : 30,
                 // A public URL must not be able to 302 its way to an internal
                 // one — never follow redirects on this request.
                 RequestOptions::ALLOW_REDIRECTS => false,

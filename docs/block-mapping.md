@@ -295,17 +295,52 @@ position on the Craft side; the template alternates image sides visually,
 not the data.
 
 **Media type is per inner block**, resolved by the `textMediaMedia` handler
-(receives the whole inner block via `'_block'`) from that block's own
-`layout` value:
-- `image_left` / `image_right` → `mediaType: image`; image → the `image`
-  field. Left/right position comes from the outer `blockLayout`, not this
-  handler.
-- `background` → `mediaType: backgroundImage`; the block's `image` becomes
-  `desktopBackgroundImage`, and the optional `mobile_image` becomes
+(receives the whole inner block via `'_block'`) from that block's
+`media_type` (`image` | `backgroundImage` | `video`, whitelisted). When
+`media_type` is absent (older ContentiQ) the legacy `layout === 'background'`
+maps to `backgroundImage`, anything else to `image`. ContentiQ still emits
+`layout: 'background'` as a shadow when `media_type` is `backgroundImage`;
+`_handleTextMediaLayout()` maps it (like any unknown value) to `text-left`,
+and the outer `blockLayout` comes from the first block only. Per-item layout
+alternation is therefore not representable in Craft (the template alternates
+by CSS).
+- `image` → `mediaType: image`; image → the `image` field. Left/right
+  position comes from the outer `blockLayout`, not this handler.
+- `backgroundImage` → `mediaType: backgroundImage`; the block's `image`
+  becomes `desktopBackgroundImage`, and the optional `mobile_image` becomes
   `mobileBackgroundImage` — **falling back to the desktop image when no
   mobile image was supplied**, so mobile never drops to the template's
   global placeholder. This fallback is specific to text-and-media's
   background media; it does not apply to the hero block (see "Hero" below).
+- `video` → `mediaType: video` plus a nested `videoBlock` ContentBlock value
+  from the wire `video: {source, asset, url, poster}`. The ContentBlock value
+  is wrapped as `videoBlock => ['fields' => [...]]` — Craft's ContentBlock
+  only reads `fields` from serialized data, so an unwrapped value is silently
+  dropped (same shape as the hero write):
+  - `streaming` → `{videoSource: 'streaming', videoUrl: <url>}` (plain
+    http(s) URL string; the oEmbed field normalises it).
+  - `asset` → `{videoSource: 'asset', videoAsset: [assetId]}`; the file is
+    imported through `ImageImportService::importFromField()` into the same
+    images-volume page folder as images, with the larger `maxVideoBytes` cap
+    (default 200 MiB, applied by video file extension; images/documents stay
+    at 25 MiB).
+  - The optional wire `video.poster` (image object; empty shape = none) is
+    written to `videoBlock.alternativePosterImage` as `[assetId]` for either
+    source, via the normal image import path (alt text as for images). A
+    missing `alternativePosterImage` handle raises a page-report warning and
+    the rest of the video is still written. `playVideo` is a CMS-editor
+    choice and is never written.
+  - Missing handles never fail the page (hero precedent): no `videoBlock` on
+    `textAndMediaBlock`, or an asset-source video without `videoSource` /
+    `videoAsset`, raises a page-report warning and the block falls back to
+    `mediaType: image` with no image. A streaming video missing only
+    `videoSource` still writes `videoUrl` (warning).
+  - An empty video (no URL / no file), a non-http(s) URL, or a video asset
+    import that returns null keeps `mediaType: video` and raises a
+    page-report warning.
+  - A block-placed video is not also emitted in `files[]` (ContentiQ
+    subtracts it); the plugin keys assets by `asset_key` anyway, so a
+    duplicate would reuse, not double-import.
 
 **CTA buttons are lifted, not rendered inline.** The `mediaNodes` handler
 (used for this block's `richText`) filters `ctaButton` nodes out of the

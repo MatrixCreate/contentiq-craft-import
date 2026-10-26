@@ -153,8 +153,8 @@ return [
                 // into the inner block's actionButtons Matrix (not raw <a> tags).
                 'nodes'  => ['richText', 'mediaNodes'],
                 // textMediaMedia receives the whole inner block (via '_block') so it
-                // can set mediaType (image | backgroundImage) from the block's layout
-                // and route the image to the matching Craft field.
+                // can set mediaType (image | backgroundImage | video) from the block's
+                // media_type (legacy: layout) and route the media to the matching Craft fields.
                 '_block' => ['mediaType', 'textMediaMedia'],
             ],
         ],
