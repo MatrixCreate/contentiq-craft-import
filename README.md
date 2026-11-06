@@ -36,12 +36,18 @@ return [
                                              // loopback-resolving dev domain; inert unless devMode
                                              // is also true. See docs/assets.md.
     // 'maxVideoBytes'     => 200 * 1024 * 1024, // Download cap for video files (Text & Media video); images stay at 25 MiB
+    // 'maxHeroVideoBytes' => 50 * 1024 * 1024,  // Per-file download cap for a Video-style hero's videos; Desktop over it = Text & Image hero, Mobile over it = dropped
     'matrixField'         => 'contentBlocks',
     'seoField'            => 'seo',
     // Hero carousel handles (nested inside the 'hero' ContentBlock) — only if your fork named them differently:
     // 'heroMediaModeField'       => 'heroMediaMode',
     // 'heroCarouselDesktopField' => 'heroCarouselDesktopImages',
     // 'heroCarouselMobileField'  => 'heroCarouselMobileImages',
+    // Hero Video-style handles — only if your fork named them differently:
+    // 'heroDesktopVideoField'    => 'desktopVideo',
+    // 'heroMobileVideoField'     => 'mobileVideo',
+    // 'heroDesktopPosterField'   => 'desktopPosterFrame',
+    // 'heroMobilePosterField'    => 'mobilePosterFrame',
     'postDate'            => ['pages' => true, 'collections' => true], // document.original_publication_date -> Craft postDate
     'redirects'           => ['enabled' => true, 'httpCode' => 301],   // document.legacy_url -> Retour static redirects (requires nystudio107/craft-retour)
 ];

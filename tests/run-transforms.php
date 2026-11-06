@@ -1498,6 +1498,224 @@ check('flat shape + carousel: no carousel keys', false, array_key_exists('heroMe
 // Empty hero block with only media_mode stays untouched.
 check('media_mode alone does not make an empty hero non-empty', null, callPrivate($importService, '_buildHeroField', [['fields' => ['media_mode' => 'singleImage']], false, $carouselLayout]));
 
+// -----------------------------------------------------------------------------
+echo "\nImportService — hero video (hero_style 'video', schema 1.5.0, R2: two videos + two poster frames)\n";
+
+// Recording double with the per-call $maxBytes parameter. Keys 'big' / 'fail'
+// resolve to null (the oversize and download-failure shapes — _download()
+// returns null for both and only logs). Ids are 700 + call order.
+$videoImages = new class {
+    public array $calls = [];
+    public function importFromField($item, $dryRun = false, $folderPathOverride = null, $maxBytes = null)
+    {
+        $this->calls[] = [$item['key'] ?? '', $maxBytes];
+        if (in_array($item['key'] ?? '', ['big', 'fail', 'badposter'], true)) {
+            return null;
+        }
+        return ['id' => 700 + count($this->calls), 'filename' => $item['key'] ?? '', 'reused' => false,
+            'warning' => ($item['key'] ?? '') === 'healed' ? 'Asset map entry for healed.mp4 was self-healed' : null];
+    }
+};
+$videoPlugin = new class {
+    public $nodes;
+    public $images;
+    public $imports;
+};
+$videoPlugin->nodes   = $fakePlugin->nodes;
+$videoPlugin->images  = $videoImages;
+$videoPlugin->imports = $fakePlugin->imports;
+\matrixcreate\contentiqimporter\ContentIQImporter::$plugin = $videoPlugin;
+
+$videoInner = new \craft\models\FieldLayout([
+    'heroStyle' => new class {}, 'heroMediaMode' => new class {}, 'heroCarouselDesktopImages' => new class {},
+    'heroCarouselMobileImages' => new class {},
+    'desktopVideo' => new class {}, 'mobileVideo' => new class {}, 'desktopPosterFrame' => new class {}, 'mobilePosterFrame' => new class {},
+]);
+$videoLayout = new \craft\models\FieldLayout(['hero' => new \craft\fields\ContentBlock($videoInner)]);
+$noVideoInner = new \craft\models\FieldLayout([
+    'heroStyle' => new class {}, 'heroMediaMode' => new class {}, 'heroCarouselDesktopImages' => new class {},
+    'heroCarouselMobileImages' => new class {},
+]);
+$noVideoLayout = new \craft\models\FieldLayout(['hero' => new \craft\fields\ContentBlock($noVideoInner)]);
+
+$vAsset  = static fn(string $k): array => ['key' => $k, 'url' => "https://example.com/{$k}.mp4", 'mime' => 'video/mp4', 'filename' => "{$k}.mp4"];
+$vPoster = static fn(string $k): array => ['key' => $k, 'url' => "https://example.com/{$k}.jpg", 'alt' => $k, 'credit' => null, 'caption' => null];
+// textMediaVideoShape: asset/poster independently nullable.
+$vShape  = static fn(?string $asset, ?string $poster = null): array => [
+    'source' => 'asset', 'asset' => $asset === null ? null : $vAsset($asset), 'url' => null,
+    'poster' => $poster === null ? null : $vPoster($poster),
+];
+$mkVideoHero = static fn(array $video, array $over = []): array => ['fields' => $over + [
+    'heading'      => ['level' => 1, 'text' => 'Welcome'],
+    'hero_style'   => 'video',
+    'media_mode'   => 'singleImage',
+    'image'        => ['key' => 'heroimg', 'url' => 'https://example.com/heroimg.jpg', 'alt' => 'h'],
+    'video'        => $video,
+]];
+$heroRes = static fn(): array => ['title' => 'Home', 'warnings' => []];
+$fieldsOf = static fn(array $hero, ?\craft\models\FieldLayout $layout, array &$res, array $config = [], bool $dry = false): array
+    => callPrivate($importService, '_buildHeroField', [$hero, $dry, $layout, &$res, $config])['hero']['fields'] ?? [];
+$four = static fn(array $f): array => [$f['desktopVideo'] ?? 'MISSING', $f['mobileVideo'] ?? 'MISSING', $f['desktopPosterFrame'] ?? 'MISSING', $f['mobilePosterFrame'] ?? 'MISSING'];
+
+// Both videos + both posters. Call order: hero image 701, desktop 702, mobile 703, d-poster 704, m-poster 705.
+$videoImages->calls = [];
+$res = $heroRes();
+$f = $fieldsOf($mkVideoHero(['desktop' => $vShape('dclip', 'dposter'), 'mobile' => $vShape('mclip', 'mposter')]), $videoLayout, $res);
+check('both videos + posters: heroStyle video', 'video', $f['heroStyle'] ?? null);
+check('both videos + posters: four fields written', [[702], [703], [704], [705]], $four($f));
+check('both videos + posters: hero image still written', [701], $f['desktopImage'] ?? null);
+check('both videos + posters: each video downloaded with the 50 MiB cap, posters uncapped', [['heroimg', null], ['dclip', 52428800], ['mclip', 52428800], ['dposter', null], ['mposter', null]], $videoImages->calls);
+check('both videos + posters: heroMediaMode singleImage, no warnings', ['singleImage', []], [$f['heroMediaMode'] ?? null, $res['warnings']]);
+
+// Desktop only (mobile null).
+$res = $heroRes();
+$f = $fieldsOf($mkVideoHero(['desktop' => $vShape('dclip', 'dposter'), 'mobile' => null]), $videoLayout, $res);
+check('desktop only: video style, mobile video + mobile poster cleared', ['video', [], []], [$f['heroStyle'] ?? null, $f['mobileVideo'] ?? null, $f['mobilePosterFrame'] ?? null]);
+check('desktop only: desktop video + poster written, no warnings', [true, true, []], [is_array($f['desktopVideo'] ?? null) && count($f['desktopVideo']) === 1, is_array($f['desktopPosterFrame'] ?? null) && count($f['desktopPosterFrame']) === 1, $res['warnings']]);
+
+// Mobile-poster-only: mobile = {asset: null, poster: X} — keyed on .asset, not mobile truthiness.
+$videoImages->calls = [];
+$res = $heroRes();
+$f = $fieldsOf($mkVideoHero(['desktop' => $vShape('dclip'), 'mobile' => $vShape(null, 'mposter')]), $videoLayout, $res);
+check('mobile poster only: mobile video [], mobile poster written, desktop poster []', [[702], [], [], [703]], $four($f));
+check('mobile poster only: no warning (no mobile video was sent)', [], $res['warnings']);
+
+// A successful video import's own item-level warning reaches the report.
+$res = $heroRes();
+$f = $fieldsOf($mkVideoHero(['desktop' => $vShape('healed'), 'mobile' => null]), $videoLayout, $res);
+check('video import warning: style video and the item warning surfaced', ['video', ['Asset map entry for healed.mp4 was self-healed']], [$f['heroStyle'] ?? null, $res['warnings']]);
+
+// Video hero with no other hero content: the resolved video is content, so style + fields are still written.
+$res = $heroRes();
+$f = $fieldsOf($mkVideoHero(['desktop' => $vShape('dclip'), 'mobile' => null], ['heading' => null, 'image' => null]), $videoLayout, $res);
+check('video-only hero: heroStyle video written', 'video', $f['heroStyle'] ?? null);
+$res = $heroRes();
+check('control: same empty hero as textImage writes nothing (proves the video is what counts as content)', [], $fieldsOf($mkVideoHero([], ['heading' => null, 'image' => null, 'hero_style' => 'textImage', 'video' => null]), $videoLayout, $res));
+check('video-only hero: desktopVideo written, others cleared', [true, [], [], []], [is_array($f['desktopVideo'] ?? null) && count($f['desktopVideo']) === 1, $f['mobileVideo'] ?? 'MISSING', $f['desktopPosterFrame'] ?? 'MISSING', $f['mobilePosterFrame'] ?? 'MISSING']);
+
+// Desktop asset null → textImage, all four cleared, one warning; nothing downloaded for the video.
+$videoImages->calls = [];
+$res = $heroRes();
+$f = $fieldsOf($mkVideoHero(['desktop' => $vShape(null, 'dposter'), 'mobile' => $vShape('mclip', 'mposter')]), $videoLayout, $res);
+check('desktop null: textImage, all four cleared', ['textImage', [[], [], [], []]], [$f['heroStyle'] ?? null, $four($f)]);
+check('desktop null: hero image still written, nothing else downloaded', [701, [['heroimg', null]]], [$f['desktopImage'][0] ?? null, $videoImages->calls]);
+check('desktop null: one warning', ['Page "Home": hero style is Video but no Desktop Video file was supplied — the hero was imported as Text & Image.'], $res['warnings']);
+$res = $heroRes();
+$f = $fieldsOf($mkVideoHero([]), $videoLayout, $res);
+check('empty video object: textImage + one warning', ['textImage', 1], [$f['heroStyle'] ?? null, count($res['warnings'])]);
+$res = $heroRes();
+$f = $fieldsOf($mkVideoHero([], ['video' => null]), $videoLayout, $res);
+check('video null: textImage + one warning', ['textImage', 1], [$f['heroStyle'] ?? null, count($res['warnings'])]);
+
+// Desktop oversize / failure → textImage, all four cleared, one warning; mobile never attempted.
+$videoImages->calls = [];
+$res = $heroRes();
+$f = $fieldsOf($mkVideoHero(['desktop' => $vShape('big', 'dposter'), 'mobile' => $vShape('mclip', 'mposter')]), $videoLayout, $res);
+check('desktop oversize: textImage, all four cleared', ['textImage', [[], [], [], []]], [$f['heroStyle'] ?? null, $four($f)]);
+check('desktop oversize: mobile video and posters never downloaded', [['heroimg', null], ['big', 52428800]], $videoImages->calls);
+check(
+    'desktop oversize: one warning naming page, file and the cap',
+    ['Page "Home": hero Desktop Video "big.mp4" could not be imported (the download failed, it is over the maxHeroVideoBytes limit (50 MiB), or the volume rejected the file type) — the hero was imported as Text & Image.'],
+    $res['warnings'],
+);
+$sized = $mkVideoHero(['desktop' => $vShape('big')]);
+$sized['fields']['video']['desktop']['asset']['size'] = 62914560;
+$res = $heroRes();
+$fieldsOf($sized, $videoLayout, $res);
+check(
+    'desktop oversize with known size: warning names the size',
+    ['Page "Home": hero Desktop Video "big.mp4" could not be imported (it is 60 MiB, over the maxHeroVideoBytes limit of 50 MiB) — the hero was imported as Text & Image.'],
+    $res['warnings'],
+);
+
+// Mobile failure with a mobile poster: video dropped (one warning), poster kept, still video style.
+$videoImages->calls = [];
+$res = $heroRes();
+$f = $fieldsOf($mkVideoHero(['desktop' => $vShape('dclip', 'dposter'), 'mobile' => $vShape('fail', 'mposter')]), $videoLayout, $res);
+check('mobile fail: still video style, mobile video [], posters kept', ['video', [702], [], [704], [705]], [$f['heroStyle'] ?? null, $f['desktopVideo'] ?? null, $f['mobileVideo'] ?? null, $f['desktopPosterFrame'] ?? null, $f['mobilePosterFrame'] ?? null]);
+check(
+    'mobile fail: one warning, about the video only',
+    ['Page "Home": hero Mobile Video "fail.mp4" could not be imported (the download failed, it is over the maxHeroVideoBytes limit (50 MiB), or the volume rejected the file type) — it was dropped; the Desktop Video plays at every viewport.'],
+    $res['warnings'],
+);
+
+// A failed poster → [] + warning, video style kept.
+$res = $heroRes();
+$f = $fieldsOf($mkVideoHero(['desktop' => $vShape('dclip', 'badposter')]), $videoLayout, $res);
+check('poster fail: video style kept, poster [], one warning', ['video', [], 1], [$f['heroStyle'] ?? null, $f['desktopPosterFrame'] ?? null, count($res['warnings'])]);
+
+// maxHeroVideoBytes override (per file) + non-positive falls back to 50 MiB.
+$videoImages->calls = [];
+$res = $heroRes();
+$fieldsOf($mkVideoHero(['desktop' => $vShape('dclip'), 'mobile' => $vShape('mclip')]), $videoLayout, $res, ['maxHeroVideoBytes' => 1048576]);
+check('config maxHeroVideoBytes applies to each video file', [1048576, 1048576], [$videoImages->calls[1][1] ?? null, $videoImages->calls[2][1] ?? null]);
+foreach ([0, -5] as $badCap) {
+    $videoImages->calls = [];
+    $res = $heroRes();
+    $fieldsOf($mkVideoHero(['desktop' => $vShape('dclip')]), $videoLayout, $res, ['maxHeroVideoBytes' => $badCap]);
+    check("non-positive maxHeroVideoBytes ({$badCap}) falls back to 50 MiB", 52428800, $videoImages->calls[1][1] ?? null);
+}
+
+// Handle overrides via config.
+$ovInner = new \craft\models\FieldLayout([
+    'heroStyle' => new class {}, 'dv' => new class {}, 'mv' => new class {}, 'dp' => new class {}, 'mp' => new class {},
+]);
+$ovLayout = new \craft\models\FieldLayout(['hero' => new \craft\fields\ContentBlock($ovInner)]);
+$res = $heroRes();
+$f = $fieldsOf($mkVideoHero(['desktop' => $vShape('dclip', 'dposter'), 'mobile' => $vShape('mclip', 'mposter')]), $ovLayout, $res, [
+    'heroDesktopVideoField' => 'dv', 'heroMobileVideoField' => 'mv', 'heroDesktopPosterField' => 'dp', 'heroMobilePosterField' => 'mp',
+]);
+check('handle overrides: all four written under the override handles', ['video', true], [$f['heroStyle'] ?? null, isset($f['dv'], $f['mv'], $f['dp'], $f['mp'])]);
+
+// video + media_mode carousel → forced singleImage, carousel fields cleared, carousel items never downloaded.
+$videoImages->calls = [];
+$res = $heroRes();
+$f = $fieldsOf($mkVideoHero(['desktop' => $vShape('dclip')], [
+    'media_mode' => 'carousel', 'carousel_images' => [$mkItem('d1')], 'carousel_mobile_images' => [$mkItem('m1')],
+]), $videoLayout, $res);
+check('video + carousel: forced singleImage, carousel cleared', ['singleImage', [[], []]], [$f['heroMediaMode'] ?? null, [$f['heroCarouselDesktopImages'] ?? null, $f['heroCarouselMobileImages'] ?? null]]);
+check('video + carousel: carousel items never downloaded, no warnings', [[['heroimg', null], ['dclip', 52428800]], []], [$videoImages->calls, $res['warnings']]);
+
+// Layout without desktopVideo → textImage, nothing downloaded for video, one warning, no video keys.
+$videoImages->calls = [];
+$res = $heroRes();
+$f = $fieldsOf($mkVideoHero(['desktop' => $vShape('dclip', 'dposter'), 'mobile' => $vShape('mclip')]), $noVideoLayout, $res);
+check('no desktopVideo handle: textImage, no video keys', ['textImage', false], [$f['heroStyle'] ?? null, array_key_exists('desktopVideo', $f) || array_key_exists('mobileVideo', $f) || array_key_exists('desktopPosterFrame', $f)]);
+check('no desktopVideo handle: only the hero image downloaded', [['heroimg', null]], $videoImages->calls);
+check('no desktopVideo handle: one warning', ['Page "Home": hero style is Video but the hero field has no \'desktopVideo\' (or heroStyle) field (older starter, or the flat hero shape) — the hero was imported as Text & Image.'], $res['warnings']);
+
+// Null layout (unknown = present): style and the video fields must agree.
+$videoImages->calls = [];
+$res = $heroRes();
+$f = $fieldsOf($mkVideoHero(['desktop' => $vShape('dclip', 'dposter'), 'mobile' => $vShape('mclip', 'mposter')]), null, $res);
+check('null layout: heroStyle video and all four fields written', ['video', [[702], [703], [704], [705]]], [$f['heroStyle'] ?? null, $four($f)]);
+$res = $heroRes();
+$f = $fieldsOf($mkVideoHero(['desktop' => $vShape(null)]), null, $res);
+check('null layout, desktop null: textImage and all four fields cleared', ['textImage', [[], [], [], []]], [$f['heroStyle'] ?? null, $four($f)]);
+
+// 1.4.0 payload (no video key, non-video style).
+$videoImages->calls = [];
+$old14 = $mkVideoHero([], ['hero_style' => 'textImage']);
+unset($old14['fields']['video']);
+$res = $heroRes();
+$f = $fieldsOf($old14, $noVideoLayout, $res);
+check('1.4.0 hero, layout without video fields: textImage, no video keys, no warnings', ['textImage', false, []], [$f['heroStyle'] ?? null, array_key_exists('desktopVideo', $f), $res['warnings']]);
+check('1.4.0 hero: only the hero image downloaded', [['heroimg', null]], $videoImages->calls);
+$res = $heroRes();
+$f = $fieldsOf($old14, $videoLayout, $res);
+check('1.4.0 hero on a video-capable layout: all four cleared, no warnings', [[[], [], [], []], []], [$four($f), $res['warnings']]);
+
+// Dry run: style kept, nothing real downloaded, no warnings.
+$res = $heroRes();
+$f = $fieldsOf($mkVideoHero(['desktop' => $vShape('dclip', 'dposter'), 'mobile' => $vShape('mclip')]), $videoLayout, $res, [], true);
+check('dry run: heroStyle video, no warnings', ['video', []], [$f['heroStyle'] ?? null, $res['warnings']]);
+
+
+// Per-call cap is threaded importFromField → _importAsset → _download (not a global setter).
+$imgSrc = file_get_contents(__DIR__ . '/../src/services/ImageImportService.php');
+check('ImageImportService: importFromField accepts ?int $maxBytes', true, str_contains($imgSrc, 'function importFromField(?array $imageField, bool $dryRun = false, ?string $folderPathOverride = null, ?int $maxBytes = null)'));
+check('ImageImportService: _download uses the override over the extension default', true, str_contains($imgSrc, '$maxBytes        = $maxBytesOverride ?? ($isVideo ? $this->_maxVideoBytes : self::MAX_IMAGE_BYTES);'));
+
 \matrixcreate\contentiqimporter\ContentIQImporter::$plugin = $fakePlugin;
 
 // -----------------------------------------------------------------------------

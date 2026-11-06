@@ -1846,6 +1846,12 @@ class ImportService extends Component
             // source). Images/documents keep the fixed 25 MiB cap. See
             // ImageImportService::setMaxVideoBytes() and docs/assets.md.
             'maxVideoBytes' => 200 * 1024 * 1024,
+            // Download cap for EACH video file of a hero_style 'video' hero (50 MiB).
+            // Applied per call (ImageImportService::importFromField()'s
+            // $maxBytes), not via the run-wide maxVideoBytes setter. Desktop
+            // video over the cap → textImage + page warning; mobile video over
+            // the cap → dropped + page warning.
+            'maxHeroVideoBytes' => 50 * 1024 * 1024,
             'matrixField'    => 'contentBlocks',
             'seoField'       => 'seo',
             'blockOverrides' => [],
@@ -1856,6 +1862,11 @@ class ImportService extends Component
             'heroMediaModeField'       => 'heroMediaMode',          // Dropdown: singleImage|carousel
             'heroCarouselDesktopField' => 'heroCarouselDesktopImages',  // Assets (many)
             'heroCarouselMobileField'  => 'heroCarouselMobileImages',   // Assets (many)
+            // hero_style 'video' handles (Royal Hotel model: two videos, two poster frames).
+            'heroDesktopVideoField'    => 'desktopVideo',               // Asset (one, video)
+            'heroMobileVideoField'     => 'mobileVideo',                // Asset (one, video)
+            'heroDesktopPosterField'   => 'desktopPosterFrame',         // Asset (one, image)
+            'heroMobilePosterField'    => 'mobilePosterFrame',          // Asset (one, image)
             // DIFF-AWARE Matrix writes — off by default. This rewrites the core
             // Matrix save path and cannot be integration-tested outside a live
             // Craft instance (no runtime/test harness here — see tests/). Flip
@@ -2713,7 +2724,11 @@ class ImportService extends Component
         }
 
         // Carousel — media_mode whitelist (default singleImage, garbage → default).
-        $mediaMode   = in_array($fields['media_mode'] ?? null, ['singleImage', 'carousel'], true)
+        // A hero_style 'video' hero is always single-image (the hero image is the
+        // video's poster), whatever the wire media_mode says — and that holds on
+        // the textImage fallback below too, so no carousel fields are touched.
+        $isVideoStyle = ($fields['hero_style'] ?? null) === 'video';
+        $mediaMode    = !$isVideoStyle && in_array($fields['media_mode'] ?? null, ['singleImage', 'carousel'], true)
             ? $fields['media_mode']
             : 'singleImage';
         $modeHandle    = (string)($config['heroMediaModeField'] ?? 'heroMediaMode');
@@ -2749,6 +2764,29 @@ class ImportService extends Component
             if ($mobileIds !== []) {
                 $innerFields[$mobileHandle] = $mobileIds;
             }
+        }
+
+        // Hero video (hero_style 'video'; Royal Hotel model — desktop + mobile
+        // video, desktop + mobile poster frame). Resolved here, before heroStyle
+        // is written, because an unusable Desktop Video downgrades the style to
+        // textImage. Every failure is non-fatal: page warning(s), never a failed sync.
+        $videoHandles = [
+            'desktopVideo'       => (string)($config['heroDesktopVideoField'] ?? 'desktopVideo'),
+            'mobileVideo'        => (string)($config['heroMobileVideoField'] ?? 'mobileVideo'),
+            'desktopPosterFrame' => (string)($config['heroDesktopPosterField'] ?? 'desktopPosterFrame'),
+            'mobilePosterFrame'  => (string)($config['heroMobilePosterField'] ?? 'mobilePosterFrame'),
+        ];
+        $videoValues = null; // role => value; null = no usable video (fall back to textImage)
+        if ($isVideoStyle) {
+            $videoValues = $this->_importHeroVideos(
+                $fields['video'] ?? null,
+                $videoHandles,
+                $hasHandle($videoHandles['desktopVideo']) && $hasHandle('heroStyle') && !$isFlat,
+                $hasHandle,
+                $dryRun,
+                ((int)($config['maxHeroVideoBytes'] ?? 0)) > 0 ? (int)$config['maxHeroVideoBytes'] : 50 * 1024 * 1024,
+                $result,
+            );
         }
 
         // actionButtons — Matrix of actionButton entries with Hyper fields.
@@ -2789,20 +2827,34 @@ class ImportService extends Component
         // genuinely empty hero block so _buildHeroField()'s empty($innerFields)
         // check still treats it as "nothing to set" (untouched), as before.
         if (
-            !empty($innerFields) &&
+            (!empty($innerFields) || $videoValues !== null) &&
             ($heroInnerLayout === null || $heroInnerLayout->getFieldByHandle('heroStyle') !== null)
         ) {
             $heroStyle = $fields['hero_style'] ?? null;
             $innerFields['heroStyle'] = in_array($heroStyle, ['textImage', 'textOnly'], true)
                 ? $heroStyle
-                : 'textImage';
+                : ($videoValues !== null ? 'video' : 'textImage');
+        }
+
+        // The four video/poster fields: the picked assets, or cleared ([]) on
+        // every other style (and on the textImage fallback) so a switch away
+        // from video leaves no stale pick. Same presence rule as the download
+        // decision above ($hasHandle: a null layout counts as present), so
+        // heroStyle 'video' always carries its desktop asset.
+        if ((!empty($innerFields) || $videoValues !== null) && !$isFlat) {
+            foreach ($videoHandles as $role => $handle) {
+                if ($hasHandle($handle)) {
+                    $value = $videoValues[$role] ?? null;
+                    $innerFields[$handle] = is_int($value) ? [$value] : (is_array($value) ? $value : []);
+                }
+            }
         }
 
         // heroMediaMode is written explicitly on every sync (like heroStyle), and any
         // carousel field not filled above is set to [] so a switch back to single
         // image clears stale picks. Same emptiness gate as heroStyle; ContentBlock
         // shape only.
-        if (!empty($innerFields) && !$isFlat) {
+        if ((!empty($innerFields) || $videoValues !== null) && !$isFlat) {
             if ($hasHandle($modeHandle)) {
                 $innerFields[$modeHandle] = $carouselActive ? 'carousel' : 'singleImage';
             }
@@ -2814,6 +2866,149 @@ class ImportService extends Component
         }
 
         return $innerFields;
+    }
+
+    /**
+     * Imports the videos and poster frames for a hero_style 'video' hero.
+     *
+     * Wire `video` = `{desktop: V, mobile: V|null}`, each V the Text & Media
+     * video shape `{source:'asset', asset:{key,url,mime,filename}|null, url:null,
+     * poster: {key,url,alt,...}|null}`. Readers key on `.asset`, never on
+     * `mobile` truthiness: a mobile-poster-only hero sends
+     * `mobile: {asset: null, poster: X}`. Only `asset` and `poster` are read.
+     *
+     * Files go through ImageImportService::importFromField() (images volume,
+     * page folder, key-idempotent); each video file gets its own per-call
+     * `maxHeroVideoBytes` cap. Posters use the normal image path.
+     *
+     * - Desktop Video unusable (layout lacks the handle, `desktop.asset` null,
+     *   download failed/oversize) → returns null (caller writes textImage and
+     *   clears all four fields) with one page warning.
+     * - Mobile Video failure → dropped, one warning (video only); its poster
+     *   frame is still imported. A poster that fails → [] plus a warning.
+     *
+     * @param mixed                $video         The wire `video` value.
+     * @param array<string,string> $handles       role => layout handle.
+     * @param bool                 $capable       Hero layout has desktopVideo + heroStyle (non-flat).
+     * @param callable             $hasHandle     fn(string): bool layout probe (null layout = present).
+     * @param bool                 $dryRun
+     * @param int                  $maxBytes      Per-file video cap in bytes.
+     * @param array                &$result       Page result, mutated with warnings.
+     * @return array<string,int|true|int[]>|null role => asset id (desktopVideo may be true on a dry run;
+     *     mobileVideo is omitted when absent/dropped; posters are id arrays) or null = fall back.
+     */
+    private function _importHeroVideos(mixed $video, array $handles, bool $capable, callable $hasHandle, bool $dryRun, int $maxBytes, array &$result): ?array
+    {
+        $title = (string)($result['title'] ?? $result['slug'] ?? 'this page');
+        $warn  = static function(string $message) use (&$result): void {
+            if (!in_array($message, $result['warnings'] ?? [], true)) {
+                $result['warnings'][] = $message;
+            }
+        };
+
+        if (!$capable) {
+            $warn("Page \"{$title}\": hero style is Video but the hero field has no '{$handles['desktopVideo']}' (or heroStyle) field (older starter, or the flat hero shape) — the hero was imported as Text & Image.");
+
+            return null;
+        }
+
+        $video   = is_array($video) ? $video : [];
+        $desktop = is_array($video['desktop'] ?? null) ? $video['desktop'] : [];
+        $mobile  = is_array($video['mobile'] ?? null) ? $video['mobile'] : [];
+        $images  = ContentIQImporter::$plugin->images;
+        $capMiB  = round($maxBytes / 1048576, 1);
+
+        // Imports one video file; returns [id|true|null, reasonIfFailed].
+        $importVideo = function(mixed $asset) use ($images, $dryRun, $maxBytes, $capMiB, $warn): array {
+            $import = $images->importFromField($asset, $dryRun, null, $maxBytes);
+
+            if ($dryRun && $import !== null) {
+                return [true, null];
+            }
+
+            if ($import === null || $import['id'] === null) {
+                $size = isset($asset['size']) && is_numeric($asset['size']) ? (float)$asset['size'] : null;
+
+                return [null, $size !== null && $size > $maxBytes
+                    ? 'it is ' . round($size / 1048576, 1) . " MiB, over the maxHeroVideoBytes limit of {$capMiB} MiB"
+                    : "the download failed, it is over the maxHeroVideoBytes limit ({$capMiB} MiB), or the volume rejected the file type"];
+            }
+
+            // Surface item-level notes (e.g. self-heal drops) like every other importFromField caller.
+            if (!empty($import['warning'])) {
+                $warn((string)$import['warning']);
+            }
+
+            return [(int)$import['id'], null];
+        };
+
+        // Desktop Video — required.
+        $dAsset = $desktop['asset'] ?? null;
+
+        if (!is_array($dAsset) || empty($dAsset['url'])) {
+            $warn("Page \"{$title}\": hero style is Video but no Desktop Video file was supplied — the hero was imported as Text & Image.");
+
+            return null;
+        }
+
+        [$dId, $dWhy] = $importVideo($dAsset);
+
+        if ($dId === null) {
+            $name = (string)($dAsset['filename'] ?? $dAsset['key'] ?? $dAsset['url']);
+            $warn("Page \"{$title}\": hero Desktop Video \"{$name}\" could not be imported ({$dWhy}) — the hero was imported as Text & Image.");
+
+            return null;
+        }
+
+        $out = ['desktopVideo' => $dId];
+
+        // Mobile Video — optional; failure drops the video only.
+        $mAsset = $mobile['asset'] ?? null;
+
+        if (is_array($mAsset) && !empty($mAsset['url'])) {
+            $name = (string)($mAsset['filename'] ?? $mAsset['key'] ?? $mAsset['url']);
+
+            if (!$hasHandle($handles['mobileVideo'])) {
+                $warn("Page \"{$title}\": hero Mobile Video \"{$name}\" was skipped — the hero field has no '{$handles['mobileVideo']}' field; the Desktop Video plays at every viewport.");
+            } else {
+                [$mId, $mWhy] = $importVideo($mAsset);
+
+                if ($mId === null) {
+                    $warn("Page \"{$title}\": hero Mobile Video \"{$name}\" could not be imported ({$mWhy}) — it was dropped; the Desktop Video plays at every viewport.");
+                } else {
+                    $out['mobileVideo'] = $mId;
+                }
+            }
+        }
+
+        // Poster frames — normal image path; missing/failed → [].
+        foreach (['desktopPosterFrame' => $desktop['poster'] ?? null, 'mobilePosterFrame' => $mobile['poster'] ?? null] as $role => $poster) {
+            $out[$role] = [];
+
+            if (!is_array($poster) || empty($poster['url'])) {
+                continue;
+            }
+
+            if (!$hasHandle($handles[$role])) {
+                $warn("Page \"{$title}\": hero poster frame was skipped — the hero field has no '{$handles[$role]}' field.");
+
+                continue;
+            }
+
+            $import = $images->importFromField($poster, $dryRun);
+
+            if (!empty($import['warning'])) {
+                $warn((string)$import['warning']);
+            }
+
+            if ($import !== null && $import['id'] !== null) {
+                $out[$role] = [(int)$import['id']];
+            } elseif (!$dryRun) {
+                $warn("Page \"{$title}\": hero poster frame \"" . (string)($poster['filename'] ?? $poster['key'] ?? $poster['url']) . '" could not be imported — the hero was left without that poster frame.');
+            }
+        }
+
+        return $out;
     }
 
     /**

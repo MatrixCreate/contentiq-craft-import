@@ -56,7 +56,7 @@ class ContentIQImporter extends Plugin
     // =========================================================================
 
     /** @var string */
-    public const VERSION = '1.38.0';
+    public const VERSION = '1.40.0';
 
     // Static Properties
     // =========================================================================

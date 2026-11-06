@@ -118,6 +118,7 @@ No PHPUnit harness or live Craft install exists in this repo — coverage is two
 ```bash
 php tests/run-transforms.php   # GlobalsTransforms, plus MatrixBuilder/NodesRenderer/ImportService against a hand-stubbed Craft/Yii harness (tests/fixtures/craft-stubs.php) — not a real Craft install
 php tests/run-security.php     # UrlSafety (SSRF guard) + TempFileSafety (path-traversal guard)
+php tests/run-release-check.php # ContentIQImporter::VERSION must equal the top CHANGELOG entry — run before tagging
 ```
 
 Run whichever script covers the code you changed. `craft-stubs.php`'s docblock spells out exactly how far the stubbed Craft/Yii surface extends; anything beyond it still needs a real Craft install to verify (see the `preserveBlockIdentity` live-validation checklist as the sharpest example of this gap).

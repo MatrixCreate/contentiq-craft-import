@@ -589,6 +589,48 @@ assume present): `heroMediaMode`, `heroCarouselDesktopImages`,
 - Dry run follows the normal `importFromField($dryRun)` path — nothing extra.
 - Additive wire keys; no `schemaVersion` bump (as with `hero_style`).
 
+**Hero video (`fields.hero_style = video`, export schema 1.5.0).** ContentBlock
+shape only; Royal Hotel model (two videos, two poster frames). Wire:
+`fields.video = {desktop: V, mobile: V|null}`, each `V` the Text & Media shape
+`{source:'asset', asset:{key,url,mime,filename}|null, url:null, poster:{key,url,alt,credit,caption}|null}`.
+Only `asset` and `poster` are read. **Key on `.asset`, never on `mobile`
+truthiness** — a mobile-poster-only hero sends `mobile: {asset: null, poster: X}`.
+Built in `_buildHeroInnerFields()` / `_importHeroVideos()`, not `MatrixBuilder`.
+
+- Handles on the `hero` ContentBlock's own layout: `desktopVideo`, `mobileVideo`,
+  `desktopPosterFrame`, `mobilePosterFrame` (overridable via config
+  `heroDesktopVideoField`, `heroMobileVideoField`, `heroDesktopPosterField`,
+  `heroMobilePosterField`). The starter reuses `videoAsset` / its poster field
+  with handle overrides; the guard uses `FieldLayout::getFieldByHandle()`, which
+  resolves a *handle-overridden* layout field by its override handle (Craft 5:
+  `CustomField::setField()` sets the cloned field's `handle` to the override,
+  and `getFieldByHandle()` indexes those clones) — so the new handle is found
+  and the original is not. It ignores element conditions. Null layout ⇒ assume
+  present, and the download decision and the field writes use the same
+  `$hasHandle` probe so `heroStyle: video` never lacks its asset.
+- Video-capable layout = has `desktopVideo` and `heroStyle` (non-flat shape).
+- Files download via `ImageImportService::importFromField()` (images volume, page
+  folder, key-idempotent). Each video gets the per-call `maxHeroVideoBytes` cap
+  (default 50 MiB, non-positive ⇒ default), threaded as `$maxBytes` through
+  `_importAsset()` → `_download()` — deliberately not a setter like
+  `setMaxVideoBytes()` (the batched job chain would leak run state). Same 300 s
+  timeout. Posters use the normal image path (uncapped beyond the 25 MiB image cap).
+- Desktop Video is required. Unusable (layout lacks the handle, `desktop.asset`
+  null, download failure/oversize) ⇒ `heroStyle` `textImage`, all four fields
+  `[]`, ONE page warning naming the page (and the size when the wire asset
+  carries `size`, else the cap). `_download()` returns null for oversize and
+  failure alike, so the call site treats null as "fall back".
+- Desktop OK ⇒ `heroStyle: video`, `desktopVideo` written. Mobile Video downloads
+  independently; failure ⇒ `mobileVideo: []` plus one warning (video only) and
+  the Desktop Video plays at every viewport. Poster frames are written whenever
+  sent, even if their video failed; missing/failed poster ⇒ `[]`.
+- `image` / `mobile_image` are still written as for `textImage` (used by the
+  fallback; the starter hides them for the Video style). `media_mode` is ignored:
+  `heroMediaMode` forced to `singleImage`, no carousel imports, also on fallback.
+- Non-video styles write all four fields as `[]` when the layout has them, clearing
+  stale picks (like the carousel arrays).
+- 1.4.0 payloads (no `video`, no `video` style) behave as before.
+
 **Mobile image has no desktop fallback here.** `mobileImage` is set only
 when `fields.mobile_image` is present with a URL; if absent, the key simply
 isn't written. This differs from text-and-media's `backgroundImage`

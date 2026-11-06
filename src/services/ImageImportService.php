@@ -289,12 +289,15 @@ class ImageImportService extends Component
      * @param bool        $dryRun             If true, resolves what would happen without downloading.
      * @param string|null $folderPathOverride Full folder path (within the `prepare()`d volume)
      *                                        to use instead of the cached page folder.
+     * @param int|null    $maxBytes           Per-call download cap overriding the extension-based
+     *                                        default (used for hero videos — `maxHeroVideoBytes`).
+     *                                        Never touches the run-wide `maxVideoBytes` state.
      * @return array{id: int|null, filename: string, reused: bool, relocated: bool, warning: string|null}|null
      *   Returns null if the image field is empty or unusable.
      */
-    public function importFromField(?array $imageField, bool $dryRun = false, ?string $folderPathOverride = null): ?array
+    public function importFromField(?array $imageField, bool $dryRun = false, ?string $folderPathOverride = null, ?int $maxBytes = null): ?array
     {
-        return $this->_importAsset($imageField, $dryRun, true, $folderPathOverride);
+        return $this->_importAsset($imageField, $dryRun, true, $folderPathOverride, $maxBytes);
     }
 
     /**
@@ -610,9 +613,10 @@ class ImageImportService extends Component
      *                                        selects the images vs documents target/relocate/legacy state.
      * @param string|null $folderPathOverride Full folder path to target instead of the
      *                                        cached page folder (a per-item ContentIQ sub-folder).
+     * @param int|null    $maxBytes           Per-call download cap override, threaded to `_download()`.
      * @return array{id: int|null, filename: string, reused: bool, relocated: bool, warning: string|null}|null
      */
-    private function _importAsset(?array $item, bool $dryRun, bool $isImage, ?string $folderPathOverride = null): ?array
+    private function _importAsset(?array $item, bool $dryRun, bool $isImage, ?string $folderPathOverride = null, ?int $maxBytes = null): ?array
     {
         if (empty($item['url'])) {
             return null;
@@ -820,7 +824,7 @@ class ImageImportService extends Component
         // Alt text only ever applies to images — files[] items have none.
         $alt = $isImage && isset($item['alt']) && $item['alt'] !== '' ? (string)$item['alt'] : null;
 
-        $result = $this->_download($url, $filename, $volume, $targetFolder, $alt);
+        $result = $this->_download($url, $filename, $volume, $targetFolder, $alt, $maxBytes);
 
         if ($result !== null && $assetKey !== '') {
             $this->_upsertAssetMap($assetKey, $result['id']);
@@ -1083,9 +1087,11 @@ class ImageImportService extends Component
      * @param Volume       $volume Target volume (images or documents).
      * @param VolumeFolder $folder Target folder within `$volume`.
      * @param string|null  $alt    Alt text from the wire image object (new assets only).
+     * @param int|null     $maxBytesOverride Per-call cap replacing the extension-based one (also
+     *                                       selects the longer video timeout). Null = default rules.
      * @return array{id: int, filename: string, reused: false}|null
      */
-    private function _download(string $url, string $filename, Volume $volume, VolumeFolder $folder, ?string $alt = null): ?array
+    private function _download(string $url, string $filename, Volume $volume, VolumeFolder $folder, ?string $alt = null, ?int $maxBytesOverride = null): ?array
     {
         // SSRF guard — $url comes from attacker-controllable uploaded/synced
         // JSON. Refuse anything that isn't a public http(s) host before making
@@ -1111,13 +1117,13 @@ class ImageImportService extends Component
         // the request so the on_headers/progress callbacks below can also
         // enforce it during transfer, not just on the file that lands.
         $isVideo         = in_array(strtolower(pathinfo($filename, PATHINFO_EXTENSION)), self::VIDEO_EXTENSIONS, true);
-        $maxBytes        = $isVideo ? $this->_maxVideoBytes : self::MAX_IMAGE_BYTES;
+        $maxBytes        = $maxBytesOverride ?? ($isVideo ? $this->_maxVideoBytes : self::MAX_IMAGE_BYTES);
         $oversizeMessage = "Downloaded file exceeds the {$maxBytes}-byte limit: $url";
 
         try {
             $response = Craft::createGuzzleClient()->request('GET', $url, [
                 RequestOptions::SINK            => $tempPath,
-                RequestOptions::TIMEOUT         => $isVideo ? 300 : 30,
+                RequestOptions::TIMEOUT         => $isVideo || $maxBytesOverride !== null ? 300 : 30,
                 // A public URL must not be able to 302 its way to an internal
                 // one — never follow redirects on this request.
                 RequestOptions::ALLOW_REDIRECTS => false,

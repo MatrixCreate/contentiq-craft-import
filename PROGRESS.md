@@ -2,6 +2,11 @@
 
 Capped rolling log — older entries roll off verbatim to `docs/_archive/`. Durable knowledge belongs in `docs/`, not accumulated here.
 
+## Hero video (2026-11-06, 1.40.0, uncommitted pending Ben's test)
+
+- `hero_style: video` (schema 1.5.0, R2 Royal model): `_importHeroVideos()` downloads `video.desktop/mobile.asset` via `importFromField()` with a per-call `$maxBytes` (`maxHeroVideoBytes`, 50 MiB each), writes `desktopVideo`/`mobileVideo`/`desktopPosterFrame`/`mobilePosterFrame`, forces `singleImage`; unusable Desktop Video falls back to `textImage` + one page warning, a bad Mobile Video is just dropped.
+- `ContentIQImporter::VERSION` fixed to 1.40.0 + `tests/run-release-check.php`. Docs: `docs/block-mapping.md` "Hero video", `docs/assets.md`, README.
+
 ## Text & Media media type, video + poster (2026-10-26, 1.39.0)
 
 - `MatrixBuilder::_handleTextMediaMedia()` reads `media_type` (legacy `layout: 'background'` fallback); `_buildTextMediaVideo()` writes `videoBlock` as `['fields' => …]` (`videoSource`, `videoUrl`, `videoAsset`, `alternativePosterImage`). A flat array is silently dropped by Craft's ContentBlock, and the standalone runner can't see that; only a real sync proves it.

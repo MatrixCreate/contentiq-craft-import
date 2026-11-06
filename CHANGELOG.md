@@ -2,6 +2,28 @@
 
 Earlier history lives in the [GitHub releases](https://github.com/MatrixCreate/contentiq-craft-import/releases).
 
+## 1.40.0 - 2026-11-06
+
+### Added
+
+- Hero video: `hero_style: video` (export schema 1.5.0), modelled on Royal Hotel — two videos and two poster frames. The wire `video` object is `{desktop, mobile}`, each the Text & Media video shape with `poster` populated. `desktop.asset` goes to `desktopVideo`, `mobile.asset` to `mobileVideo`, and the posters to `desktopPosterFrame` / `mobilePosterFrame`. Video files are imported into the images volume page folder (same path as the Text & Media `videoAsset`); posters use the normal image path. Readers key on `.asset`, so a mobile-poster-only hero (`mobile: {asset: null, poster}`) writes only `mobilePosterFrame`.
+- `heroStyle` is written `video` when the Desktop Video imports. The hero image / mobile image are still written from `image` / `mobile_image` as before.
+- `media_mode` is ignored for a video hero: `heroMediaMode` is forced to `singleImage` and no carousel images are imported.
+- `maxHeroVideoBytes` config (default 50 MiB; non-positive falls back to the default) caps each hero video download independently, applied per call (no run-wide state), with the same 300 s timeout as other videos. `maxVideoBytes` is unchanged.
+- `heroDesktopVideoField`, `heroMobileVideoField`, `heroDesktopPosterField`, `heroMobilePosterField` config keys (defaults `desktopVideo`, `mobileVideo`, `desktopPosterFrame`, `mobilePosterFrame`) for forks that named the fields differently.
+- All four fields are cleared (`[]`) on every other hero style, and on the fallback, when the layout has them, so switching away from video leaves no stale pick.
+- `tests/run-release-check.php` asserts `ContentIQImporter::VERSION` equals the top CHANGELOG entry.
+
+### Fallback
+
+- No usable Desktop Video — `video` null, `desktop.asset` null, oversize or failed download, or a layout without `desktopVideo` / `heroStyle` (older starter, flat hero shape) — imports the hero as `textImage` with all four fields cleared and one page-report warning naming the page. The sync never fails.
+- A Mobile Video that fails or is oversize is dropped with one warning (video only); its Mobile Poster Frame is still written and the Desktop Video plays at every viewport. A failed poster is left empty with a warning.
+- 1.4.0 payloads are unchanged.
+
+### Fixed
+
+- `ContentIQImporter::VERSION` now matches the release (it still read 1.38.0 at 1.39.0).
+
 ## 1.39.0 - 2026-10-26
 
 ### Added

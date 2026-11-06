@@ -258,7 +258,10 @@ work, and it respects any project `config/guzzle.php` overrides. Failures
 are non-fatal by design: `_download()` returns `null` on any exception, HTTP
 status ≥ 300, an empty/missing temp file, or a body over the size cap (25MB for images/documents; `maxVideoBytes`,
 default 200 MiB, for files with a video extension — mp4/webm/mov/m4v/ogv —
-which also get a 300s timeout instead of 30s);
+which also get a 300s timeout instead of 30s). Each hero video passes its own
+per-call cap (`maxHeroVideoBytes`, default 50 MiB) via the `$maxBytes` argument
+of `importFromField()`, which overrides the extension-based cap for that call
+only — see [block-mapping.md](block-mapping.md) "Hero video";
 `importFromField()` propagates that `null` up, and every caller treats a
 `null` result as "leave this field empty and continue" rather than aborting
 the whole page/block/globals import.
