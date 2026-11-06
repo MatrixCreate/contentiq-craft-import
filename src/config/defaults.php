@@ -201,7 +201,11 @@ return [
                 'heading' => ['title',     'cardTitle'],  // {level,text} → plain-text native title
                 'body'    => ['cardText',  'nodes'],      // ContentNode[] → HTML via NodesRenderer
                 'image'   => ['cardImage', 'image'],
-                'button'  => ['cardLink',  'cardLink'],   // {label,url,target} → Hyper Url link, or []
+                'button'  => ['cardLink',  'cardLink'],   // {label,url,target} → Hyper Url link, or [] (first button; schema 1.6.0 sends button = buttons[0])
+                // 2+ buttons → every button into the card's actionButtons Matrix;
+                // 0/1 → [] (clears stale rows). Skipped with one warning when the
+                // card layout has no actionButtons. See docs/block-mapping.md.
+                'buttons' => ['actionButtons', 'cardButtons'],
             ],
         ],
         // LEGACY fallback: nested `card` Matrix rows (cardsInThisBlock =
@@ -278,6 +282,8 @@ return [
             // placeholders like "[Image gallery]" — the rendered gallery takes
             // that space, so the placeholder text is dropped on import. Narrow
             // and block-scoped, exactly like collection_listing below.
+            // ctaButton nodes are lifted out of the richText into the block's
+            // actionButtons Matrix (mid-flow buttons move to the bottom).
             'nodes'  => ['richText',    'galleryNodes'],
         ],
         'innerMatrix' => null,

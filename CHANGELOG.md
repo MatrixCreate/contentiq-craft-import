@@ -2,6 +2,20 @@
 
 Earlier history lives in the [GitHub releases](https://github.com/MatrixCreate/contentiq-craft-import/releases).
 
+## 1.41.0 - 2026-11-06
+
+### Added
+
+- Multi-button cards (export schema 1.6.0): a standalone card with 2 or more buttons writes all of them, in order, to the card's `actionButtons` Matrix; with 0 or 1 button `actionButtons` is written as `[]` (clears stale rows). `cardLink` is always the first button. Requires `actionButtons` in the `standaloneCard` layout; without it the page report warns once and the card stays first-only.
+- Image Gallery: `ctaButton` nodes are lifted out of the richText into the block's `actionButtons` Matrix instead of inline `<a>` tags. A button written mid-flow moves to the bottom of the block. A layout without `actionButtons` keeps the inline anchors and warns once.
+- Synced Card entries now get Card Title, so they can be saved in the CP: `cardTitle` (a required plain-text field on the starter's Card) is written with the same plain-text value as the entry title, only when the layout has the field.
+- Children-mode fallback cards collect every button (previously only the last).
+
+### Changed
+
+- Visible change for sites on 1.40: a multi-button card's single link (`cardLink`) flips from the LAST button to the FIRST on the next sync of payloads from ContentiQ 1.6.0.
+- Legacy nested `card` rows (`cardButtonLink`) remain first-only.
+
 ## 1.40.0 - 2026-11-06
 
 ### Added

@@ -803,6 +803,84 @@ check('standalone: legacy entryCards cleared with an empty array', [], $outer['e
 check('standalone: no warnings when everything is present', [], $built['warnings']);
 check('standalone: stale-prune called with this payload\'s cards block ids', [[42, ['Cards-0'], false]], $cardsDouble->pruneStaleCalls);
 
+// Multi-button cards (export schema 1.6.0, importer 1.41.0).
+echo "\nMatrixBuilder — standalone cards, multiple buttons\n";
+$btn = static fn(string $l, string $u, ?string $t = null): array => ['label' => $l, 'url' => $u, 'target' => $t];
+$para = [['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'Body.']]]];
+$multiBlock = [
+    'type' => 'cards', 'id' => 'Cards-M',
+    'fields' => ['mode' => 'detected', 'intro' => [], 'cards' => [
+        ['heading' => ['level' => 3, 'text' => 'Three'], 'body' => $para, 'button' => $btn('One', '/one'), 'buttons' => [$btn('One', '/one'), $btn('Two', '/two', '_blank'), $btn('Three', '/three')]],
+        ['heading' => ['level' => 3, 'text' => 'One'], 'body' => $para, 'button' => $btn('Solo', '/solo'), 'buttons' => [$btn('Solo', '/solo')]],
+        ['heading' => ['level' => 3, 'text' => 'None'], 'body' => $para, 'button' => null, 'buttons' => []],
+        ['heading' => ['level' => 3, 'text' => 'Legacy 1.5.0'], 'body' => $para, 'button' => $btn('Old', '/old')],
+    ]],
+];
+$multiBuilder = static function (bool $cardHasActionButtons) use ($cardsDouble): \matrixcreate\contentiqimporter\services\MatrixBuilder {
+    $b = new \matrixcreate\contentiqimporter\services\MatrixBuilder();
+    $b->prepare(['blockOverrides' => []]);
+    $b->entryTypeFieldProbe = static fn(string $type, string $handle): bool =>
+        ($type === 'entryCards' && in_array($handle, ['entries', 'richText', 'cardsInThisBlock', 'useChildPages', 'entryCards'], true))
+        || ($cardHasActionButtons && $type === 'standaloneCard' && $handle === 'actionButtons');
+
+    return $b;
+};
+
+$cardsDouble->syncCalls = [];
+$built = $multiBuilder(true)->build([$multiBlock], false, 'home', [], '', 42);
+$mSpecs = $cardsDouble->syncCalls[0]['specs'] ?? [];
+$ab = $mSpecs[0]['fields']['actionButtons'] ?? null;
+check('multi: 3-button card cardLink is the FIRST button', ['One', '/one'], [$mSpecs[0]['fields']['cardLink'][0]['linkText'] ?? null, $mSpecs[0]['fields']['cardLink'][0]['linkValue'] ?? null]);
+check('multi: 3-button card writes 3 actionButtons in order', ['new1', 'new2', 'new3'], is_array($ab) ? array_keys($ab) : $ab);
+check('multi: actionButtons entries are actionButton type', ['actionButton', 'actionButton', 'actionButton'], array_column($ab ?? [], 'type'));
+check('multi: actionButtons labels in source order', ['One', 'Two', 'Three'], array_map(static fn(array $r): ?string => $r['fields']['actionButton'][0]['linkText'] ?? null, array_values($ab ?? [])));
+check('multi: second button keeps target', true, $ab['new2']['fields']['actionButton'][0]['newWindow'] ?? null);
+check('multi: 1-button card sets cardLink, actionButtons []', ['Solo', []], [$mSpecs[1]['fields']['cardLink'][0]['linkText'] ?? null, $mSpecs[1]['fields']['actionButtons'] ?? 'MISSING']);
+check('multi: 0-button card has empty cardLink and actionButtons []', [[], []], [$mSpecs[2]['fields']['cardLink'] ?? 'MISSING', $mSpecs[2]['fields']['actionButtons'] ?? 'MISSING']);
+check('multi: 1.5.0 card (only button) keeps cardLink, actionButtons []', ['Old', []], [$mSpecs[3]['fields']['cardLink'][0]['linkText'] ?? null, $mSpecs[3]['fields']['actionButtons'] ?? 'MISSING']);
+check('multi: no warnings when the layout has actionButtons', [], $built['warnings']);
+
+$cardsDouble->syncCalls = [];
+$built = $multiBuilder(false)->build([$multiBlock], false, 'home', [], '', 42);
+$mSpecs = $cardsDouble->syncCalls[0]['specs'] ?? [];
+check('multi: layout without actionButtons — first-only via cardLink', 'One', $mSpecs[0]['fields']['cardLink'][0]['linkText'] ?? null);
+check('multi: layout without actionButtons — no actionButtons key written', [false, false, false, false], array_map(static fn(array $sp): bool => array_key_exists('actionButtons', $sp['fields']), $mSpecs));
+check('multi: layout without actionButtons — exactly one warning', 1, count(array_filter($built['warnings'], static fn(string $w): bool => str_contains($w, "no 'actionButtons' field"))));
+
+// cardTitle mirrors the entry title when (and only when) the card layout has it.
+$ctBuilder = static function (bool $has): \matrixcreate\contentiqimporter\services\MatrixBuilder {
+    $b = new \matrixcreate\contentiqimporter\services\MatrixBuilder();
+    $b->prepare(['blockOverrides' => []]);
+    $b->entryTypeFieldProbe = static fn(string $type, string $handle): bool =>
+        ($type === 'entryCards' && in_array($handle, ['entries', 'richText', 'cardsInThisBlock', 'useChildPages', 'entryCards'], true))
+        || ($has && $type === 'standaloneCard' && $handle === 'cardTitle');
+
+    return $b;
+};
+$cardsDouble->syncCalls = [];
+$built = $ctBuilder(true)->build([$detectedCardsBlock], false, 'home', [], '', 42);
+$ctSpecs = $cardsDouble->syncCalls[0]['specs'] ?? [];
+check('cardTitle: written = plain-text heading (same as entry title)', ['With a button', 'Card 2', 'Third & last'], array_map(static fn(array $sp): mixed => $sp['fields']['cardTitle'] ?? null, $ctSpecs));
+check('cardTitle: always equals the spec title', true, $ctSpecs[0]['title'] === $ctSpecs[0]['fields']['cardTitle'] && $ctSpecs[2]['title'] === $ctSpecs[2]['fields']['cardTitle']);
+$cardsDouble->syncCalls = [];
+$built = $ctBuilder(false)->build([$detectedCardsBlock], false, 'home', [], '', 42);
+$ctSpecs = $cardsDouble->syncCalls[0]['specs'] ?? [];
+check('cardTitle: layout without it -> not written, no warning', [[false, false, false], []], [array_map(static fn(array $sp): bool => array_key_exists('cardTitle', $sp['fields']), $ctSpecs), $built['warnings']]);
+
+// Children-fallback parser collects every button (specs path, standaloneCard has actionButtons).
+$fbNodes = [
+    ['type' => 'heading', 'level' => 3, 'text' => 'A'],
+    ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'a']]],
+    ['type' => 'ctaButton', 'label' => 'A1', 'url' => '/a1'],
+    ['type' => 'ctaButton', 'label' => 'A2', 'url' => '/a2', 'target' => '_blank'],
+    ['type' => 'heading', 'level' => 3, 'text' => 'B'],
+    ['type' => 'ctaButton', 'label' => 'B1', 'url' => '/b1'],
+];
+$fb = $multiBuilder(true)->buildChildrenFallbackCardSpecs($fbNodes);
+check('children fallback: cardLink = first button (was last)', 'A1', $fb['specs'][0]['fields']['cardLink'][0]['linkText'] ?? null);
+check('children fallback: 2 buttons collected in order', ['A1', 'A2'], array_map(static fn(array $r): ?string => $r['fields']['actionButton'][0]['linkText'] ?? null, array_values($fb['specs'][0]['fields']['actionButtons'] ?? [])));
+check('children fallback: single-button item keeps actionButtons []', [], $fb['specs'][1]['fields']['actionButtons'] ?? 'MISSING');
+
 // Layout probes — fields missing from entryCards are warned about, not written.
 $cardsDouble->syncCalls = [];
 $sb    = $standaloneBuilder(['entries']);
@@ -1052,9 +1130,11 @@ $galleryPlugin->imports = $fakeImports;
  * Builds one image_gallery block against a given config (assetFolderStrategy
  * etc) and fields.
  */
-$buildGalleryBlock = static function(array $fields, array $config = ['blockOverrides' => []], bool $dryRun = false): array {
+$buildGalleryBlock = static function(array $fields, array $config = ['blockOverrides' => []], bool $dryRun = false, bool $hasActionButtons = true): array {
     $builder = new \matrixcreate\contentiqimporter\services\MatrixBuilder();
     $builder->prepare($config);
+    // Layout probe: the current starter's imageGallery has actionButtons.
+    $builder->entryTypeFieldProbe = static fn(string $type, string $handle): bool => $hasActionButtons && $type === 'imageGallery' && $handle === 'actionButtons';
 
     return $builder->build([['type' => 'image_gallery', 'fields' => $fields]], $dryRun);
 };
@@ -1094,12 +1174,50 @@ check(
     $imagesModeBuilt['matrixData']['new1']['fields']['assetFolder'] ?? null,
 );
 check(
-    'image_gallery emits exactly the four mapped Craft fields',
-    ['imageSource', 'images', 'assetFolder', 'richText'],
+    'image_gallery emits the four mapped Craft fields plus the actionButtons clear',
+    ['imageSource', 'images', 'assetFolder', 'richText', 'actionButtons'],
     array_keys($imagesModeBuilt['matrixData']['new1']['fields'] ?? []),
 );
 check('image_gallery block not skipped', [false], array_column($imagesModeBuilt['blockReport'], 'skipped'));
+
+// Buttons (1.41.0): ctaButtons are lifted out of the richText into actionButtons.
+$galleryButtonsBuilt = $buildGalleryBlock([
+    'source' => 'images',
+    'folder' => null,
+    'images' => [],
+    'nodes'  => [
+        ['type' => 'heading', 'level' => 2, 'text' => 'Our work'],
+        ['type' => 'ctaButton', 'label' => 'Mid', 'url' => '/mid'],
+        ['type' => 'paragraph', 'content' => [['type' => 'text', 'text' => 'After.']]],
+        ['type' => 'ctaButton', 'label' => 'End', 'url' => '/end', 'target' => '_blank'],
+    ],
+]);
+$galleryButtonsFields = $galleryButtonsBuilt['matrixData']['new1']['fields'] ?? [];
+check('image_gallery buttons: no anchors left in richText', false, str_contains((string)($galleryButtonsFields['richText'] ?? ''), '<a'));
+check('image_gallery buttons: non-button content still renders', true, str_contains((string)($galleryButtonsFields['richText'] ?? ''), 'Our work'));
+check(
+    'image_gallery buttons: actionButtons in source order (mid-flow moves to the bottom)',
+    ['Mid', 'End'],
+    array_map(static fn(array $r): ?string => $r['fields']['actionButton'][0]['linkText'] ?? null, array_values($galleryButtonsFields['actionButtons'] ?? [])),
+);
+check('image_gallery buttons: target kept', true, $galleryButtonsFields['actionButtons']['new2']['fields']['actionButton'][0]['newWindow'] ?? null);
 check('images mode: no warnings', [], $imagesModeBuilt['warnings']);
+// Old layout (no actionButtons): anchors stay inline, no Matrix key, one warning.
+$galleryOldNodes = [
+    ['type' => 'heading', 'level' => 2, 'text' => 'Our work'],
+    ['type' => 'ctaButton', 'label' => 'Mid', 'url' => '/mid'],
+    ['type' => 'ctaButton', 'label' => 'End', 'url' => '/end'],
+];
+$galleryOldBuilt = $buildGalleryBlock(['source' => 'images', 'folder' => null, 'images' => [], 'nodes' => $galleryOldNodes], ['blockOverrides' => []], false, false);
+$galleryOldFields = $galleryOldBuilt['matrixData']['new1']['fields'] ?? [];
+check('image_gallery old layout: anchors remain in richText', 2, substr_count((string)($galleryOldFields['richText'] ?? ''), '<a'));
+check('image_gallery old layout: no actionButtons key', false, array_key_exists('actionButtons', $galleryOldFields));
+check('image_gallery old layout: exactly one warning', 1, count(array_filter($galleryOldBuilt['warnings'], static fn(string $w): bool => str_contains($w, "no 'actionButtons' field"))));
+$galleryOldNoBtn = $buildGalleryBlock(['source' => 'images', 'folder' => null, 'images' => [], 'nodes' => [$galleryOldNodes[0]]], ['blockOverrides' => []], false, false);
+check('image_gallery old layout, no buttons: no warning, no key', [[], false], [$galleryOldNoBtn['warnings'], array_key_exists('actionButtons', $galleryOldNoBtn['matrixData']['new1']['fields'] ?? [])]);
+$galleryNewNoBtn = $buildGalleryBlock(['source' => 'images', 'folder' => null, 'images' => [], 'nodes' => [$galleryOldNodes[0]]]);
+check('image_gallery new layout, no buttons: actionButtons cleared with []', [], $galleryNewNoBtn['matrixData']['new1']['fields']['actionButtons'] ?? 'MISSING');
+
 
 // --- Folder mode, 'sitemap' strategy, folder resolves -----------------------
 $galleryImages->calls                  = [];

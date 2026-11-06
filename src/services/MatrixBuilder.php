@@ -1099,6 +1099,7 @@ class MatrixBuilder extends Component
             'cardButtonLink'         => $this->_handleCardButtonLink($craftHandle, $value),
             'cardTitle'              => [$craftHandle => CardTitle::plainText($value)],
             'cardLink'               => $this->_handleStandaloneCardLink($craftHandle, $value),
+            'cardButtons'            => $this->_handleStandaloneCardButtons($craftHandle, $value),
             'faqNodes'               => $this->_handleFaqNodes($craftHandle, $value),
             'buttonNodes'            => $this->_handleButtonNodes($craftHandle, $value),
             'uspContent'             => $this->_handleUspContent($craftHandle, $value),
@@ -1474,7 +1475,37 @@ class MatrixBuilder extends Component
             return !preg_match('/^\[[^\[\]]*\b(galler(?:y|ies))\b[^\[\]]*\]$/i', $text);
         }));
 
-        return [$handle => ContentIQImporter::$plugin->nodes->render($nodes)];
+        // ctaButton nodes are lifted into the block's actionButtons Matrix
+        // (mirrors _handleMediaNodes()) instead of rendering as inline <a>
+        // tags; imageGallery.twig loops actionButtons. A button written
+        // mid-flow therefore moves to the bottom of the block. When there are
+        // none, emit [] so a re-sync clears buttons a previous sync wrote.
+        //
+        // A layout WITHOUT actionButtons keeps the pre-1.41 behaviour: Craft's
+        // Matrix save swallows unknown nested handles, so lifting the buttons
+        // would silently lose ones that render today. Render them inline and
+        // warn once instead.
+        if (!$this->_entryTypeHasField('imageGallery', 'actionButtons')) {
+            foreach ($nodes as $node) {
+                if (is_array($node) && ($node['type'] ?? '') === 'ctaButton') {
+                    $this->_warnOnce("Image Gallery: 'imageGallery' has no 'actionButtons' field — buttons stay inline in the rich text. Pull the current Craft starter to render them as buttons.");
+                    break;
+                }
+            }
+
+            return [$handle => ContentIQImporter::$plugin->nodes->render($nodes)];
+        }
+
+        $contentNodes = array_values(array_filter(
+            $nodes,
+            static fn($node) => !is_array($node) || ($node['type'] ?? '') !== 'ctaButton',
+        ));
+
+        $result        = [$handle => ContentIQImporter::$plugin->nodes->render($contentNodes)];
+        $actionButtons = $this->_buildActionButtonsMatrix($nodes);
+        $result['actionButtons'] = $actionButtons;
+
+        return $result;
     }
 
     /**
@@ -1899,6 +1930,52 @@ class MatrixBuilder extends Component
     }
 
     /**
+     * Writes a standalone card's full button list (ContentiQ schema 1.6.0
+     * `buttons`) to its `actionButtons` Matrix.
+     *
+     * 2+ buttons → every button, in order, through the same actionButton entry
+     * construction as the hero/CTA/T&M paths. 0 or 1 → `[]` (the single link
+     * lives in `cardLink`; the empty array clears rows a previous sync wrote).
+     * Only when the standalone card layout has `actionButtons`: otherwise a
+     * 2+ card warns once and stays first-only via `cardLink`, and nothing is
+     * emitted for the missing field. 1.5.0 payloads carry no `buttons` key,
+     * so they take the `[]` path.
+     *
+     * @param string $handle Destination Matrix handle ('actionButtons').
+     * @param mixed  $value  [{label, url, target}, …] or null
+     * @return array<string, array>
+     */
+    private function _handleStandaloneCardButtons(string $handle, mixed $value): array
+    {
+        $entryType = (string)($this->getStandaloneCardsConfig()['entryType'] ?? 'standaloneCard');
+
+        if (!$this->_entryTypeHasField($entryType, $handle)) {
+            if (is_array($value) && count($value) >= 2) {
+                $this->_warnOnce("Cards: '{$entryType}' has no '{$handle}' field — cards with several buttons keep only their first button.");
+            }
+
+            return [];
+        }
+
+        $nodes = [];
+        foreach (is_array($value) ? $value : [] as $button) {
+            if (!is_array($button)) {
+                continue;
+            }
+            $nodes[] = [
+                'type'   => 'ctaButton',
+                'label'  => $button['label'] ?? '',
+                'url'    => $button['url'] ?? '',
+                'target' => $button['target'] ?? null,
+            ];
+        }
+
+        $matrix = $this->_buildActionButtonsMatrix($nodes);
+
+        return [$handle => count($matrix) >= 2 ? $matrix : []];
+    }
+
+    /**
      * Extracts the label from a {label, url} button object and renders it as CKEditor HTML.
      *
      * @param string $handle
@@ -2144,8 +2221,19 @@ class MatrixBuilder extends Component
                 }
             }
 
+            $title = $title !== '' ? $title : 'Card ' . ($index + 1);
+
+            // The starter's standaloneCard has a REQUIRED plain-text `cardTitle`
+            // field; syncs save with validation off, but the CP refuses to save
+            // a card with it blank. Mirror the entry title into it, only when
+            // the layout has the field (older layouts: nothing, no warning).
+            // A blockOverrides mapping may already have written cardTitle — keep it.
+            if (!array_key_exists('cardTitle', $fields) && $this->_entryTypeHasField((string)($this->getStandaloneCardsConfig()['entryType'] ?? 'standaloneCard'), 'cardTitle')) {
+                $fields['cardTitle'] = $title;
+            }
+
             $specs[] = [
-                'title'  => $title !== '' ? $title : 'Card ' . ($index + 1),
+                'title'  => $title,
                 'fields' => $fields,
             ];
         }
@@ -2402,7 +2490,7 @@ class MatrixBuilder extends Component
      * most prominent (lowest-numbered) level >= 2 appearing 2+ times. Nodes
      * before the first card heading are the true intro; each card heading
      * starts an item whose paragraphs/lists become the body and whose
-     * ctaButton becomes the button (last wins, as in detected mode).
+     * ctaButtons become the buttons (all collected in order; `button` is the first).
      *
      * Items are built through the standard cards innerMatrix mapping so the
      * fallback uses the same field handlers as detected-mode cards
@@ -2522,15 +2610,20 @@ class MatrixBuilder extends Component
                     'heading' => array_diff_key($node, ['type' => true]),
                     'body'    => [],
                     'button'  => null,
+                    'buttons' => [],
                     'image'   => null,
                 ];
             } elseif ($current === null) {
                 $trueIntro[] = $node;
             } elseif ($type === 'ctaButton') {
-                $current['button'] = [
-                    'label' => (string)($node['label'] ?? ''),
-                    'url'   => (string)($node['url'] ?? ''),
+                // Collect every button in order (schema 1.6.0 shape);
+                // `button` is the first, kept for older consumers.
+                $current['buttons'][] = [
+                    'label'  => (string)($node['label'] ?? ''),
+                    'url'    => (string)($node['url'] ?? ''),
+                    'target' => $node['target'] ?? null,
                 ];
+                $current['button'] = $current['buttons'][0];
             } else {
                 $current['body'][] = $node;
             }

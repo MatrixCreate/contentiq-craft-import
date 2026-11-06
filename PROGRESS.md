@@ -2,6 +2,12 @@
 
 Capped rolling log — older entries roll off verbatim to `docs/_archive/`. Durable knowledge belongs in `docs/`, not accumulated here.
 
+## Multi-button cards + gallery buttons (2026-11-06, 1.41.0, uncommitted)
+
+- Standalone card mapping gains `'buttons' => ['actionButtons','cardButtons']` (`_handleStandaloneCardButtons()`): 2+ buttons -> `actionButtons` Matrix, else `[]`; warns once if the card layout lacks the field. `button`/`cardLink` unchanged (first button). Children-fallback collects `buttons`.
+- `_handleGalleryNodes()` lifts `ctaButton`s into `actionButtons` (mid-flow buttons move to the bottom). Legacy nested card stays first-only.
+- Docs: `docs/block-mapping.md` Cards + gallery. Tests in `tests/run-transforms.php`.
+
 ## Hero video (2026-11-06, 1.40.0, uncommitted pending Ben's test)
 
 - `hero_style: video` (schema 1.5.0, R2 Royal model): `_importHeroVideos()` downloads `video.desktop/mobile.asset` via `importFromField()` with a per-call `$maxBytes` (`maxHeroVideoBytes`, 50 MiB each), writes `desktopVideo`/`mobileVideo`/`desktopPosterFrame`/`mobilePosterFrame`, forces `singleImage`; unusable Desktop Video falls back to `textImage` + one page warning, a bad Mobile Video is just dropped.

@@ -85,7 +85,7 @@ something into that space, so the placeholder would sit as literal text
 directly above the real thing. `_handleCollectionListingNodes()` (Collection
 Listing intro, matching only "listing"/"grid") and `_handleGalleryNodes()`
 (Image Gallery richText, matching only "gallery"/"galleries") each run their
-own narrow regex — read those two methods for the exact patterns. Both are
+own narrow regex — read those two methods for the exact patterns. (`_handleGalleryNodes()` also lifts `ctaButton` nodes out of the richText into the block's `actionButtons` Matrix, like `_handleMediaNodes()`; a button written mid-flow therefore moves to the bottom, and `[]` is emitted when there are none so a re-sync clears old buttons; a layout without `actionButtons` keeps the inline anchors and warns once.) Both are
 vocabulary-limited, both are scoped to a single block's single field, and
 neither touches brackets inside a sentence. Everywhere else, including the same
 words typed inside a Custom block, the text is written through verbatim.
@@ -380,6 +380,7 @@ Configured by the `standalone` key of the `cards` mapping in `defaults.php`:
         'body'    => ['cardText',  'nodes'],
         'image'   => ['cardImage', 'image'],
         'button'  => ['cardLink',  'cardLink'],
+        'buttons' => ['actionButtons', 'cardButtons'],
     ],
 ],
 ```
@@ -393,6 +394,7 @@ Field mapping:
 - **Title** — the heading reduced to plain text: tags stripped, entities
   decoded, whitespace collapsed, capped at 255 characters, falling back to
   `Card {position}` (1-based) when empty (`helpers/CardTitle`).
+- **Card Title** — the starter's `standaloneCard` has a required plain-text `cardTitle` field. `buildStandaloneCardSpecs()` mirrors the final entry title (including the `Card {position}` fallback) into it, only when the layout has the field (probed; no warning when absent). Syncs save with validation off, so the importer never failed on it, but the CP refused to save a synced card with it blank.
 - **Body** — the usual `NodesRenderer` HTML into `cardText`.
 - **Image** — the existing `ImageImportService` path into `cardImage` (the
   field is single-asset; one id is written).
@@ -401,6 +403,21 @@ Field mapping:
   in a one-item list). A button with neither label nor url writes `[]`, never
   an omitted key, so a re-sync clears a stale link. Pass 3 later upgrades the
   Url link to an Entry link where the target exists (see "Hyper link fields").
+- **Buttons (export schema 1.6.0)** — a card may carry several buttons. The wire
+  `buttons` array (all, in order) goes to the card's `actionButtons` Matrix via
+  the `cardButtons` handler, using the same `_buildActionButtonsMatrix()` entry
+  construction as hero/CTA. Rule: **2+ buttons** write every button; **0 or 1**
+  write `[]` (never omitted, so stale rows clear). `cardLink` always holds the
+  **first** button (ContentiQ 1.6.0 sends `button = buttons[0]`; 1.5.0 payloads
+  send only `button`, which is why no fallback-to-`button` code exists), and the
+  starter template ignores `cardLink` when 2+ `actionButtons` rows exist (no
+  cover link, buttons render at the bottom). A layout without `actionButtons`
+  on `standaloneCard` gets one page warning and stays first-only via `cardLink`.
+  **Visible change:** on 1.40 a multi-button card's single link was the *last*
+  button; from 1.41 it is the *first*. The children-fallback parser
+  (`_splitChildrenFallbackItems`) collects every button too, but its legacy
+  nested `card` rows (`cardButtonLink`) have no multi-button field and stay
+  first-only.
 
 `cardsInThisBlock` / `useChildPages` are legacy mode fields that upgraded projects have deleted entirely; their absence from the `entryCards` layout is the normal state, so in every mode (pass 1, pass 2 and the legacy branch) they are written only when present and never warned about (setting a field that no longer exists would throw).
 
